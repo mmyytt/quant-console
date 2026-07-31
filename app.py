@@ -63,7 +63,10 @@ st.markdown("""<style>
 .zoom-btn{font-size:11px!important;padding:4px 8px!important}
 </style>""", unsafe_allow_html=True)
 
-if not check_login(): st.stop()
+# 登录鉴权拦截 (放在所有UI之前, 登录页即使数据未就绪也能展示)
+logged_in = check_login()
+if not logged_in:
+    st.stop()
 
 # ============================================================
 # 百种指标注册表 (纯 pandas/numpy 实现, 无需 TA-Lib)
@@ -972,8 +975,9 @@ else:
 
     try:
         de = DataEngine()
-        # 始终加载15min基座, 再动态重采样
-        df_15m = de.load_15min(coin)
+        # 始终加载15min基座, 再动态重采样 (首次可能触发下载)
+        with st.spinner("加载数据中 (首次可能需要下载, 约2-3分钟)..."):
+            df_15m = de.load_15min(coin)
         # 移除时区, 避免索引匹配失败
         df_15m.index = pd.to_datetime(df_15m.index).tz_localize(None)
         dr = st.session_state.date_range
@@ -1081,5 +1085,8 @@ else:
                         config={'responsive': True, 'displayModeBar': False,
                                 'scrollZoom': False})
 
+    except FileNotFoundError as e:
+        st.warning(f"数据文件未就绪, 正在后台下载中。请稍后刷新页面。")
+        st.caption(f"详情: {e}")
     except Exception as e:
         st.warning(f"预览加载失败: {e}")

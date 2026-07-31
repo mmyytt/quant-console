@@ -26,26 +26,33 @@ warnings.filterwarnings("ignore")
 # ============================================================
 # 全局配置
 # ============================================================
-# 数据目录: 自动检测
+# 数据目录: 惰性检测 (不在import时下载, 避免启动超时)
 def _find_data_dir():
-    """查找数据目录: 本地eth_all > 项目data/ > 自动下载"""
+    """查找数据目录: 本地eth_all > 项目data/"""
     # 1) Windows 本地 eth_all
     local = r"C:\Users\myt\Desktop\eth_all"
     if os.path.isdir(local) and os.path.exists(os.path.join(local, "ETH_15m.parquet")):
         return local
-    # 2) 项目内 data/
+    # 2) 项目内 data/ (云端已下载)
     proj = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     if os.path.isdir(proj) and os.path.exists(os.path.join(proj, "ETH_15m.parquet")):
         return proj
-    # 3) 云端自动下载
-    try:
-        from data_loader import ensure_data
-        ensure_data("ETH"); ensure_data("BTC"); ensure_data("SOL")
-        return proj
-    except Exception:
-        return local  # 降级
+    return proj  # 返回路径, 首次使用时会触发下载
 
 DATA_DIR = _find_data_dir()
+
+def ensure_data_ready(coin: str = "ETH"):
+    """确保数据就绪, 不存在则下载 (惰性调用)"""
+    pq = os.path.join(DATA_DIR, f"{coin}_15m.parquet")
+    if os.path.exists(pq) and os.path.getsize(pq) > 100000:
+        return True
+    try:
+        from data_loader import ensure_data
+        ensure_data(coin)
+        return True
+    except Exception as e:
+        print(f"[DataEngine] Data download failed: {e}")
+        return False
 
 # 交易成本
 TAKER_FEE = 0.0005    # 手续费 0.05%
@@ -217,7 +224,9 @@ class DataEngine:
 
         path = os.path.join(self.data_dir, f"{coin}_15m.parquet")
         if not os.path.exists(path):
-            raise FileNotFoundError(f"数据文件不存在: {path}")
+            # 云端: 尝试下载
+            if not ensure_data_ready(coin):
+                raise FileNotFoundError(f"数据文件不存在且下载失败: {path}")
 
         df = pd.read_parquet(path)
 
