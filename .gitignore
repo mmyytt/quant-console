@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.env
+data/
+*.pkl
+*.zip
+status.json
+trades.json
+config.json
+backtest_result.json
+*.csv
+tmp/
+_tmp_*
