@@ -797,7 +797,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         bull_th = st.slider("牛市判定", 0.10, 0.60, 0.30, 0.05, key="mf_bt")
 
     st.divider()
-    submitted = st.form_submit_button("🚀 应用配置 / 开始回测", use_container_width=True, type="primary")
+    submitted = st.form_submit_button("🚀 确认参数并运行回测", use_container_width=True, type="primary")
 
 st.sidebar.divider()
 # 导出 + 刷新 + 登出 (在form外面)
