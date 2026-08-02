@@ -85,246 +85,273 @@ def check_data_freshness():
 check_data_freshness()
 
 # ============================================================
-# 百种指标注册表 (纯 pandas/numpy 实现, 无需 TA-Lib)
+# 统一指标元数据 Schema (Schema-Driven UI)
 # ============================================================
-INDICATOR_REGISTRY = {
+# 格式: {"key": {"name": "显示名", "category": "分类", "desc": "描述",
+#               "params": {"param_key": {"label": "参数名", "default": v, "min": a, "max": b, "step": s, "help": "..."}}}}
+INDICATOR_SCHEMA = {
     # ---- 趋势类 ----
-    "EMA 双均线": {
-        "category": "趋势类",
-        "params": {
-            "短期快线": (3, 30, 7, 1, "反应敏捷的短线趋势, 用于捕捉短期冲高/回调"),
-            "长期慢线": (10, 100, 21, 1, "反应平缓的长线趋势, 用于判断大方向顺逆"),
-        },
+    "ema": {
+        "name": "EMA 双均线", "category": "趋势类",
         "desc": "快线上穿慢线=做多, 下穿=做空",
-        "compute": lambda df, p: _ema_cross(df, p["短期快线"], p["长期慢线"]),
-    },
-    "SMA 三均线": {
-        "category": "趋势类",
         "params": {
-            "短期": (2, 30, 5, 1, "最短周期均线"),
-            "中期": (5, 60, 10, 1, "中等周期均线"),
-            "长期": (10, 120, 30, 1, "最长周期均线"),
+            "EMA_short": {"label": "短期快线周期", "default": 7, "min": 3, "max": 50, "help": "反应敏捷的短线趋势, 用于捕捉短期冲高/回调"},
+            "EMA_long":  {"label": "长期慢线周期", "default": 21, "min": 10, "max": 200, "help": "反应平缓的长线趋势, 用于判断大方向顺逆"},
         },
+        "compute": lambda df, p: _ema_cross(df, p["EMA_short"], p["EMA_long"]),
+    },
+    "sma": {
+        "name": "SMA 三均线", "category": "趋势类",
         "desc": "短>中>长=多头排列",
-        "compute": lambda df, p: _sma_align(df, p["短期"], p["中期"], p["长期"]),
-    },
-    "SuperTrend 超级趋势": {
-        "category": "趋势类",
         "params": {
-            "ATR周期": (5, 30, 10, 1, "计算波动率的周期"),
-            "乘数": (1.0, 5.0, 3.0, 0.5, "触发信号的波动倍数"),
+            "SMA_s": {"label": "短期均线", "default": 5, "min": 2, "max": 30},
+            "SMA_m": {"label": "中期均线", "default": 10, "min": 5, "max": 60},
+            "SMA_l": {"label": "长期均线", "default": 30, "min": 10, "max": 120},
         },
+        "compute": lambda df, p: _sma_align(df, p["SMA_s"], p["SMA_m"], p["SMA_l"]),
+    },
+    "supertrend": {
+        "name": "SuperTrend 超级趋势", "category": "趋势类",
         "desc": "价格上穿SuperTrend=做多, 下穿=做空",
-        "compute": lambda df, p: _supertrend(df, p["ATR周期"], p["乘数"]),
-    },
-    "ADX/DMI 趋势强度": {
-        "category": "趋势类",
         "params": {
-            "ADX周期": (5, 30, 14, 1, "ADX平滑周期"),
-            "强趋势阈值": (10, 50, 25, 1, "ADX超过此值视为强趋势"),
+            "ATR_period": {"label": "ATR周期", "default": 10, "min": 5, "max": 30, "help": "计算波动率的周期"},
+            "multiplier": {"label": "乘数", "default": 3.0, "min": 1.0, "max": 5.0, "step": 0.5, "help": "触发信号的波动倍数"},
         },
+        "compute": lambda df, p: _supertrend(df, p["ATR_period"], p["multiplier"]),
+    },
+    "adx": {
+        "name": "ADX/DMI 趋势强度", "category": "趋势类",
         "desc": "+DI>-DI 且 ADX>阈值=做多",
-        "compute": lambda df, p: _adx_signal(df, p["ADX周期"], p["强趋势阈值"]),
-    },
-    "Ichimoku 一目均衡": {
-        "category": "趋势类",
         "params": {
-            "转换线": (5, 20, 9, 1, "短期转折线周期"),
-            "基准线": (10, 40, 26, 1, "中期基准线周期"),
+            "ADX_period": {"label": "ADX周期", "default": 14, "min": 5, "max": 30, "help": "ADX平滑周期"},
+            "ADX_threshold": {"label": "强趋势阈值", "default": 25, "min": 10, "max": 50, "help": "ADX超过此值视为强趋势"},
         },
+        "compute": lambda df, p: _adx_signal(df, p["ADX_period"], p["ADX_threshold"]),
+    },
+    "ichimoku": {
+        "name": "Ichimoku 一目均衡", "category": "趋势类",
         "desc": "价格>云层=做多, <云层=做空",
-        "compute": lambda df, p: _ichimoku(df, p["转换线"], p["基准线"]),
-    },
-    "Parabolic SAR": {
-        "category": "趋势类",
         "params": {
-            "加速步长": (0.01, 0.1, 0.02, 0.01, "AF加速因子步长"),
-            "最大加速": (0.1, 0.5, 0.2, 0.05, "AF最大值"),
+            "tenkan": {"label": "转换线周期", "default": 9, "min": 5, "max": 20, "help": "短期转折线"},
+            "kijun": {"label": "基准线周期", "default": 26, "min": 10, "max": 40, "help": "中期基准线"},
         },
+        "compute": lambda df, p: _ichimoku(df, p["tenkan"], p["kijun"]),
+    },
+    "psar": {
+        "name": "Parabolic SAR", "category": "趋势类",
         "desc": "SAR反转=反向信号",
-        "compute": lambda df, p: _psar(df, p["加速步长"], p["最大加速"]),
+        "params": {
+            "step": {"label": "加速步长", "default": 0.02, "min": 0.01, "max": 0.1, "step": 0.01, "help": "AF加速因子步长"},
+            "maximum": {"label": "最大加速", "default": 0.2, "min": 0.1, "max": 0.5, "step": 0.05, "help": "AF最大值"},
+        },
+        "compute": lambda df, p: _psar(df, p["step"], p["maximum"]),
     },
 
     # ---- 摆动类 ----
-    "RSI 相对强弱": {
-        "category": "摆动类",
-        "params": {
-            "RSI周期": (2, 50, 14, 1, "RSI计算周期, 14为标准值"),
-            "超卖阈值": (10, 40, 30, 1, "低于此值视为超卖, 做多信号"),
-            "超买阈值": (60, 90, 70, 1, "高于此值视为超买, 做空信号"),
-        },
+    "rsi": {
+        "name": "RSI 相对强弱", "category": "摆动类",
         "desc": "RSI<超卖=做多, >超买=做空",
-        "compute": lambda df, p: _rsi_signal(df, p["RSI周期"], p["超卖阈值"], p["超买阈值"]),
-    },
-    "KDJ 随机指标": {
-        "category": "摆动类",
         "params": {
-            "KDJ_N": (2, 20, 9, 1, "RSV计算周期"),
-            "K平滑": (2, 10, 3, 1, "K值平滑参数"),
-            "D平滑": (2, 10, 3, 1, "D值平滑参数"),
+            "RSI_period": {"label": "RSI周期", "default": 14, "min": 2, "max": 50, "help": "标准值14, 越小越灵敏"},
+            "RSI_oversold": {"label": "超卖阈值", "default": 30, "min": 10, "max": 40, "help": "低于此值视为超卖, 做多信号"},
+            "RSI_overbought": {"label": "超买阈值", "default": 70, "min": 60, "max": 90, "help": "高于此值视为超买, 做空信号"},
         },
+        "compute": lambda df, p: _rsi_signal(df, p["RSI_period"], p["RSI_oversold"], p["RSI_overbought"]),
+    },
+    "kdj": {
+        "name": "KDJ 随机指标", "category": "摆动类",
         "desc": "K上穿D且<30=做多, K下穿D且>70=做空",
-        "compute": lambda df, p: _kdj_signal(df, p["KDJ_N"], p["K平滑"], p["D平滑"]),
-    },
-    "MACD 异同均线": {
-        "category": "摆动类",
         "params": {
-            "MACD快线": (2, 30, 12, 1, "短期EMA周期, 反应灵敏"),
-            "MACD慢线": (5, 50, 26, 1, "长期EMA周期, 反应平缓"),
-            "信号线": (2, 20, 9, 1, "MACD的EMA平滑线"),
+            "K_period": {"label": "RSV周期", "default": 9, "min": 2, "max": 20, "help": "KDJ计算周期"},
+            "K_smooth": {"label": "K平滑周期", "default": 3, "min": 2, "max": 10, "help": "K值平滑参数"},
+            "D_smooth": {"label": "D平滑周期", "default": 3, "min": 2, "max": 10, "help": "D值平滑参数"},
         },
+        "compute": lambda df, p: _kdj_signal(df, p["K_period"], p["K_smooth"], p["D_smooth"]),
+    },
+    "macd": {
+        "name": "MACD 异同均线", "category": "摆动类",
         "desc": "MACD上穿信号线=做多, 动能指标",
-        "compute": lambda df, p: _macd_signal(df, p["MACD快线"], p["MACD慢线"], p["信号线"]),
-    },
-    "CCI 商品通道": {
-        "category": "摆动类",
         "params": {
-            "CCI周期": (5, 50, 20, 1, "商品通道指数周期"),
-            "超卖阈值": (-200, -50, -100, 1, "低于此值做多"),
-            "超买阈值": (50, 200, 100, 1, "高于此值做空"),
+            "MACD_fast": {"label": "快线周期", "default": 12, "min": 2, "max": 30, "help": "短期EMA, 反应灵敏"},
+            "MACD_slow": {"label": "慢线周期", "default": 26, "min": 5, "max": 50, "help": "长期EMA, 反应平缓"},
+            "MACD_signal": {"label": "信号线周期", "default": 9, "min": 2, "max": 20, "help": "MACD的EMA平滑线"},
         },
-        "desc": "CCI<超卖=做多, CCI>超买=做空",
-        "compute": lambda df, p: _cci_signal(df, p["CCI周期"], p["超卖阈值"], p["超买阈值"]),
+        "compute": lambda df, p: _macd_signal(df, p["MACD_fast"], p["MACD_slow"], p["MACD_signal"]),
     },
-    "StochRSI": {
-        "category": "摆动类",
+    "cci": {
+        "name": "CCI 商品通道", "category": "摆动类",
+        "desc": "CCI<超卖=做多, >超买=做空",
         "params": {
-            "周期": (5, 30, 14, 1, "StochRSI平滑周期"),
-            "超卖": (10, 40, 20, 1, "低于此值做多"),
-            "超买": (60, 90, 80, 1, "高于此值做空"),
+            "CCI_period": {"label": "CCI周期", "default": 20, "min": 5, "max": 50, "help": "商品通道指数周期"},
+            "CCI_oversold": {"label": "超卖阈值", "default": -100, "min": -200, "max": -50, "help": "低于此值做多"},
+            "CCI_overbought": {"label": "超买阈值", "default": 100, "min": 50, "max": 200, "help": "高于此值做空"},
         },
+        "compute": lambda df, p: _cci_signal(df, p["CCI_period"], p["CCI_oversold"], p["CCI_overbought"]),
+    },
+    "stochrsi": {
+        "name": "StochRSI", "category": "摆动类",
         "desc": "StochRSI<超卖=做多, >超买=做空",
-        "compute": lambda df, p: _stochrsi(df, p["周期"], p["超卖"], p["超买"]),
-    },
-    "Williams %R": {
-        "category": "摆动类",
         "params": {
-            "周期": (5, 30, 14, 1, "威廉指标周期"),
-            "超卖": (-100, -50, -80, 1, "低于此值做多"),
-            "超买": (-50, 0, -20, 1, "高于此值做空"),
+            "Stoch_period": {"label": "周期", "default": 14, "min": 5, "max": 30, "help": "StochRSI平滑周期"},
+            "Stoch_oversold": {"label": "超卖阈值", "default": 20, "min": 10, "max": 40, "help": "低于此值做多"},
+            "Stoch_overbought": {"label": "超买阈值", "default": 80, "min": 60, "max": 90, "help": "高于此值做空"},
         },
-        "desc": "%R<超卖=做多, %R>超买=做空",
-        "compute": lambda df, p: _willr(df, p["周期"], p["超卖"], p["超买"]),
+        "compute": lambda df, p: _stochrsi(df, p["Stoch_period"], p["Stoch_oversold"], p["Stoch_overbought"]),
     },
-    "Awesome Oscillator": {
-        "category": "摆动类", "params": {},
+    "willr": {
+        "name": "Williams %R", "category": "摆动类",
+        "desc": "%R<超卖=做多, >超买=做空",
+        "params": {
+            "WR_period": {"label": "周期", "default": 14, "min": 5, "max": 30, "help": "威廉指标周期"},
+            "WR_oversold": {"label": "超卖阈值", "default": -80, "min": -100, "max": -50, "help": "低于此值做多"},
+            "WR_overbought": {"label": "超买阈值", "default": -20, "min": -50, "max": 0, "help": "高于此值做空"},
+        },
+        "compute": lambda df, p: _willr(df, p["WR_period"], p["WR_oversold"], p["WR_overbought"]),
+    },
+    "ao": {
+        "name": "Awesome Oscillator", "category": "摆动类",
         "desc": "AO上穿0轴=做多, 下穿=做空",
+        "params": {},
         "compute": lambda df, p: _ao_signal(df),
     },
 
-    # ---- 通道/支撑阻力类 ----
-    "布林带 Bollinger": {
-        "category": "通道/支撑",
-        "params": {
-            "布林带周期": (5, 50, 20, 1, "布林带中轨均线周期"),
-            "标准差倍数": (1.0, 4.0, 2.0, 0.5, "带宽=标准差*倍数"),
-        },
+    # ---- 通道/支撑 ----
+    "bollinger": {
+        "name": "布林带 Bollinger", "category": "通道/支撑",
         "desc": "价格触下轨=做多, 触上轨=做空",
-        "compute": lambda df, p: _bb_signal(df, p["布林带周期"], p["标准差倍数"]),
-    },
-    "Keltner 通道": {
-        "category": "通道/支撑",
         "params": {
-            "EMA周期": (5, 50, 20, 1, "中轨EMA周期"),
-            "ATR倍数": (1.0, 4.0, 2.0, 0.5, "带宽=ATR*倍数"),
+            "BB_period": {"label": "中轨周期", "default": 20, "min": 5, "max": 50, "help": "布林带中轨均线周期"},
+            "BB_std": {"label": "标准差倍数", "default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "help": "带宽=标准差*倍数"},
         },
+        "compute": lambda df, p: _bb_signal(df, p["BB_period"], p["BB_std"]),
+    },
+    "keltner": {
+        "name": "Keltner 通道", "category": "通道/支撑",
         "desc": "价格触下轨=做多, 触上轨=做空",
-        "compute": lambda df, p: _keltner(df, p["EMA周期"], p["ATR倍数"]),
-    },
-    "Donchian 通道": {
-        "category": "通道/支撑",
         "params": {
-            "通道周期": (5, 100, 20, 1, "最高/最低价回看周期"),
+            "KC_ema": {"label": "EMA周期", "default": 20, "min": 5, "max": 50, "help": "中轨EMA周期"},
+            "KC_mult": {"label": "ATR倍数", "default": 2.0, "min": 1.0, "max": 4.0, "step": 0.5, "help": "带宽=ATR*倍数"},
         },
+        "compute": lambda df, p: _keltner(df, p["KC_ema"], p["KC_mult"]),
+    },
+    "donchian": {
+        "name": "Donchian 通道", "category": "通道/支撑",
         "desc": "突破上轨=做多, 突破下轨=做空",
-        "compute": lambda df, p: _donchian(df, p["通道周期"]),
-    },
-    "斐波那契回调": {
-        "category": "通道/支撑",
         "params": {
-            "回看K线数": (20, 200, 50, 1, "计算高低点的回看周期"),
+            "DC_period": {"label": "通道周期", "default": 20, "min": 5, "max": 100, "help": "最高/最低价回看周期"},
         },
+        "compute": lambda df, p: _donchian(df, p["DC_period"]),
+    },
+    "fibonacci": {
+        "name": "斐波那契回调", "category": "通道/支撑",
         "desc": "回调到0.382/0.618=做多, 跌破0.618=做空",
-        "compute": lambda df, p: _fibonacci(df, p["回看K线数"]),
+        "params": {
+            "FIB_lookback": {"label": "回看K线数", "default": 50, "min": 20, "max": 200, "help": "计算高低点的回看周期"},
+        },
+        "compute": lambda df, p: _fibonacci(df, p["FIB_lookback"]),
     },
 
-    # ---- 成交量类 ----
-    "OBV 能量潮": {
-        "category": "成交量",
-        "params": {
-            "OBV均线": (5, 50, 20, 1, "OBV的均线平滑周期"),
-        },
+    # ---- 成交量 ----
+    "obv": {
+        "name": "OBV 能量潮", "category": "成交量",
         "desc": "OBV上穿MA=做多, 下穿=做空",
-        "compute": lambda df, p: _obv_signal(df, p["OBV均线"]),
+        "params": {
+            "OBV_ma": {"label": "OBV均线周期", "default": 20, "min": 5, "max": 50, "help": "OBV的均线平滑周期"},
+        },
+        "compute": lambda df, p: _obv_signal(df, p["OBV_ma"]),
     },
-    "VWAP 均价": {
-        "category": "成交量", "params": {},
+    "vwap": {
+        "name": "VWAP 均价", "category": "成交量",
         "desc": "价格>VWAP=做多, <VWAP=做空",
+        "params": {},
         "compute": lambda df, p: _vwap_signal(df),
     },
-    "MFI 资金流量": {
-        "category": "成交量",
-        "params": {
-            "MFI周期": (5, 30, 14, 1, "资金流量指数周期"),
-            "超卖": (10, 40, 20, 1, "低于此值做多"),
-            "超买": (60, 90, 80, 1, "高于此值做空"),
-        },
+    "mfi": {
+        "name": "MFI 资金流量", "category": "成交量",
         "desc": "MFI<超卖=做多, >超买=做空",
-        "compute": lambda df, p: _mfi_signal(df, p["MFI周期"], p["超卖"], p["超买"]),
-    },
-    "CMF 柴金流量": {
-        "category": "成交量",
         "params": {
-            "CMF周期": (5, 50, 20, 1, "柴金流量指数平滑周期"),
+            "MFI_period": {"label": "MFI周期", "default": 14, "min": 5, "max": 30, "help": "资金流量指数周期"},
+            "MFI_oversold": {"label": "超卖阈值", "default": 20, "min": 10, "max": 40, "help": "低于此值做多"},
+            "MFI_overbought": {"label": "超买阈值", "default": 80, "min": 60, "max": 90, "help": "高于此值做空"},
         },
+        "compute": lambda df, p: _mfi_signal(df, p["MFI_period"], p["MFI_oversold"], p["MFI_overbought"]),
+    },
+    "cmf": {
+        "name": "CMF 柴金流量", "category": "成交量",
         "desc": "CMF>0=做多, <0=做空",
-        "compute": lambda df, p: _cmf_signal(df, p["CMF周期"]),
-    },
-    "成交量突破": {
-        "category": "成交量",
         "params": {
-            "均量周期": (5, 50, 20, 1, "成交量均线周期"),
-            "放大倍数": (1.0, 5.0, 1.5, 0.1, "量>均量*倍数视为放量"),
+            "CMF_period": {"label": "CMF周期", "default": 20, "min": 5, "max": 50, "help": "柴金流量指数平滑周期"},
         },
+        "compute": lambda df, p: _cmf_signal(df, p["CMF_period"]),
+    },
+    "vol_break": {
+        "name": "成交量突破", "category": "成交量",
         "desc": "量>均量*倍数 + 收阳=做多",
-        "compute": lambda df, p: _vol_breakout(df, p["均量周期"], p["放大倍数"]),
+        "params": {
+            "VOL_ma": {"label": "均量周期", "default": 20, "min": 5, "max": 50, "help": "成交量均线周期"},
+            "VOL_mult": {"label": "放大倍数", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.1, "help": "量>均量*倍数视为放量"},
+        },
+        "compute": lambda df, p: _vol_breakout(df, p["VOL_ma"], p["VOL_mult"]),
     },
 
     # ---- K线形态 ----
-    "锤头/倒锤": {
-        "category": "K线形态", "params": {},
+    "hammer": {
+        "name": "锤头/倒锤", "category": "K线形态",
         "desc": "下影线>实体2倍=锤头做多",
+        "params": {},
         "compute": lambda df, p: _hammer(df),
     },
-    "吞没形态": {
-        "category": "K线形态", "params": {},
+    "engulfing": {
+        "name": "吞没形态", "category": "K线形态",
         "desc": "阳包阴=做多, 阴包阳=做空",
+        "params": {},
         "compute": lambda df, p: _engulfing(df),
     },
-    "早晨/黄昏之星": {
-        "category": "K线形态", "params": {},
+    "star": {
+        "name": "早晨/黄昏之星", "category": "K线形态",
         "desc": "早晨之星=做多, 黄昏之星=做空",
+        "params": {},
         "compute": lambda df, p: _star(df),
     },
-    "三连兵": {
-        "category": "K线形态", "params": {},
+    "soldiers": {
+        "name": "三连兵", "category": "K线形态",
         "desc": "三连阳=做多, 三连阴=做空",
+        "params": {},
         "compute": lambda df, p: _three_soldiers(df),
     },
-    "十字星 Doji": {
-        "category": "K线形态",
-        "params": {
-            "影线比": (0.5, 2.0, 1.0, 0.1, "下影/上影长度比"),
-        },
+    "doji": {
+        "name": "十字星 Doji", "category": "K线形态",
         "desc": "下影线>上影线=做多",
-        "compute": lambda df, p: _doji(df, p["影线比"]),
+        "params": {
+            "DOJI_ratio": {"label": "影线比", "default": 1.0, "min": 0.5, "max": 2.0, "step": 0.1, "help": "下影/上影长度比"},
+        },
+        "compute": lambda df, p: _doji(df, p["DOJI_ratio"]),
     },
-    "Pinbar 反转": {
-        "category": "K线形态", "params": {},
+    "pinbar": {
+        "name": "Pinbar 反转", "category": "K线形态",
         "desc": "长下影线拒绝低位=做多",
+        "params": {},
         "compute": lambda df, p: _pinbar(df),
     },
 }
+
+# 从 Schema 自动生成 Registry (保持向后兼容)
+INDICATOR_REGISTRY = {}
+for _key, _schema in INDICATOR_SCHEMA.items():
+    # 转换 params: schema格式 → 旧tuple格式
+    _old_params = {}
+    for _pk, _pv in _schema["params"].items():
+        _step = _pv.get("step", 1)
+        _help = _pv.get("help", "")
+        _old_params[_pv["label"]] = (_pv["min"], _pv["max"], _pv["default"], _step, _help)
+    INDICATOR_REGISTRY[_schema["name"]] = {
+        "category": _schema["category"],
+        "params": _old_params,
+        "desc": _schema["desc"],
+        "compute": _schema["compute"],
+    }
+
+# (旧注册表已由Schema自动生成, 此段删除)
 
 
 # ============================================================
@@ -729,7 +756,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         if cat not in categories: categories[cat] = []
         categories[cat].append(name)
     if "selected_indicators" not in st.session_state:
-        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"短期快线": 7, "长期慢线": 21}}}
+        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"短期快线周期": 7, "长期慢线周期": 21}}}
 
     for cat_name, ind_names in categories.items():
         with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
