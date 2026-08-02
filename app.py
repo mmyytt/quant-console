@@ -686,6 +686,24 @@ class DynamicStrategy(StrategyBase):
             df['regime'] = 'range'; df.loc[slope > 0.02, 'regime'] = 'bull'; df.loc[slope < -0.02, 'regime'] = 'bear'
             df['br'] = (df['regime'] == 'bear').astype(int).rolling(200, min_periods=1).mean()
 
+        # === 交易方向过滤: 牛熊绑定 + 交易模式 ===
+        trade_mode = self.selected.get("_trade_mode", "双向")
+        regime_filter = self.selected.get("_regime_filter", True)
+
+        if regime_filter:
+            # 牛市: 禁止做空
+            if 'regime' in df.columns:
+                df.loc[(df['regime'] == 'bull') & (df['signal'] == -1), 'signal'] = 0
+            # 熊市: 禁止做多
+            if 'regime' in df.columns:
+                df.loc[(df['regime'] == 'bear') & (df['signal'] == 1), 'signal'] = 0
+
+        # 交易模式覆盖
+        if trade_mode == "仅做多":
+            df.loc[df['signal'] == -1, 'signal'] = 0
+        elif trade_mode == "仅做空":
+            df.loc[df['signal'] == 1, 'signal'] = 0
+
         # === 共振评分: 统计用户指定的3个因子同时触发的情况 ===
         res_factors = self.selected.get("_resonance_factors")
         if not isinstance(res_factors, list): res_factors = []
@@ -762,6 +780,12 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
     leverage = c1.slider("杠杆", 1, 20, 3, 1)
     initial_capital = c2.number_input("初始资金", 100, 1000000, 10000, 1000)
+    st.caption("交易方向控制")
+    c1, c2 = st.columns(2)
+    trade_mode = c1.selectbox("交易模式", ["双向交易 (做多+做空)", "仅做多 (Only Long)", "仅做空 (Only Short)"], index=0,
+                              help="双向=牛市做多熊市做空; 仅做多=永远不开空; 仅做空=永远不开多")
+    regime_filter_enabled = c2.checkbox("牛熊方向过滤", True,
+        help="牛市禁止做空, 熊市禁止做多, 震荡市双向允许。关闭则不限制方向。")
 
     st.divider(); st.caption("🧱 指标积木")
     st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
@@ -1145,6 +1169,10 @@ if submitted:
         elif "_resonance_factors" in st.session_state.selected_indicators:
             del st.session_state.selected_indicators["_resonance_factors"]
 
+        # 交易方向参数
+        st.session_state.selected_indicators["_trade_mode"] = trade_mode
+        st.session_state.selected_indicators["_regime_filter"] = regime_filter_enabled
+
         # 加权打分模式参数
         if use_weighted:
             st.session_state.selected_indicators["_weighted"] = True
@@ -1228,6 +1256,14 @@ if submitted:
     c[5].metric("交易数", metrics.get('total_trades', 0))
     final_eq = result.get('final_equity', initial_capital)
     c[6].metric("最终权益", f"${final_eq:,.0f}")
+
+    # 多空统计
+    closed_trades = result.get('closed_trades', [])
+    long_trades = [t for t in closed_trades if t.get('side') == 'LONG']
+    short_trades = [t for t in closed_trades if t.get('side') == 'SHORT']
+    long_wr = len([t for t in long_trades if t.get('pnl_pct', 0) > 0]) / len(long_trades) * 100 if long_trades else 0
+    short_wr = len([t for t in short_trades if t.get('pnl_pct', 0) > 0]) / len(short_trades) * 100 if short_trades else 0
+    st.caption(f"做多: {len(long_trades)}笔 (胜率{long_wr:.0f}%) | 做空: {len(short_trades)}笔 (胜率{short_wr:.0f}%)")
 
     if oos_m:
         c1, c2 = st.columns(2)
