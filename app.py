@@ -511,7 +511,25 @@ class DynamicStrategy(StrategyBase):
             df['regime'] = 'range'; df.loc[slope > 0.02, 'regime'] = 'bull'; df.loc[slope < -0.02, 'regime'] = 'bear'
             df['br'] = (df['regime'] == 'bear').astype(int).rolling(200, min_periods=1).mean()
 
-        df['score'] = abs(df['signal'])
+        # === 共振评分: 统计用户指定的3个因子同时触发的情况 ===
+        res_factors = self.selected.get("_resonance_factors", [])
+        df['resonance_score'] = 0
+        if res_factors:
+            for fname in res_factors:
+                if not fname: continue
+                info = INDICATOR_REGISTRY.get(fname)
+                if not info: continue
+                try:
+                    info["compute"](df, self.selected.get(fname, {}).get("params", {}))
+                    if "_long" in df.columns or "_short" in df.columns:
+                        has_l = "_long" in df.columns and df["_long"].any()
+                        has_s = "_short" in df.columns and df["_short"].any()
+                        if has_l or has_s:
+                            df['resonance_score'] += ((df.get('_long', False) | df.get('_short', False)).astype(int))
+                        if "_long" in df.columns: df.drop("_long", axis=1, inplace=True)
+                        if "_short" in df.columns: df.drop("_short", axis=1, inplace=True)
+                except: pass
+        df['score'] = df['resonance_score'] if res_factors else abs(df['signal'])
         return df
 
 
@@ -639,6 +657,17 @@ with st.sidebar.expander("🛡️ 风控", expanded=False):
     bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
     lock_streak = st.number_input("连亏锁仓(笔)", 1, 10, 3)
     lock_days = st.number_input("锁仓天数", 1, 30, 2)
+
+with st.sidebar.expander("🔗 多因子共振", expanded=False):
+    st.caption("选3个不同维度因子, 同时满足=强信号")
+    resonance_enabled = st.checkbox("启用共振打分", False, key="res_on")
+    cat_list = ["趋势类", "摆动类", "通道/支撑", "成交量", "K线形态"]
+    c1, c2, c3 = st.columns(3)
+    res_f1 = c1.selectbox("因子1", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] == cat_list[0]], key="rf1")
+    res_f2 = c2.selectbox("因子2", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[1:3]], key="rf2")
+    res_f3 = c3.selectbox("因子3", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[3:]], key="rf3")
+    if resonance_enabled:
+        st.caption(f"共振: {' + '.join(f for f in [res_f1,res_f2,res_f3] if f) or '未选'}")
 
 with st.sidebar.expander("🔬 多因子牛熊", expanded=False):
     mf_enabled = st.checkbox("启用", True, key="mf_on")
@@ -828,6 +857,14 @@ if st.button("🚀 运行策略回测", type="primary", use_container_width=True
             df_train, df_test = df.copy(), None
 
         # 策略
+        # 注入共振因子到selected
+        if resonance_enabled:
+            rf = [f for f in [res_f1, res_f2, res_f3] if f]
+            if rf:
+                st.session_state.selected_indicators["_resonance_factors"] = rf
+        elif "_resonance_factors" in st.session_state.selected_indicators:
+            del st.session_state.selected_indicators["_resonance_factors"]
+
         strategy = DynamicStrategy(
             selected=st.session_state.selected_indicators,
             use_and=use_and,
@@ -975,6 +1012,20 @@ if st.button("🚀 运行策略回测", type="primary", use_container_width=True
     st.plotly_chart(fig_kl, use_container_width=True,
                     config={'responsive': True, 'displayModeBar': False,
                             'scrollZoom': False})
+
+    # 共振对比 (仅当启用共振时显示)
+    if resonance_enabled and res_f1 and closed:
+        strong = [t for t in closed if t.get('resonance_score', 0) >= 3]
+        weak = [t for t in closed if 1 <= t.get('resonance_score', 0) <= 2]
+        if strong or weak:
+            st.subheader("🔗 共振效果对比")
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            def _wr(ts): return len([t for t in ts if t.get('pnl_pct',0)>0])/len(ts)*100 if ts else 0
+            def _ar(ts): return sum(t.get('pnl_pct',0) for t in ts) if ts else 0
+            rc1.metric("类型", "强信号(3分共振)", delta=f"{len(strong)}笔")
+            rc2.metric("胜率", f"{_wr(strong):.0f}%", delta=f"{_wr(strong)-_wr(closed):+.0f}% vs 全部")
+            rc3.metric("累计盈亏", f"{_ar(strong):+.1f}%")
+            rc4.metric("弱信号(1-2分)", f"{len(weak)}笔", delta=f"胜率{_wr(weak):.0f}%")
 
     # 交易记录
     if closed:

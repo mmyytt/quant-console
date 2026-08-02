@@ -719,10 +719,13 @@ class BacktestEngineV2:
             if bear_ratio > self.bear_ratio_limit:
                 continue
 
+            # 共振分 (多因子共振策略用)
+            resonance_score = int(row.get('resonance_score', 0)) if 'resonance_score' in row.index else 0
             candidates.append({
                 'coin': coin,
                 'side': 'LONG' if signal == 1 else 'SHORT',
                 'score': int(score) if not pd.isna(score) else 1,
+                'resonance_score': resonance_score,
                 'regime': str(regime),
                 'price': float(row['open']),  # 用开盘价撮合!
             })
@@ -787,6 +790,8 @@ class BacktestEngineV2:
             tp_price = price * (1 - tp_price_margin / lev)
             sl_price = price * (1 + sl_price_margin / lev)
 
+        # 从candidate提取共振分 (如果存在)
+        res_score = best.get('resonance_score', 0) if 'best' in dir() else 0
         pos = {
             'coin': coin,
             'side': side,
@@ -795,6 +800,7 @@ class BacktestEngineV2:
             'margin': margin,
             'alloc': alloc,
             'regime': regime,
+            'resonance_score': res_score,
             'tp_price': tp_price,
             'sl_price': sl_price,
             'open_time': ts,
@@ -838,6 +844,7 @@ class BacktestEngineV2:
             'contracts': pos['contracts'],
             'margin': round(margin, 2),
             'regime': pos.get('regime', '?'),
+            'resonance_score': pos.get('resonance_score', 0),
             'reason': reason,
             'pnl': round(pnl_usd, 2),
             'pnl_pct': round(margin_pnl_pct * 100, 2),  # 保证金%
