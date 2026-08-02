@@ -518,7 +518,31 @@ class DynamicStrategy(StrategyBase):
 # ============================================================
 # Sidebar: 基础设置
 # ============================================================
-st.sidebar.title("📊 控制台 v3.1")
+st.sidebar.title("📊 马总控制台 v3.2")
+
+# ============================================================
+# 缓存数据加载 (避免每次切换参数都重新读取)
+# ============================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_cached_15min(coin: str):
+    """缓存15min数据加载, 1小时有效"""
+    de = DataEngine()
+    return de.load_15min(coin)
+
+@st.cache_data(ttl=600, show_spinner=False)
+def resample_cached(df_15m, period: str):
+    """缓存重采样结果, 10分钟有效"""
+    from pandas import DataFrame
+    if period == "15m":
+        return df_15m.copy()
+    rule_map = {"1h": "1h", "4h": "4h", "1D": "1d"}
+    rule = rule_map.get(period, "4h")
+    df = df_15m.resample(rule, label="left", closed="left").agg({
+        "open": "first", "high": "max", "low": "min", "close": "last",
+        "vol": "sum",
+    }).dropna()
+    df["quote_vol"] = ((df["high"] + df["low"] + df["close"]) / 3 * df["vol"])
+    return df
 
 with st.sidebar.expander("📋 基础设置", expanded=True):
     coin = st.selectbox("标的", ["ETH", "BTC", "SOL"], 0)
@@ -974,32 +998,16 @@ else:
             st.rerun()
 
     try:
-        de = DataEngine()
-        # 始终加载15min基座, 再动态重采样 (首次可能触发下载)
-        with st.spinner("加载数据中 (首次可能需要下载, 约2-3分钟)..."):
-            df_15m = de.load_15min(coin)
-        # 移除时区, 避免索引匹配失败
+        # 缓存加载 + 缓存重采样
+        df_15m = load_cached_15min(coin)
         df_15m.index = pd.to_datetime(df_15m.index).tz_localize(None)
         dr = st.session_state.date_range
         if dr:
             df_15m = df_15m.loc[dr[0]:dr[1]]
-        print(f"[数据] 过滤前: {de.load_15min(coin).index.min()} ~ {de.load_15min(coin).index.max()}, "
-              f"过滤后: {df_15m.index.min()} ~ {df_15m.index.max()}, {len(df_15m)}根", flush=True)
 
         chart_period = st.session_state.chart_period
-        if chart_period == "15m":
-            df_pv = df_15m.copy()
-        else:
-            rule_map = {"1h": "1h", "4h": "4h", "1D": "1d"}
-            rule = rule_map.get(chart_period, "4h")
-            df_pv = df_15m.resample(rule, label="left", closed="left").agg({
-                "open": "first", "high": "max", "low": "min", "close": "last",
-                "vol": "sum",
-            }).dropna()
-            # 计算成交额 (Quote Volume): 用典型价格 * 成交量估算
-            df_pv["quote_vol"] = ((df_pv["high"] + df_pv["low"] + df_pv["close"]) / 3 * df_pv["vol"])
+        df_pv = resample_cached(df_15m, chart_period)
 
-        # 调试: 打印过滤后数据起止
         print(f"[预览] {coin} {chart_period}: {len(df_pv)}根, "
               f"{df_pv.index.min()} ~ {df_pv.index.max()}", flush=True)
 
