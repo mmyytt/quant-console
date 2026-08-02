@@ -955,11 +955,24 @@ class PerformanceAnalyzer:
         final = equity_arr[-1]
         metrics['total_return'] = round((final - initial) / initial * 100, 2)
 
-        # 年化 (假设 4H K线: 每根4小时)
-        n_bars = len(equity_arr)
-        years = n_bars * 4 / (365 * 24)
-        if years > 0 and final > 0:
-            metrics['annual_return'] = round(((final / initial) ** (1 / years) - 1) * 100, 2)
+        # 年化: 用真实时间跨度, 不用K线数估算
+        start_str = result.get('data_start', '')
+        end_str = result.get('data_end', '')
+        try:
+            start_dt = pd.to_datetime(start_str)
+            end_dt = pd.to_datetime(end_str)
+            total_days = (end_dt - start_dt).total_seconds() / 86400.0
+            years = max(total_days / 365.25, 1 / 365.25)  # 至少1天
+        except:
+            # 降级: K线数估算
+            n_bars = len(equity_arr)
+            years = n_bars * 4 / (365 * 24)
+        if years > 0 and initial > 0:
+            total_ratio = final / initial
+            if total_ratio > 0:
+                metrics['annual_return'] = round((total_ratio ** (1 / years) - 1) * 100, 2)
+            else:
+                metrics['annual_return'] = -100.0
         else:
             metrics['annual_return'] = -100.0
         metrics['years'] = round(years, 2)
