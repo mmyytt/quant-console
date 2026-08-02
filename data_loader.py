@@ -224,9 +224,128 @@ def ensure_data(coin: str) -> str:
     status = "STALE" if gap_h > 24 else "FRESH"
     print(f"[DataLoader] {coin}: {status} last={last_date} gap={gap_h:.1f}h total={len(df_all):,}")
 
-    # 5. 保存
+    # 5. 断层检测+修复
+    df_all = repair_gaps(coin, df_all, "15m")
+
+    # 6. 保存
     df_all.reset_index().to_parquet(pq_path, index=False)
     return pq_path
+
+
+def find_gaps(df: pd.DataFrame, expected_interval_min: int = 15) -> list:
+    """
+    检测K线数据断层。
+
+    Args:
+        df: DatetimeIndex的OHLCV DataFrame
+        expected_interval_min: 预期的K线间隔(分钟), 默认15min
+    Returns:
+        [(gap_start, gap_end, missing_bars), ...] 断层区间列表
+    """
+    if len(df) < 2:
+        return []
+    gaps = []
+    expected_delta = pd.Timedelta(minutes=expected_interval_min)
+    # 允许10%容差
+    max_delta = expected_delta * 1.5
+    time_diffs = df.index.to_series().diff()
+    gap_mask = time_diffs > max_delta
+    for idx in gap_mask[gap_mask].index:
+        gap_start = df.index[df.index.get_loc(idx) - 1] + expected_delta
+        gap_end = idx - expected_delta
+        missing = int((gap_end - gap_start) / expected_delta)
+        if missing > 0:
+            gaps.append((gap_start, gap_end, missing))
+    return gaps
+
+
+def repair_gaps(coin: str, df: pd.DataFrame, expected_interval: str = "15m") -> pd.DataFrame:
+    """
+    检测并修复数据断层。对每个缺口自动从Binance API补全。
+
+    Args:
+        coin: ETH/BTC/SOL
+        df: 现有DataFrame (DatetimeIndex)
+        expected_interval: K线间隔
+    Returns:
+        修复后的DataFrame
+    """
+    interval_map = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+    gap_min = interval_map.get(expected_interval, 15)
+    gaps = find_gaps(df, gap_min)
+
+    if not gaps:
+        print(f"[GapCheck] {coin}: no gaps found")
+        return df
+
+    total_missing = sum(g[2] for g in gaps)
+    print(f"[GapCheck] {coin}: found {len(gaps)} gaps, {total_missing} missing bars total")
+
+    info = COINS.get(coin)
+    if not info:
+        return df
+
+    symbol = info["symbol"]
+    new_parts = []
+
+    for gap_start, gap_end, missing in gaps:
+        start_ms = int(gap_start.timestamp() * 1000)
+        end_ms = int(gap_end.timestamp() * 1000)
+        print(f"  Gap: {gap_start} ~ {gap_end} ({missing} bars)")
+
+        # 分页抓取缺口数据
+        all_rows = []
+        current = start_ms
+        while current < end_ms:
+            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={expected_interval}&startTime={current}&limit=1000"
+            try:
+                r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200 and isinstance(r.json(), list):
+                    data = r.json()
+                    if not data:
+                        break
+                    all_rows.extend(data)
+                    last_ts = data[-1][0]
+                    if len(data) < 1000:
+                        break
+                    current = last_ts + 1
+                    time.sleep(0.3)
+                else:
+                    break
+            except Exception as e:
+                print(f"    API error: {e}")
+                break
+
+        if all_rows:
+            df_gap = pd.DataFrame(all_rows, columns=[
+                "ts", "open", "high", "low", "close", "vol",
+                "a", "b", "c", "d", "e", "f"
+            ])
+            df_gap = df_gap[["ts", "open", "high", "low", "close", "vol"]]
+            for col in df_gap.columns[1:]:
+                df_gap[col] = pd.to_numeric(df_gap[col], errors="coerce")
+            df_gap["ts"] = pd.to_datetime(pd.to_numeric(df_gap["ts"]), unit="ms")
+            df_gap = df_gap.set_index("ts").dropna()
+            new_parts.append(df_gap)
+            print(f"    Repaired: {len(df_gap)} bars")
+
+    if new_parts:
+        df_repaired = pd.concat([df] + new_parts).sort_index()
+        df_repaired = df_repaired[~df_repaired.index.duplicated()]
+        print(f"[GapCheck] {coin}: {len(df)} -> {len(df_repaired)} bars after repair")
+        return df_repaired
+
+    return df
+
+
+def force_redownload(coin: str) -> str:
+    """删除本地缓存, 强制重新下载全部数据"""
+    import os as _os
+    pq_path = _os.path.join(DATA_DIR, f"{coin}_15m.parquet")
+    if _os.path.exists(pq_path):
+        _os.remove(pq_path)
+        print(f"[ForceRedownload] {coin}: deleted cache")
+    return ensure_data(coin)
 
 
 def get_data_freshness(coin: str) -> dict:

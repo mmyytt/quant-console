@@ -903,9 +903,21 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
 st.sidebar.divider()
 # 导出 + 刷新 + 登出 (在form外面)
-if st.sidebar.button("🔄 刷新最新行情", use_container_width=True):
+c_refresh1, c_refresh2 = st.sidebar.columns(2)
+if c_refresh1.button("🔄 刷新行情", use_container_width=True):
     st.cache_data.clear(); st.cache_resource.clear()
-    st.success("缓存已清除"); time.sleep(1); st.rerun()
+    st.success("缓存已清除, 正在检查断层并补全..."); time.sleep(1); st.rerun()
+if c_refresh2.button("🔁 强制重刷", use_container_width=True,
+                     help="删除全部本地缓存, 从交易所完整重新下载历史K线"):
+    with st.spinner("正在重新下载全部历史数据 (2-3分钟)..."):
+        try:
+            from data_loader import force_redownload
+            for c in ["ETH", "BTC", "SOL"]:
+                force_redownload(c)
+            st.cache_data.clear(); st.cache_resource.clear()
+            st.success("全部数据已重新下载!"); time.sleep(1); st.rerun()
+        except Exception as e:
+            st.error(f"下载失败: {e}")
 cur_params = {"coin": coin, "tf": timeframe, "lev": leverage,
               "tp": tp_pct, "sl": sl_pct, "indicators": list(st.session_state.selected_indicators.keys())}
 st.sidebar.markdown(export_json(cur_params), unsafe_allow_html=True)
