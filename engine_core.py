@@ -707,8 +707,11 @@ class BacktestEngineV2:
             df = dfs[coin]
             row = df.loc[ts]
             signal = row.get('signal', 0)
-            if pd.isna(signal) or signal == 0:
+            if pd.isna(signal) or signal == 0 or signal is None:
                 continue
+            # 额外保护: score也可能是NaN
+            sc = row.get('score', 1)
+            if pd.isna(sc): sc = 1
 
             # 读取策略附加信息
             regime = row.get('regime', 'range')      # 牛熊判断

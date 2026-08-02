@@ -507,10 +507,16 @@ class DynamicStrategy(StrategyBase):
         if not long_conds and not short_conds:
             df['signal'] = 0
         else:
-            ls = long_conds[0] if long_conds else pd.Series(False, index=df.index)
-            for c in long_conds[1:]: ls = ls & c if self.use_and else ls | c
-            ss = short_conds[0] if short_conds else pd.Series(False, index=df.index)
-            for c in short_conds[1:]: ss = ss & c if self.use_and else ss | c
+            ls = long_conds[0].fillna(False) if long_conds else pd.Series(False, index=df.index)
+            for c in long_conds[1:]:
+                c = c.fillna(False)
+                ls = (ls & c) if self.use_and else (ls | c)
+            ss = short_conds[0].fillna(False) if short_conds else pd.Series(False, index=df.index)
+            for c in short_conds[1:]:
+                c = c.fillna(False)
+                ss = (ss & c) if self.use_and else (ss | c)
+            # NaN安全: 显式填False
+            ls = ls.fillna(False); ss = ss.fillna(False)
             df['signal'] = 0
             df.loc[ls & ~ss, 'signal'] = 1; df.loc[ss & ~ls, 'signal'] = -1
 
@@ -896,6 +902,23 @@ if submitted:
             )
             r2 = e2.run({coin: df_test}, strategy)
             oos_m = PerformanceAnalyzer.analyze(r2)
+
+    # === 零交易检查 ===
+    if metrics.get('total_trades', 0) == 0:
+        st.warning("当前组合条件未触发任何交易！可能是所选指标阈值过于苛刻，或某个指标在当前时间段内缺乏数据，请尝试调松参数或更换指标。")
+        st.caption("已选指标数据诊断:")
+        for name, cfg in st.session_state.selected_indicators.items():
+            if not cfg.get("enabled"): continue
+            info = INDICATOR_REGISTRY.get(name)
+            if not info: continue
+            try:
+                info["compute"](df_train.tail(100).copy(), cfg.get("params", {}))
+                has_l = "_long" in df_train.tail(100).columns and df_train.tail(100)["_long"].any()
+                has_s = "_short" in df_train.tail(100).columns and df_train.tail(100)["_short"].any()
+                st.caption(f"  {name}: 做多信号={'有' if has_l else '无'}, 做空信号={'有' if has_s else '无'}")
+            except:
+                st.caption(f"  {name}: 计算失败")
+        st.stop()
 
     # === 指标卡片 ===
     st.subheader("📈 回测结果")
