@@ -1210,17 +1210,29 @@ if submitted:
 
     # === 零交易检查 (三层诊断) ===
     if metrics.get('total_trades', 0) == 0:
-        total_warmup = max(200, max(
-            (cfg.get("params", {}).get(k, 20) for name, cfg in st.session_state.selected_indicators.items()
-             if cfg.get("enabled") for k in cfg.get("params", {}))
-        , default=200)) if st.session_state.selected_indicators else 200
+        # 安全计算最长指标周期
+        def _get_max_period(indict):
+            mp = 200
+            if not isinstance(indict, dict): return mp
+            for name, cfg in indict.items():
+                if isinstance(cfg, dict):
+                    if not cfg.get("enabled", True): continue
+                    params = cfg.get("params", {})
+                    if isinstance(params, dict):
+                        for v in params.values():
+                            if isinstance(v, (int, float)) and v > mp: mp = int(v)
+                elif isinstance(cfg, (int, float)):
+                    if cfg > mp: mp = int(cfg)
+            return mp
+        total_warmup = _get_max_period(st.session_state.get("selected_indicators", {}))
         st.warning(f"当前组合条件未触发任何交易！数据共 {len(df_train):,} 根K线 (含预热 {total_warmup} 根)")
         st.caption("已选指标逐项诊断 (扫描最近500根K线):")
 
         diag_rows = []
         df_diag = df_train.tail(500).copy()
         for name, cfg in st.session_state.selected_indicators.items():
-            if not cfg.get("enabled"): continue
+            if not isinstance(cfg, dict): continue
+            if not cfg.get("enabled", True): continue
             info = INDICATOR_REGISTRY.get(name)
             if not info: continue
             try:
