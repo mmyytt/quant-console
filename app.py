@@ -1261,11 +1261,15 @@ if submitted:
     st.subheader("📈 回测结果")
     c = st.columns(7)
     c[0].metric("总收益", f"{metrics.get('total_return',0):+.1f}%")
-    c[1].metric("年化", f"{metrics.get('annual_return',0):+.1f}%")
+    c[1].metric("年化", f"{metrics.get('annual_return',0):+.1f}%",
+                help="基于实际回测天数折算的365天标准化复利收益率")
     c[2].metric("最大回撤", f"{metrics.get('max_drawdown',0):.1f}%")
     c[3].metric("胜率", f"{metrics.get('win_rate',0):.1f}%")
     c[4].metric("盈亏比", f"{metrics.get('profit_factor',0):.2f}" if metrics.get('profit_factor') != float('inf') else "inf")
     c[5].metric("交易数", metrics.get('total_trades', 0))
+    yrs = metrics.get('years', 0)
+    days = int(yrs * 365.25)
+    st.caption(f"回测时长: {yrs:.1f}年 ({days}天) | 年化 = 总收益按此区间复利折算为365天标准收益率")
     final_eq = result.get('final_equity', initial_capital)
     c[6].metric("最终权益", f"${final_eq:,.0f}")
 
