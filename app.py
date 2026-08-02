@@ -90,64 +90,119 @@ check_data_freshness()
 INDICATOR_REGISTRY = {
     # ---- 趋势类 ----
     "EMA 双均线": {
-        "category": "趋势类", "params": {"快线": (2, 50, 5), "慢线": (5, 200, 20)},
+        "category": "趋势类",
+        "params": {
+            "短期快线": (3, 30, 7, 1, "反应敏捷的短线趋势, 用于捕捉短期冲高/回调"),
+            "长期慢线": (10, 100, 21, 1, "反应平缓的长线趋势, 用于判断大方向顺逆"),
+        },
         "desc": "快线上穿慢线=做多, 下穿=做空",
-        "compute": lambda df, p: _ema_cross(df, p["快线"], p["慢线"]),
+        "compute": lambda df, p: _ema_cross(df, p["短期快线"], p["长期慢线"]),
     },
     "SMA 三均线": {
-        "category": "趋势类", "params": {"短": (2, 30, 5), "中": (5, 60, 10), "长": (10, 120, 30)},
+        "category": "趋势类",
+        "params": {
+            "短期": (2, 30, 5, 1, "最短周期均线"),
+            "中期": (5, 60, 10, 1, "中等周期均线"),
+            "长期": (10, 120, 30, 1, "最长周期均线"),
+        },
         "desc": "短>中>长=多头排列",
-        "compute": lambda df, p: _sma_align(df, p["短"], p["中"], p["长"]),
+        "compute": lambda df, p: _sma_align(df, p["短期"], p["中期"], p["长期"]),
     },
     "SuperTrend 超级趋势": {
-        "category": "趋势类", "params": {"ATR周期": (5, 30, 10), "乘数": (1.0, 5.0, 3.0, 0.5)},
+        "category": "趋势类",
+        "params": {
+            "ATR周期": (5, 30, 10, 1, "计算波动率的周期"),
+            "乘数": (1.0, 5.0, 3.0, 0.5, "触发信号的波动倍数"),
+        },
         "desc": "价格上穿SuperTrend=做多, 下穿=做空",
         "compute": lambda df, p: _supertrend(df, p["ATR周期"], p["乘数"]),
     },
     "ADX/DMI 趋势强度": {
-        "category": "趋势类", "params": {"周期": (5, 30, 14), "阈值": (10, 50, 25)},
+        "category": "趋势类",
+        "params": {
+            "ADX周期": (5, 30, 14, 1, "ADX平滑周期"),
+            "强趋势阈值": (10, 50, 25, 1, "ADX超过此值视为强趋势"),
+        },
         "desc": "+DI>-DI 且 ADX>阈值=做多",
-        "compute": lambda df, p: _adx_signal(df, p["周期"], p["阈值"]),
+        "compute": lambda df, p: _adx_signal(df, p["ADX周期"], p["强趋势阈值"]),
     },
     "Ichimoku 一目均衡": {
-        "category": "趋势类", "params": {"转换线": (5, 20, 9), "基准线": (10, 40, 26)},
+        "category": "趋势类",
+        "params": {
+            "转换线": (5, 20, 9, 1, "短期转折线周期"),
+            "基准线": (10, 40, 26, 1, "中期基准线周期"),
+        },
         "desc": "价格>云层=做多, <云层=做空",
         "compute": lambda df, p: _ichimoku(df, p["转换线"], p["基准线"]),
     },
     "Parabolic SAR": {
-        "category": "趋势类", "params": {"步长": (0.01, 0.1, 0.02, 0.01), "最大": (0.1, 0.5, 0.2, 0.05)},
+        "category": "趋势类",
+        "params": {
+            "加速步长": (0.01, 0.1, 0.02, 0.01, "AF加速因子步长"),
+            "最大加速": (0.1, 0.5, 0.2, 0.05, "AF最大值"),
+        },
         "desc": "SAR反转=反向信号",
-        "compute": lambda df, p: _psar(df, p["步长"], p["最大"]),
+        "compute": lambda df, p: _psar(df, p["加速步长"], p["最大加速"]),
     },
 
     # ---- 摆动类 ----
     "RSI 相对强弱": {
-        "category": "摆动类", "params": {"周期": (2, 50, 14), "超卖": (10, 40, 30), "超买": (60, 90, 70)},
-        "desc": "RSI<超卖=做多, RSI>超买=做空",
-        "compute": lambda df, p: _rsi_signal(df, p["周期"], p["超卖"], p["超买"]),
+        "category": "摆动类",
+        "params": {
+            "RSI周期": (2, 50, 14, 1, "RSI计算周期, 14为标准值"),
+            "超卖阈值": (10, 40, 30, 1, "低于此值视为超卖, 做多信号"),
+            "超买阈值": (60, 90, 70, 1, "高于此值视为超买, 做空信号"),
+        },
+        "desc": "RSI<超卖=做多, >超买=做空",
+        "compute": lambda df, p: _rsi_signal(df, p["RSI周期"], p["超卖阈值"], p["超买阈值"]),
     },
     "KDJ 随机指标": {
-        "category": "摆动类", "params": {"N": (2, 20, 9), "M1": (2, 10, 3), "M2": (2, 10, 3)},
+        "category": "摆动类",
+        "params": {
+            "KDJ_N": (2, 20, 9, 1, "RSV计算周期"),
+            "K平滑": (2, 10, 3, 1, "K值平滑参数"),
+            "D平滑": (2, 10, 3, 1, "D值平滑参数"),
+        },
         "desc": "K上穿D且<30=做多, K下穿D且>70=做空",
-        "compute": lambda df, p: _kdj_signal(df, p["N"], p["M1"], p["M2"]),
+        "compute": lambda df, p: _kdj_signal(df, p["KDJ_N"], p["K平滑"], p["D平滑"]),
     },
     "MACD 异同均线": {
-        "category": "摆动类", "params": {"快": (2, 30, 12), "慢": (5, 50, 26), "信号": (2, 20, 9)},
-        "desc": "MACD上穿Signal=做多, 下穿=做空",
-        "compute": lambda df, p: _macd_signal(df, p["快"], p["慢"], p["信号"]),
+        "category": "摆动类",
+        "params": {
+            "MACD快线": (2, 30, 12, 1, "短期EMA周期, 反应灵敏"),
+            "MACD慢线": (5, 50, 26, 1, "长期EMA周期, 反应平缓"),
+            "信号线": (2, 20, 9, 1, "MACD的EMA平滑线"),
+        },
+        "desc": "MACD上穿信号线=做多, 动能指标",
+        "compute": lambda df, p: _macd_signal(df, p["MACD快线"], p["MACD慢线"], p["信号线"]),
     },
     "CCI 商品通道": {
-        "category": "摆动类", "params": {"周期": (5, 50, 20), "超卖": (-200, -50, -100), "超买": (50, 200, 100)},
+        "category": "摆动类",
+        "params": {
+            "CCI周期": (5, 50, 20, 1, "商品通道指数周期"),
+            "超卖阈值": (-200, -50, -100, 1, "低于此值做多"),
+            "超买阈值": (50, 200, 100, 1, "高于此值做空"),
+        },
         "desc": "CCI<超卖=做多, CCI>超买=做空",
-        "compute": lambda df, p: _cci_signal(df, p["周期"], p["超卖"], p["超买"]),
+        "compute": lambda df, p: _cci_signal(df, p["CCI周期"], p["超卖阈值"], p["超买阈值"]),
     },
     "StochRSI": {
-        "category": "摆动类", "params": {"周期": (5, 30, 14), "超卖": (10, 40, 20), "超买": (60, 90, 80)},
+        "category": "摆动类",
+        "params": {
+            "周期": (5, 30, 14, 1, "StochRSI平滑周期"),
+            "超卖": (10, 40, 20, 1, "低于此值做多"),
+            "超买": (60, 90, 80, 1, "高于此值做空"),
+        },
         "desc": "StochRSI<超卖=做多, >超买=做空",
         "compute": lambda df, p: _stochrsi(df, p["周期"], p["超卖"], p["超买"]),
     },
     "Williams %R": {
-        "category": "摆动类", "params": {"周期": (5, 30, 14), "超卖": (-100, -50, -80), "超买": (-50, 0, -20)},
+        "category": "摆动类",
+        "params": {
+            "周期": (5, 30, 14, 1, "威廉指标周期"),
+            "超卖": (-100, -50, -80, 1, "低于此值做多"),
+            "超买": (-50, 0, -20, 1, "高于此值做空"),
+        },
         "desc": "%R<超卖=做多, %R>超买=做空",
         "compute": lambda df, p: _willr(df, p["周期"], p["超卖"], p["超买"]),
     },
@@ -159,31 +214,48 @@ INDICATOR_REGISTRY = {
 
     # ---- 通道/支撑阻力类 ----
     "布林带 Bollinger": {
-        "category": "通道/支撑", "params": {"周期": (5, 50, 20), "标准差": (1.0, 4.0, 2.0, 0.5)},
+        "category": "通道/支撑",
+        "params": {
+            "布林带周期": (5, 50, 20, 1, "布林带中轨均线周期"),
+            "标准差倍数": (1.0, 4.0, 2.0, 0.5, "带宽=标准差*倍数"),
+        },
         "desc": "价格触下轨=做多, 触上轨=做空",
-        "compute": lambda df, p: _bb_signal(df, p["周期"], p["标准差"]),
+        "compute": lambda df, p: _bb_signal(df, p["布林带周期"], p["标准差倍数"]),
     },
     "Keltner 通道": {
-        "category": "通道/支撑", "params": {"EMA周期": (5, 50, 20), "ATR倍数": (1.0, 4.0, 2.0, 0.5)},
+        "category": "通道/支撑",
+        "params": {
+            "EMA周期": (5, 50, 20, 1, "中轨EMA周期"),
+            "ATR倍数": (1.0, 4.0, 2.0, 0.5, "带宽=ATR*倍数"),
+        },
         "desc": "价格触下轨=做多, 触上轨=做空",
         "compute": lambda df, p: _keltner(df, p["EMA周期"], p["ATR倍数"]),
     },
     "Donchian 通道": {
-        "category": "通道/支撑", "params": {"周期": (5, 100, 20)},
+        "category": "通道/支撑",
+        "params": {
+            "通道周期": (5, 100, 20, 1, "最高/最低价回看周期"),
+        },
         "desc": "突破上轨=做多, 突破下轨=做空",
-        "compute": lambda df, p: _donchian(df, p["周期"]),
+        "compute": lambda df, p: _donchian(df, p["通道周期"]),
     },
     "斐波那契回调": {
-        "category": "通道/支撑", "params": {"回看K线": (20, 200, 50)},
+        "category": "通道/支撑",
+        "params": {
+            "回看K线数": (20, 200, 50, 1, "计算高低点的回看周期"),
+        },
         "desc": "回调到0.382/0.618=做多, 跌破0.618=做空",
-        "compute": lambda df, p: _fibonacci(df, p["回看K线"]),
+        "compute": lambda df, p: _fibonacci(df, p["回看K线数"]),
     },
 
     # ---- 成交量类 ----
     "OBV 能量潮": {
-        "category": "成交量", "params": {"MA周期": (5, 50, 20)},
+        "category": "成交量",
+        "params": {
+            "OBV均线": (5, 50, 20, 1, "OBV的均线平滑周期"),
+        },
         "desc": "OBV上穿MA=做多, 下穿=做空",
-        "compute": lambda df, p: _obv_signal(df, p["MA周期"]),
+        "compute": lambda df, p: _obv_signal(df, p["OBV均线"]),
     },
     "VWAP 均价": {
         "category": "成交量", "params": {},
@@ -191,28 +263,40 @@ INDICATOR_REGISTRY = {
         "compute": lambda df, p: _vwap_signal(df),
     },
     "MFI 资金流量": {
-        "category": "成交量", "params": {"周期": (5, 30, 14), "超卖": (10, 40, 20), "超买": (60, 90, 80)},
+        "category": "成交量",
+        "params": {
+            "MFI周期": (5, 30, 14, 1, "资金流量指数周期"),
+            "超卖": (10, 40, 20, 1, "低于此值做多"),
+            "超买": (60, 90, 80, 1, "高于此值做空"),
+        },
         "desc": "MFI<超卖=做多, >超买=做空",
-        "compute": lambda df, p: _mfi_signal(df, p["周期"], p["超卖"], p["超买"]),
+        "compute": lambda df, p: _mfi_signal(df, p["MFI周期"], p["超卖"], p["超买"]),
     },
     "CMF 柴金流量": {
-        "category": "成交量", "params": {"周期": (5, 50, 20)},
+        "category": "成交量",
+        "params": {
+            "CMF周期": (5, 50, 20, 1, "柴金流量指数平滑周期"),
+        },
         "desc": "CMF>0=做多, <0=做空",
-        "compute": lambda df, p: _cmf_signal(df, p["周期"]),
+        "compute": lambda df, p: _cmf_signal(df, p["CMF周期"]),
     },
     "成交量突破": {
-        "category": "成交量", "params": {"均量周期": (5, 50, 20), "倍数": (1.0, 5.0, 1.5, 0.1)},
-        "desc": "量>均量*倍数 + 收阳=做多, 收阴=做空",
-        "compute": lambda df, p: _vol_breakout(df, p["均量周期"], p["倍数"]),
+        "category": "成交量",
+        "params": {
+            "均量周期": (5, 50, 20, 1, "成交量均线周期"),
+            "放大倍数": (1.0, 5.0, 1.5, 0.1, "量>均量*倍数视为放量"),
+        },
+        "desc": "量>均量*倍数 + 收阳=做多",
+        "compute": lambda df, p: _vol_breakout(df, p["均量周期"], p["放大倍数"]),
     },
 
     # ---- K线形态 ----
-    "锤头/倒锤 (Hammer)": {
+    "锤头/倒锤": {
         "category": "K线形态", "params": {},
-        "desc": "下影线>实体2倍=锤头做多, 上影线>实体2倍=倒锤做空",
+        "desc": "下影线>实体2倍=锤头做多",
         "compute": lambda df, p: _hammer(df),
     },
-    "吞没形态 (Engulfing)": {
+    "吞没形态": {
         "category": "K线形态", "params": {},
         "desc": "阳包阴=做多, 阴包阳=做空",
         "compute": lambda df, p: _engulfing(df),
@@ -222,19 +306,22 @@ INDICATOR_REGISTRY = {
         "desc": "早晨之星=做多, 黄昏之星=做空",
         "compute": lambda df, p: _star(df),
     },
-    "三连兵 (Three Soldiers)": {
+    "三连兵": {
         "category": "K线形态", "params": {},
         "desc": "三连阳=做多, 三连阴=做空",
         "compute": lambda df, p: _three_soldiers(df),
     },
-    "十字星 (Doji)": {
-        "category": "K线形态", "params": {"影线比": (0.5, 2.0, 1.0, 0.1)},
-        "desc": "下影线>上影线=做多, 反之=做空",
+    "十字星 Doji": {
+        "category": "K线形态",
+        "params": {
+            "影线比": (0.5, 2.0, 1.0, 0.1, "下影/上影长度比"),
+        },
+        "desc": "下影线>上影线=做多",
         "compute": lambda df, p: _doji(df, p["影线比"]),
     },
     "Pinbar 反转": {
         "category": "K线形态", "params": {},
-        "desc": "长下影线拒绝低位=做多, 长上影线拒绝高位=做空",
+        "desc": "长下影线拒绝低位=做多",
         "compute": lambda df, p: _pinbar(df),
     },
 }
@@ -608,17 +695,17 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     initial_capital = c2.number_input("初始资金", 100, 1000000, 10000, 1000)
 
     st.divider(); st.caption("🧱 指标积木")
+    st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
     logic_mode = st.radio("触发逻辑", ["AND 全部满足", "OR 任一满足"], horizontal=True, key="logic_mode")
     use_and = "AND" in logic_mode
 
-    # 按分类折叠显示指标
     categories = {}
     for name, info in INDICATOR_REGISTRY.items():
         cat = info["category"]
         if cat not in categories: categories[cat] = []
         categories[cat].append(name)
     if "selected_indicators" not in st.session_state:
-        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"快线": 5, "慢线": 20}}}
+        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"短期快线": 7, "长期慢线": 21}}}
 
     for cat_name, ind_names in categories.items():
         with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
@@ -631,6 +718,19 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
                     sel[name] = {"enabled": True, "params": {k: v[2] for k, v in info["params"].items()}}
                 elif not new_checked and name in sel:
                     sel[name]["enabled"] = False
+
+                # 展开子参数 (带标签 + tooltip)
+                if new_checked and info["params"]:
+                    cols = st.columns(min(2, len(info["params"])))
+                    for i, (pname, prange) in enumerate(info["params"].items()):
+                        step = prange[3] if len(prange) > 3 else 1
+                        help_txt = prange[4] if len(prange) > 4 else ""
+                        val = cols[i % 2].number_input(
+                            pname, prange[0], prange[1],
+                            sel[name]["params"].get(pname, prange[2]), step,
+                            key=f"p_{name}_{pname}", help=help_txt,
+                        )
+                        sel[name]["params"][pname] = val
 
     st.divider(); st.caption("🛡️ 风控")
     c1, c2 = st.columns(2)
