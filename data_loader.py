@@ -1,28 +1,27 @@
 """
-数据自动下载器 v2 — 云部署用
+数据自动下载器 v3 — 云部署用
 ================================
-策略: 历史缓存(Binance月度zip) + 实时增量(Binance REST API)
-1. 读取本地parquet, 取 last_timestamp
-2. Binance /api/v3/klines 从 last_timestamp 分页拉到 now()
-3. 合并去重保存
-4. 无本地文件时: zip下载最近365天 + API补全到今天
+历史: Binance月度zip (2017-2026)
+增量: yfinance (最近60天, 兼容性最强)
+校验: 最新数据不超过1天, 否则弹警告
 """
 import os, sys, time, requests, pandas as pd, zipfile, io
 from datetime import datetime, timedelta
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 BINANCE_BASE = "https://data.binance.vision/data/spot/monthly/klines"
-BINANCE_API = "https://api.binance.com/api/v3/klines"
 
 COINS = {
-    "ETH": {"symbol": "ETHUSDT", "start": 2017},
-    "BTC": {"symbol": "BTCUSDT", "start": 2017},
-    "SOL": {"symbol": "SOLUSDT", "start": 2020},
+    "ETH": {"symbol": "ETHUSDT", "yf": "ETH-USD", "start": 2017},
+    "BTC": {"symbol": "BTCUSDT", "yf": "BTC-USD", "start": 2017},
+    "SOL": {"symbol": "SOLUSDT", "yf": "SOL-USD", "start": 2020},
 }
+
+YFINANCE_INTERVAL_MAP = {"15m": "15m", "1h": "60m", "4h": "1h", "1d": "1d"}
 
 
 def _read_existing(pq_path: str):
-    """读取已有parquet, 返回(DataFrame或None, last_timestamp或None)"""
+    """读取已有parquet, 返回(DataFrame或None, last_ts或None)"""
     if not os.path.exists(pq_path) or os.path.getsize(pq_path) < 100000:
         return None, None
     df = pd.read_parquet(pq_path)
@@ -31,77 +30,21 @@ def _read_existing(pq_path: str):
     df = df.set_index(time_col)
     df = df[~df.index.duplicated()]
     df = df.sort_index()
-    return df, df.index.max()
-
-
-def _fetch_api(symbol: str, start_ms: int, end_ms: int, interval: str = "15m") -> pd.DataFrame:
-    """
-    Binance REST API 分页抓取K线。
-    每次最多1000根, 循环请求直到覆盖 [start_ms, end_ms]。
-    """
-    all_rows = []
-    current_start = start_ms
-    page = 0
-
-    while current_start < end_ms:
-        url = f"{BINANCE_API}?symbol={symbol}&interval={interval}&startTime={current_start}&limit=1000"
-        try:
-            resp = requests.get(url, timeout=30)
-            if resp.status_code != 200:
-                print(f"  API page {page}: HTTP {resp.status_code}")
-                break
-            data = resp.json()
-            if not data or not isinstance(data, list):
-                break
-
-            page += 1
-            all_rows.extend(data)
-
-            last_ts = data[-1][0]  # 最后一条的时间戳(ms)
-            print(f"  Page {page}: {len(data)} bars, {pd.to_datetime(last_ts, unit='ms')}")
-
-            if len(data) < 1000:
-                break  # 最后一页
-
-            current_start = last_ts + 1  # 下一批从下1ms开始
-            time.sleep(0.3)  # 限速
-
-        except Exception as e:
-            print(f"  API page {page} error: {e}")
-            break
-
-    if not all_rows:
-        return pd.DataFrame()
-
-    # 转为DataFrame
-    df = pd.DataFrame(all_rows, columns=[
-        "ts", "open", "high", "low", "close", "vol",
-        "close_time", "quote_vol", "trades", "taker_buy_vol",
-        "taker_buy_quote_vol", "ignore"
-    ])
-    ts = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
-    df = df[["open", "high", "low", "close", "vol"]].copy()
-    for col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df.index = ts
-    df = df.dropna()
-    df = df.sort_index()
-    return df
+    last = df.index.max()
+    return df, last
 
 
 def _download_history_zip(symbol: str, start_year: int, end_year: int, end_month: int) -> pd.DataFrame:
-    """从Binance月度zip下载历史数据 (兜底用)"""
+    """Binance月度zip下载历史 (兜底)"""
     base_url = f"{BINANCE_BASE}/{symbol}/15m/{symbol}-15m-"
     all_dfs = []
-
     for year in range(start_year, end_year + 1):
         for month in range(1, 13):
             if year == end_year and month > end_month:
                 break
             fname = f"{year}-{month:02d}"
-            url = base_url + fname + ".zip"
             try:
-                r = requests.get(url, timeout=60)
+                r = requests.get(base_url + fname + ".zip", timeout=60)
                 if r.status_code != 200 or len(r.content) < 500:
                     continue
                 zf = zipfile.ZipFile(io.BytesIO(r.content))
@@ -115,8 +58,8 @@ def _download_history_zip(symbol: str, start_year: int, end_year: int, end_month
                 df = df[[1, 2, 3, 4, 5]].copy()
                 df.columns = ["open", "high", "low", "close", "vol"]
                 df.index = ts
-                for col in df.columns:
-                    df[col] = pd.to_numeric(df[col], errors="coerce")
+                for c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce")
                 df = df.dropna()
                 if len(df) > 0:
                     all_dfs.append(df)
@@ -124,11 +67,56 @@ def _download_history_zip(symbol: str, start_year: int, end_year: int, end_month
             except Exception as e:
                 print(f"  ZIP {fname}: {e}")
             time.sleep(0.05)
-
     if all_dfs:
         df = pd.concat(all_dfs).sort_index()
         return df[~df.index.duplicated()]
     return pd.DataFrame()
+
+
+def _fetch_yfinance(symbol: str, period: str = "60d", interval: str = "15m") -> pd.DataFrame:
+    """
+    用 yfinance 抓取最近N天数据 (绕过Binance IP限制)。
+
+    Args:
+        symbol: yfinance ticker, e.g. 'ETH-USD'
+        period: 抓取周期, e.g. '60d', '90d'
+        interval: K线周期, e.g. '15m', '1h'
+    Returns:
+        DataFrame with columns [open, high, low, close, vol], DatetimeIndex
+    """
+    try:
+        import yfinance as yf
+    except ImportError:
+        print("[yfinance] not installed, trying pip install...")
+        os.system(f"{sys.executable} -m pip install yfinance -q")
+        import yfinance as yf
+
+    print(f"[yfinance] Downloading {symbol} {period} {interval}...")
+    ticker = yf.Ticker(symbol)
+    df = ticker.history(period=period, interval=interval)
+
+    if df is None or len(df) == 0:
+        print(f"[yfinance] {symbol}: no data returned")
+        return pd.DataFrame()
+
+    # yfinance返回多级列, 取第一级
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
+    # 标准化列名
+    col_map = {"Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "vol"}
+    df = df.rename(columns=col_map)
+    for c in ["open", "high", "low", "close", "vol"]:
+        if c not in df.columns:
+            df[c] = 0.0
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df = df[["open", "high", "low", "close", "vol"]].dropna()
+    df.index = pd.to_datetime(df.index).tz_localize(None)
+    df = df.sort_index()
+
+    print(f"[yfinance] {symbol}: got {len(df)} bars, {df.index[0]} ~ {df.index[-1]}")
+    return df
 
 
 def ensure_data(coin: str) -> str:
@@ -136,70 +124,82 @@ def ensure_data(coin: str) -> str:
     确保数据存在且更新到最新。
 
     流程:
-      1. 读本地parquet → last_ts
-      2. API从 last_ts 拉到 now()
-      3. 合并去重保存
-      4. 无本地数据: zip下载历史 + API补全
+      1. 读本地parquet → 历史数据
+      2. yfinance拉最近60天 → 增量数据
+      3. 合并: 历史(parquet) + 增量(yfinance), 去重
+      4. 校验最新数据时间, 超过1天打印警告
     """
     os.makedirs(DATA_DIR, exist_ok=True)
     pq_path = os.path.join(DATA_DIR, f"{coin}_15m.parquet")
     info = COINS.get(coin)
     if not info:
         raise ValueError(f"Unknown coin: {coin}")
-    symbol = info["symbol"]
+    symbol_zip = info["symbol"]
+    symbol_yf = info["yf"]
 
+    # 1. 读历史缓存
     existing, last_ts = _read_existing(pq_path)
-    now = datetime.now()
-    now_ms = int(now.timestamp() * 1000)
-
     if existing is not None:
-        print(f"[DataLoader] {coin}: {len(existing):,} bars cached, last={last_ts}")
+        print(f"[DataLoader] {coin}: cache {len(existing):,} bars, last={last_ts}")
 
-    # === 没有历史数据: 先下载zip ===
+    # 2. 如果没有历史数据, 先下zip
     if existing is None or len(existing) < 1000:
         print(f"[DataLoader] {coin}: downloading history zip...")
-        end_year, end_month = now.year, now.month
-        start_year = info["start"]
-        df_zip = _download_history_zip(symbol, start_year, end_year, end_month)
+        now = datetime.now()
+        df_zip = _download_history_zip(symbol_zip, info["start"], now.year, now.month)
         if len(df_zip) > 0:
             existing = df_zip
             last_ts = existing.index.max()
-            print(f"[DataLoader] {coin}: zip done, {len(existing):,} bars, last={last_ts}")
 
-    # === API增量: 从last_ts拉到now ===
-    if last_ts is not None:
-        gap_hours = (now - last_ts).total_seconds() / 3600
-        if gap_hours > 0.5:  # 超过30分钟才需要更新
-            start_ms = int(last_ts.timestamp() * 1000) + 60000  # 从last后1分钟开始
-            print(f"[DataLoader] {coin}: fetching {gap_hours:.1f}h of new data via API...")
-            df_new = _fetch_api(symbol, start_ms, now_ms, "15m")
+    # 3. yfinance增量: 最近60天
+    print(f"[DataLoader] {coin}: fetching recent data via yfinance...")
+    df_yf = _fetch_yfinance(symbol_yf, period="60d", interval="15m")
 
-            if len(df_new) > 0:
-                print(f"[DataLoader] {coin}: API got {len(df_new)} new bars, "
-                      f"{df_new.index[0]} ~ {df_new.index[-1]}")
-                existing = pd.concat([existing, df_new]).sort_index()
-                existing = existing[~existing.index.duplicated()]
-                print(f"[DataLoader] {coin}: merged -> {len(existing):,} total bars")
-            else:
-                print(f"[DataLoader] {coin}: no new data from API")
-        else:
-            print(f"[DataLoader] {coin}: gap only {gap_hours:.1f}h, skipping API")
+    if len(df_yf) > 0 and existing is not None:
+        # 合并: 保留历史中早于yfinace起点的 + yfinance全部
+        yf_start = df_yf.index.min()
+        hist_part = existing[existing.index < yf_start] if last_ts and last_ts < yf_start else existing
+        if last_ts and last_ts >= yf_start:
+            # yfinance覆盖了历史尾部, 用yfinance替换重叠部分
+            hist_part = existing[existing.index < yf_start]
+
+        df_all = pd.concat([hist_part, df_yf]).sort_index()
+        df_all = df_all[~df_all.index.duplicated()]
+        print(f"[DataLoader] {coin}: merged {len(df_all):,} bars")
+    elif len(df_yf) > 0:
+        df_all = df_yf
+    elif existing is not None:
+        df_all = existing
     else:
-        # 完全没有数据: 直接API抓最近365天
-        print(f"[DataLoader] {coin}: no data at all, fetching last 365 days via API...")
-        start_ms = int((now - timedelta(days=365)).timestamp() * 1000)
-        existing = _fetch_api(symbol, start_ms, now_ms, "15m")
-        if len(existing) > 0:
-            print(f"[DataLoader] {coin}: API got {len(existing):,} bars")
-
-    if existing is None or len(existing) == 0:
         raise RuntimeError(f"[DataLoader] {coin}: failed to load any data")
 
-    # 保存
-    df_out = existing.reset_index()
+    # 4. 校验最新时间
+    last_date = df_all.index.max()
+    gap_hours = (datetime.now() - last_date).total_seconds() / 3600
+    print(f"[DataLoader] {coin}: last bar = {last_date}, gap = {gap_hours:.1f}h")
+
+    if gap_hours > 24:
+        print(f"[DataLoader] WARNING: {coin} data is {gap_hours:.1f}h stale! yfinance may have failed.")
+
+    # 5. 保存
+    df_out = df_all.reset_index()
     df_out.to_parquet(pq_path, index=False)
-    print(f"[DataLoader] {coin}: saved {len(existing):,} bars -> {pq_path}")
+    print(f"[DataLoader] {coin}: saved {len(df_all):,} bars -> {pq_path}")
     return pq_path
+
+
+def get_data_freshness(coin: str) -> dict:
+    """检查数据新鲜度 (供Streamlit调用)"""
+    pq_path = os.path.join(DATA_DIR, f"{coin}_15m.parquet")
+    _, last_ts = _read_existing(pq_path)
+    if last_ts is None:
+        return {"status": "no_data", "last_ts": None, "gap_hours": 9999}
+    gap_hours = (datetime.now() - last_ts).total_seconds() / 3600
+    return {
+        "status": "stale" if gap_hours > 24 else "fresh",
+        "last_ts": str(last_ts),
+        "gap_hours": round(gap_hours, 1),
+    }
 
 
 if __name__ == "__main__":

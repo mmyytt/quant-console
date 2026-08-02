@@ -69,6 +69,22 @@ if not logged_in:
     st.stop()
 
 # ============================================================
+# 数据新鲜度校验: 最新K线超过1天 → 弹警告
+# ============================================================
+def check_data_freshness():
+    from data_loader import get_data_freshness
+    stale_coins = []
+    for c in ["ETH", "BTC", "SOL"]:
+        f = get_data_freshness(c)
+        if f["status"] == "stale":
+            stale_coins.append(f"{c}({f['gap_hours']:.0f}h前)")
+    if stale_coins:
+        st.error(f"实时行情 API 请求失败，当前显示为本地历史缓存！ "
+                 f"过期币种: {', '.join(stale_coins)}")
+
+check_data_freshness()
+
+# ============================================================
 # 百种指标注册表 (纯 pandas/numpy 实现, 无需 TA-Lib)
 # ============================================================
 INDICATOR_REGISTRY = {
