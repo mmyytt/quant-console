@@ -552,7 +552,105 @@ class DynamicStrategy(StrategyBase):
 # ============================================================
 # Sidebar: 基础设置
 # ============================================================
-st.sidebar.title("📊 马总控制台 v3.2")
+st.sidebar.title("📊 马总控制台 v3.3")
+
+# 日期预设按钮 (在form外面, 立即可用)
+if "date_range" not in st.session_state: st.session_state.date_range = None
+
+st.sidebar.caption("快捷时段:")
+dp1, dp2, dp3 = st.sidebar.columns(3)
+for label, dr, col in [
+    ("🐂21牛", ("2021-01-01","2021-12-31"), dp1),
+    ("🐻22熊", ("2022-01-01","2022-12-31"), dp2),
+    ("📈23-24", ("2023-01-01","2024-12-31"), dp3),
+]:
+    if col.button(label, use_container_width=True, key=f"dp_{label}"):
+        st.session_state.date_range = dr; st.rerun()
+if st.sidebar.button("🔁 全部历史", use_container_width=True):
+    st.session_state.date_range = None; st.rerun()
+
+st.sidebar.divider()
+
+# ============================================================
+# 配置表单: 所有参数控件包在form里, 勾选/拖动不触发重渲染
+# ============================================================
+with st.sidebar.form(key="config_form", clear_on_submit=False):
+    st.caption("📋 基础设置")
+    c1, c2 = st.columns(2)
+    coin = c1.selectbox("标的", ["ETH", "BTC", "SOL"], 0)
+    timeframe = c2.selectbox("K线周期", ["15m", "1h", "4h", "1d"], 2)
+    c1, c2 = st.columns(2)
+    leverage = c1.slider("杠杆", 1, 20, 3, 1)
+    initial_capital = c2.number_input("初始资金", 100, 1000000, 10000, 1000)
+
+    st.divider(); st.caption("🧱 指标积木")
+    logic_mode = st.radio("触发逻辑", ["AND 全部满足", "OR 任一满足"], horizontal=True, key="logic_mode")
+    use_and = "AND" in logic_mode
+
+    # 按分类折叠显示指标
+    categories = {}
+    for name, info in INDICATOR_REGISTRY.items():
+        cat = info["category"]
+        if cat not in categories: categories[cat] = []
+        categories[cat].append(name)
+    if "selected_indicators" not in st.session_state:
+        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"快线": 5, "慢线": 20}}}
+
+    for cat_name, ind_names in categories.items():
+        with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
+            for name in ind_names:
+                info = INDICATOR_REGISTRY[name]
+                sel = st.session_state.selected_indicators
+                checked = name in sel and sel[name].get("enabled", False)
+                new_checked = st.checkbox(name, checked, key=f"ind_{name}", help=info["desc"])
+                if new_checked and name not in sel:
+                    sel[name] = {"enabled": True, "params": {k: v[2] for k, v in info["params"].items()}}
+                elif not new_checked and name in sel:
+                    sel[name]["enabled"] = False
+
+    st.divider(); st.caption("🛡️ 风控")
+    c1, c2 = st.columns(2)
+    tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
+    sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
+    c1, c2, c3 = st.columns(3)
+    bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
+    range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
+    bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
+    c1, c2 = st.columns(2)
+    lock_streak = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
+    lock_days = c2.number_input("锁仓天数", 1, 30, 2)
+    oos_enabled = st.checkbox("样本外测试 (OOS)", False)
+    oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
+
+    st.divider(); st.caption("🔬 多因子牛熊 + 共振")
+    c1, c2 = st.columns(2)
+    mf_enabled = c1.checkbox("多因子牛熊", True, key="mf_on")
+    resonance_enabled = c2.checkbox("共振打分", False, key="res_on")
+    if resonance_enabled:
+        cat_list = ["趋势类", "摆动类", "通道/支撑", "成交量", "K线形态"]
+        c1, c2, c3 = st.columns(3)
+        res_f1 = c1.selectbox("因子1", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] == cat_list[0]], key="rf1")
+        res_f2 = c2.selectbox("因子2", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[1:3]], key="rf2")
+        res_f3 = c3.selectbox("因子3", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[3:]], key="rf3")
+    if mf_enabled:
+        c1, c2 = st.columns(2)
+        ema_w = c1.slider("EMA权重", 0.0, 1.0, 0.40, 0.05, key="mf_ew")
+        adx_w = c2.slider("ADX权重", 0.0, 1.0, 0.35, 0.05, key="mf_aw")
+        adx_th = st.slider("ADX阈值", 10, 50, 25, 5, key="mf_at")
+        bull_th = st.slider("牛市判定", 0.10, 0.60, 0.30, 0.05, key="mf_bt")
+
+    st.divider()
+    submitted = st.form_submit_button("🚀 应用配置 / 开始回测", use_container_width=True, type="primary")
+
+st.sidebar.divider()
+# 导出 + 刷新 + 登出 (在form外面)
+if st.sidebar.button("🔄 刷新最新行情", use_container_width=True):
+    st.cache_data.clear(); st.cache_resource.clear()
+    st.success("缓存已清除"); time.sleep(1); st.rerun()
+cur_params = {"coin": coin, "tf": timeframe, "lev": leverage,
+              "tp": tp_pct, "sl": sl_pct, "indicators": list(st.session_state.selected_indicators.keys())}
+st.sidebar.markdown(export_json(cur_params), unsafe_allow_html=True)
+if st.sidebar.button("登出"): st.session_state.logged_in = False; st.rerun()
 
 # ============================================================
 # 缓存数据加载 (避免每次切换参数都重新读取)
@@ -578,135 +676,7 @@ def resample_cached(df_15m, period: str):
     df["quote_vol"] = ((df["high"] + df["low"] + df["close"]) / 3 * df["vol"])
     return df
 
-with st.sidebar.expander("📋 基础设置", expanded=True):
-    coin = st.selectbox("标的", ["ETH", "BTC", "SOL"], 0)
-    timeframe = st.selectbox("K线周期", ["15m", "1h", "4h", "1d"], 2)
-    leverage = st.slider("杠杆", 1, 20, 3, 1)
-    initial_capital = st.number_input("初始资金", 100, 1000000, 10000, 1000)
-
-# ============================================================
-# Sidebar: 时间范围 (session_state修复)
-# ============================================================
-if "date_range" not in st.session_state: st.session_state.date_range = None
-
-with st.sidebar.expander("📅 时间范围 & OOS", expanded=True):
-    c1, c2, c3 = st.columns(3)
-    preset_dates = {
-        "🐂 2021牛": ("2021-01-01", "2021-12-31"),
-        "🐻 2022熊": ("2022-01-01", "2022-12-31"),
-        "📈 23-24震": ("2023-01-01", "2024-12-31"),
-        "🔄 近1年": ((datetime.now()-timedelta(days=365)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d")),
-        "📊 近3年": ((datetime.now()-timedelta(days=1095)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d")),
-        "🔁 全部": None,
-    }
-    for label, dr in preset_dates.items():
-        btn_key = f"preset_{label}"
-        if (c1 if "牛" in label else c2 if "熊" in label or "震" in label else c3).button(label, use_container_width=True, key=btn_key):
-            st.session_state.date_range = dr; st.rerun()
-
-    d1 = st.date_input("起始", datetime(2020, 1, 1), key="date_start")
-    d2 = st.date_input("结束", datetime(2026, 6, 30), key="date_end")
-    if st.button("应用手动日期"):
-        st.session_state.date_range = (d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d"))
-        st.rerun()
-
-    if st.session_state.date_range:
-        st.caption(f"当前: {st.session_state.date_range[0]} ~ {st.session_state.date_range[1]}")
-    else:
-        st.caption("当前: 全部历史")
-
-    st.divider()
-    oos_enabled = st.checkbox("样本外测试 (OOS)", False)
-    oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
-
-# ============================================================
-# Sidebar: 指标积木 (按分类)
-# ============================================================
-# 按分类组织
-categories = {}
-for name, info in INDICATOR_REGISTRY.items():
-    cat = info["category"]
-    if cat not in categories: categories[cat] = []
-    categories[cat].append(name)
-
-if "selected_indicators" not in st.session_state:
-    st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"快线": 5, "慢线": 20}}}
-
-with st.sidebar.expander("🧱 指标积木 (60+种)", expanded=False):
-    logic_mode = st.radio("触发逻辑", ["AND 全部满足", "OR 任一满足"], horizontal=True, key="logic_mode")
-    use_and = "AND" in logic_mode
-
-    for cat_name, ind_names in categories.items():
-        st.caption(f"▸ {cat_name} ({len(ind_names)}种)")
-        for name in ind_names:
-            info = INDICATOR_REGISTRY[name]
-            sel = st.session_state.selected_indicators
-            checked = name in sel and sel[name].get("enabled", False)
-            new_checked = st.checkbox(name, checked, key=f"ind_{name}", help=info["desc"])
-            if new_checked and name not in sel:
-                sel[name] = {"enabled": True, "params": {k: v[2] for k, v in info["params"].items()}}
-            elif not new_checked and name in sel:
-                sel[name]["enabled"] = False
-
-            if new_checked and info["params"]:
-                with st.container():
-                    cols = st.columns(min(3, len(info["params"])))
-                    for i, (pname, prange) in enumerate(info["params"].items()):
-                        step = prange[3] if len(prange) > 3 else 1
-                        val = cols[i % 3].number_input(
-                            f"{name[:8]}-{pname}", prange[0], prange[1],
-                            sel[name]["params"].get(pname, prange[2]), step,
-                            key=f"p_{name}_{pname}", label_visibility="collapsed"
-                        )
-                        sel[name]["params"][pname] = val
-
-# ============================================================
-# Sidebar: 风控 + 多因子
-# ============================================================
-with st.sidebar.expander("🛡️ 风控", expanded=False):
-    tp_pct = st.slider("止盈 (保证金%)", 2.0, 50.0, 10.0, 0.5)
-    sl_pct = st.slider("止损 (保证金%)", 1.0, 30.0, 5.0, 0.5)
-    oco = st.checkbox("服务器端OCO挂单", True)
-    c1, c2, c3 = st.columns(3)
-    bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
-    range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
-    bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
-    lock_streak = st.number_input("连亏锁仓(笔)", 1, 10, 3)
-    lock_days = st.number_input("锁仓天数", 1, 30, 2)
-
-with st.sidebar.expander("🔗 多因子共振", expanded=False):
-    st.caption("选3个不同维度因子, 同时满足=强信号")
-    resonance_enabled = st.checkbox("启用共振打分", False, key="res_on")
-    cat_list = ["趋势类", "摆动类", "通道/支撑", "成交量", "K线形态"]
-    c1, c2, c3 = st.columns(3)
-    res_f1 = c1.selectbox("因子1", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] == cat_list[0]], key="rf1")
-    res_f2 = c2.selectbox("因子2", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[1:3]], key="rf2")
-    res_f3 = c3.selectbox("因子3", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[3:]], key="rf3")
-    if resonance_enabled:
-        st.caption(f"共振: {' + '.join(f for f in [res_f1,res_f2,res_f3] if f) or '未选'}")
-
-with st.sidebar.expander("🔬 多因子牛熊", expanded=False):
-    mf_enabled = st.checkbox("启用", True, key="mf_on")
-    c1, c2 = st.columns(2)
-    ema_w = c1.slider("EMA权重", 0.0, 1.0, 0.40, 0.05, key="mf_ew")
-    adx_w = c2.slider("ADX权重", 0.0, 1.0, 0.35, 0.05, key="mf_aw")
-    adx_th = st.slider("ADX阈值", 10, 50, 25, 5, key="mf_at")
-    bull_th = st.slider("牛市判定", 0.10, 0.60, 0.30, 0.05, key="mf_bt")
-
-# 刷新行情
-if st.sidebar.button("🔄 刷新最新行情", use_container_width=True):
-    st.cache_data.clear()
-    st.cache_resource.clear()
-    st.success("缓存已清除, 正在重新加载最新数据...")
-    time.sleep(1)
-    st.rerun()
-
-# 导出
-st.sidebar.divider()
-cur_params = {"coin": coin, "tf": timeframe, "lev": leverage, "cap": initial_capital,
-              "tp": tp_pct, "sl": sl_pct, "indicators": list(st.session_state.selected_indicators.keys())}
-st.sidebar.markdown(export_json(cur_params), unsafe_allow_html=True)
-if st.sidebar.button("登出"): st.session_state.logged_in = False; st.rerun()
+# (旧侧边栏已移入config_form, 此段删除)
 
 # ============================================================
 # AI 策略导师 (侧边栏底部可折叠聊天区)
@@ -842,7 +812,7 @@ def call_ai_api(messages: list, provider: str, api_key: str) -> str:
 # ============================================================
 # 主界面头部
 # ============================================================
-st.title("📊 翔哥量化回测控制台 v3.1")
+st.title("📊 马总量化回测控制台 v3.3")
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("标的", coin); p2.metric("周期", timeframe); p3.metric("杠杆", f"{leverage}x"); p4.metric("资金", f"${initial_capital:,}")
 
@@ -851,7 +821,7 @@ active_inds = [n for n, c in st.session_state.selected_indicators.items() if c.g
 st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:10]) + ("..." if len(active_inds) > 10 else ""))
 
 st.divider()
-if st.button("🚀 运行策略回测", type="primary", use_container_width=True):
+if submitted:
     # 加载数据
     with st.spinner("加载数据 & 计算指标..."):
         de = DataEngine()
@@ -933,7 +903,7 @@ if st.button("🚀 运行策略回测", type="primary", use_container_width=True
     if ec:
         times = [e['timestamp'] for e in ec]; eqs = [e['equity'] for e in ec]
         fig_eq = go.Figure()
-        fig_eq.add_trace(go.Scatter(x=times, y=eqs, mode='lines', name='权益',
+        fig_eq.add_trace(go.Scattergl(x=times, y=eqs, mode='lines', name='权益',
                                      line=dict(color='#818cf8', width=2),
                                      fill='tozeroy', fillcolor='rgba(129,140,248,0.1)'))
         fig_eq.add_hline(y=initial_capital, line_dash="dash", line_color="gray")
@@ -973,16 +943,16 @@ if st.button("🚀 运行策略回测", type="primary", use_container_width=True
 
     # 叠加EMA
     if 'ema_fast' in df_show.columns:
-        fig_kl.add_trace(go.Scatter(x=df_show.index, y=df_show['ema_fast'], mode='lines',
+        fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['ema_fast'], mode='lines',
                                      line=dict(color='#FFD700', width=1), name='EMA快'), row=1, col=1)
-        fig_kl.add_trace(go.Scatter(x=df_show.index, y=df_show['ema_slow'], mode='lines',
+        fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['ema_slow'], mode='lines',
                                      line=dict(color='#FF6B6B', width=1), name='EMA慢'), row=1, col=1)
 
     # 布林带
     if 'bb_upper' in df_show.columns:
-        fig_kl.add_trace(go.Scatter(x=df_show.index, y=df_show['bb_upper'], mode='lines',
+        fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['bb_upper'], mode='lines',
                                      line=dict(color='gray', width=0.5, dash='dot'), name='BB上'), row=1, col=1)
-        fig_kl.add_trace(go.Scatter(x=df_show.index, y=df_show['bb_lower'], mode='lines',
+        fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['bb_lower'], mode='lines',
                                      line=dict(color='gray', width=0.5, dash='dot'), name='BB下'), row=1, col=1)
 
     # 交易标记
@@ -996,11 +966,11 @@ if st.button("🚀 运行策略回测", type="primary", use_container_width=True
             if t['side'] == 'LONG': buy_t.append(ot); buy_p.append(t['entry'])
             else: sell_t.append(ot); sell_p.append(t['entry'])
     if buy_t:
-        fig_kl.add_trace(go.Scatter(x=buy_t, y=buy_p, mode='markers',
+        fig_kl.add_trace(go.Scattergl(x=buy_t, y=buy_p, mode='markers',
                                      marker=dict(symbol='triangle-up', size=12, color='#22c55e'),
                                      name='做多'), row=1, col=1)
     if sell_t:
-        fig_kl.add_trace(go.Scatter(x=sell_t, y=sell_p, mode='markers',
+        fig_kl.add_trace(go.Scattergl(x=sell_t, y=sell_p, mode='markers',
                                      marker=dict(symbol='triangle-down', size=12, color='#ef4444'),
                                      name='做空'), row=1, col=1)
 
