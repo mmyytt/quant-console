@@ -64,29 +64,65 @@ def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
     info = COINS.get(coin)
     if not info: return {"source": "failed", "df": None, "last_ts": None}
 
-    # === Source 1: OKX Public API (最可靠) ===
+    # === Source 1: OKX Public API (多endpoint轮换) ===
+    okx_inst = info["okx"]
+    okx_endpoints = [
+        "https://www.okx.com",
+        "https://aws.okx.com",
+    ]
+    for okx_base in okx_endpoints:
+        try:
+            url = f"{okx_base}/api/v5/market/candles?instId={okx_inst}&bar=15m&limit={min(limit, 300)}"
+            print(f"[OKX] Trying {okx_base}...")
+            r = requests.get(url, timeout=15, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                "Accept": "application/json",
+            })
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("code") == "0" and data.get("data"):
+                    rows = []
+                    for x in reversed(data["data"]):
+                        rows.append({
+                            "ts": int(x[0]), "open": float(x[1]), "high": float(x[2]),
+                            "low": float(x[3]), "close": float(x[4]), "vol": float(x[5]),
+                        })
+                    df = pd.DataFrame(rows)
+                    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
+                    df = df.set_index("ts").sort_index()
+                    print(f"[OKX] SUCCESS ({okx_base}): {len(df)} bars, last={df.index[-1]}")
+                    return {"source": "okx", "df": df, "last_ts": str(df.index[-1])}
+            print(f"[OKX] {okx_base}: HTTP {r.status_code}, body={r.text[:200]}")
+        except Exception as e:
+            print(f"[OKX] {okx_base}: EXCEPTION {type(e).__name__}: {e}")
+            import traceback; traceback.print_exc()
+
+    # === Source 1.5: Binance Public API ===
     try:
-        okx_inst = info["okx"]
-        url = f"https://www.okx.com/api/v5/market/candles?instId={okx_inst}&bar=15m&limit={min(limit, 300)}"
-        print(f"[OKX] Trying {url[:80]}...")
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200:
-            data = r.json()
-            if data.get("code") == "0" and data.get("data"):
-                rows = []
-                for x in reversed(data["data"]):  # OKX返回最新优先
-                    rows.append({
-                        "ts": int(x[0]), "open": float(x[1]), "high": float(x[2]),
-                        "low": float(x[3]), "close": float(x[4]), "vol": float(x[5]),
-                    })
-                df = pd.DataFrame(rows)
-                df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
-                df = df.set_index("ts").sort_index()
-                print(f"[OKX] SUCCESS: {len(df)} bars, last={df.index[-1]}")
-                return {"source": "okx", "df": df, "last_ts": str(df.index[-1])}
-        print(f"[OKX] FAILED: HTTP {r.status_code}")
+        bnb_symbol = info["symbol"]
+        now_ms = int(datetime.now().timestamp() * 1000)
+        start_ms = int((datetime.now() - timedelta(days=60)).timestamp() * 1000)
+        for bnb_url in ["https://api.binance.com", "https://api1.binance.com", "https://api3.binance.com"]:
+            try:
+                url = f"{bnb_url}/api/v3/klines?symbol={bnb_symbol}&interval=15m&startTime={start_ms}&endTime={now_ms}&limit=1000"
+                print(f"[Binance] Trying {bnb_url}...")
+                r = requests.get(url, timeout=15, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                })
+                if r.status_code == 200 and isinstance(r.json(), list) and len(r.json()) > 0:
+                    data = r.json()
+                    df = pd.DataFrame(data, columns=["ts","open","high","low","close","vol","a","b","c","d","e","f"])
+                    df = df[["ts","open","high","low","close","vol"]]
+                    for col in df.columns[1:]: df[col] = pd.to_numeric(df[col], errors="coerce")
+                    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
+                    df = df.set_index("ts").sort_index().dropna()
+                    print(f"[Binance] SUCCESS ({bnb_url}): {len(df)} bars, last={df.index[-1]}")
+                    return {"source": "binance", "df": df, "last_ts": str(df.index[-1])}
+            except Exception as e:
+                print(f"[Binance] {bnb_url}: {type(e).__name__}: {e}")
     except Exception as e:
-        print(f"[OKX] EXCEPTION: {e}")
+        print(f"[Binance] EXCEPTION: {type(e).__name__}: {e}")
+        import traceback; traceback.print_exc()
 
     # === Source 2: CoinGecko ===
     try:

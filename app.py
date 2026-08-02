@@ -569,6 +569,24 @@ for label, dr, col in [
 if st.sidebar.button("🔁 全部历史", use_container_width=True):
     st.session_state.date_range = None; st.rerun()
 
+# 自定义日期选择器 (恢复!)
+st.sidebar.caption("自定义日期:")
+dc1, dc2 = st.sidebar.columns(2)
+d_start = dc1.date_input("起始", datetime(2020,1,1), key="d_start")
+d_end = dc2.date_input("结束", datetime.now(), key="d_end")
+dp3, dp4 = st.sidebar.columns(2)
+if dp3.button("近1年", use_container_width=True):
+    st.session_state.date_range = ((datetime.now()-timedelta(days=365)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
+    st.rerun()
+if dp4.button("近3年", use_container_width=True):
+    st.session_state.date_range = ((datetime.now()-timedelta(days=1095)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
+    st.rerun()
+if st.sidebar.button("✓ 应用自定义日期", use_container_width=True):
+    st.session_state.date_range = (d_start.strftime("%Y-%m-%d"), d_end.strftime("%Y-%m-%d"))
+    st.rerun()
+if st.session_state.date_range:
+    st.sidebar.caption(f"当前: {st.session_state.date_range[0]} ~ {st.session_state.date_range[1]}")
+
 st.sidebar.divider()
 
 # ============================================================
@@ -1069,8 +1087,11 @@ else:
         mc4.metric("涨跌幅", f"{chg:+.1f}%")
         mc5.metric("最新价", f"${df_pv['close'].iloc[-1]:.2f}")
 
-        # === 双子图: 100%完整展示, 不做任何截断 ===
-        df_show = df_pv
+        # === 双子图: 最多显示1000根, 防卡顿 ===
+        MAX_BARS = 1000
+        df_show = df_pv if len(df_pv) <= MAX_BARS else df_pv.tail(MAX_BARS)
+        if len(df_pv) > MAX_BARS:
+            st.caption(f"数据共 {len(df_pv):,} 根, 图表显示最近 {MAX_BARS:,} 根 (流畅渲染)")
 
         fig_pv = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
