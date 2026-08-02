@@ -700,208 +700,7 @@ def resample_cached(df_15m, period: str):
     df["quote_vol"] = ((df["high"] + df["low"] + df["close"]) / 3 * df["vol"])
     return df
 
-# (旧侧边栏已移入config_form, 此段删除)
-
-# ============================================================
-# AI 策略导师 (侧边栏底部可折叠聊天区)
-# ============================================================
-def build_ai_context():
-    """构建当前策略状态的上下文, 注入AI对话"""
-    ctx = f"""【当前策略环境】
-标的: {coin} | K线周期: {timeframe} | 杠杆: {leverage}x | 初始资金: ${initial_capital:,}
-止盈: {tp_pct}% | 止损: {sl_pct}% | 牛市仓位: {int(bull_a*100)}% 震荡: {int(range_a*100)}% 熊市: {int(bear_a*100)}%
-牛熊过滤器: {'开启' if mf_enabled else '关闭'} (EMA权重{ema_w} ADX权重{adx_w} ADX阈值{adx_th} 牛市阈值{bull_th})
-信号逻辑: {'AND(全部满足)' if use_and else 'OR(任一满足)'}
-已选指标: {', '.join(active_inds) if active_inds else '无'}
-时间范围: {st.session_state.date_range or '全部历史'}
-OOS: {'开启 ' + str(oos_ratio) + '%训练' if oos_enabled else '关闭'}
----
-你是翔哥, 马总的专属量化策略导师。基于上面的策略配置, 帮马总分析问题、优化参数、诊断回测结果。
-用简洁的中文回答, 直接给结论和建议, 不要废话。"""
-    return ctx
-
-st.sidebar.divider()
-with st.sidebar.expander("🤖 AI 策略导师 (翔哥)", expanded=False):
-    # API 配置
-    if "ai_api_key" not in st.session_state:
-        st.session_state.ai_api_key = os.environ.get("AI_API_KEY", "")
-    if "ai_provider" not in st.session_state:
-        st.session_state.ai_provider = "anthropic"
-    if "ai_messages" not in st.session_state:
-        st.session_state.ai_messages = []
-
-    api_key = st.text_input("API Key", value=st.session_state.ai_api_key,
-                            type="password", key="ai_key_input",
-                            placeholder="sk-ant-... 或 sk-...",
-                            help="Anthropic 或 OpenAI API Key")
-    if api_key: st.session_state.ai_api_key = api_key
-
-    provider = st.selectbox("模型", ["anthropic (Claude)", "openai (GPT)"],
-                            index=0 if "anthropic" in st.session_state.ai_provider else 1,
-                            key="ai_provider_select")
-    st.session_state.ai_provider = "anthropic" if "anthropic" in provider else "openai"
-
-    # 聊天历史
-    for msg in st.session_state.ai_messages:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
-    # 输入框
-    user_input = st.chat_input("问翔哥...", key="ai_chat_input")
-    if user_input and st.session_state.ai_api_key:
-        st.session_state.ai_messages.append({"role": "user", "content": user_input})
-        with st.chat_message("user"): st.write(user_input)
-
-        # 构建完整 prompt
-        system_prompt = build_ai_context()
-        messages = [{"role": "system", "content": system_prompt}]
-        # 最近5轮对话
-        for m in st.session_state.ai_messages[-10:]:
-            messages.append(m)
-
-        with st.chat_message("assistant"):
-            with st.spinner("翔哥思考中..."):
-                try:
-                    reply = call_ai_api(messages, st.session_state.ai_provider,
-                                        st.session_state.ai_api_key)
-                    st.write(reply)
-                    st.session_state.ai_messages.append({"role": "assistant", "content": reply})
-                except Exception as e:
-                    st.error(f"API调用失败: {e}")
-
-    elif user_input and not st.session_state.ai_api_key:
-        st.warning("请先填入 API Key")
-    elif not user_input:
-        st.caption("输入问题, 翔哥帮你分析策略~")
-        if st.button("诊断当前策略", use_container_width=True, key="ai_diag"):
-            if st.session_state.ai_api_key:
-                auto_prompt = f"请诊断我当前的策略配置, 给出3条具体优化建议。"
-                st.session_state.ai_messages = [{"role": "user", "content": auto_prompt}]
-                st.rerun()
-            else:
-                st.warning("请先填入 API Key")
-
-    if st.button("清空对话", use_container_width=True, key="ai_clear"):
-        st.session_state.ai_messages = []; st.rerun()
-
-# ============================================================
-# DeepSeek 策略诊断 (侧边栏底部)
-# ============================================================
-st.sidebar.divider()
-with st.sidebar.expander("🧠 DeepSeek 策略诊断", expanded=False):
-    ds_key = st.text_input("DeepSeek API Key", type="password",
-                           value=os.environ.get("DEEPSEEK_API_KEY", ""),
-                           key="ds_key", placeholder="sk-...",
-                           help="https://platform.deepseek.com 获取")
-    if ds_key: os.environ["DEEPSEEK_API_KEY"] = ds_key
-
-    if st.button("🧠 一键诊断当前行情与指标", use_container_width=True, type="primary",
-                 disabled=not ds_key):
-        if not ds_key:
-            st.warning("请先填入 DeepSeek API Key")
-        else:
-            with st.spinner("DeepSeek 分析中..."):
-                # 构建指标状态
-                ind_state = {}
-                try:
-                    df_check = load_cached_15min(coin)
-                    df_check.index = pd.to_datetime(df_check.index).tz_localize(None)
-                    last_row = df_check.iloc[-1]
-                    current_price = float(last_row['close'])
-
-                    for name, cfg in st.session_state.selected_indicators.items():
-                        if not cfg.get("enabled"): continue
-                        info = INDICATOR_REGISTRY.get(name)
-                        if not info: continue
-                        try:
-                            df_tmp = df_check.tail(200).copy()
-                            info["compute"](df_tmp, cfg.get("params", {}))
-                            has_l = "_long" in df_tmp.columns and df_tmp["_long"].iloc[-1]
-                            has_s = "_short" in df_tmp.columns and df_tmp["_short"].iloc[-1]
-                            if has_l: ind_state[name] = "做多信号触发"
-                            elif has_s: ind_state[name] = "做空信号触发"
-                            else: ind_state[name] = "无信号"
-                        except:
-                            ind_state[name] = "计算异常"
-                except:
-                    current_price = 0
-                    ind_state = {"提示": "数据加载失败"}
-
-                # 最近的回测结果
-                bt_metrics = {}
-                bt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
-                if os.path.exists(bt_file):
-                    try:
-                        with open(bt_file) as f: bt_metrics = json.load(f)
-                    except: pass
-
-                from ai_analyst import analyze
-                result = analyze(
-                    api_key=ds_key,
-                    coin=coin,
-                    current_price=current_price,
-                    indicators_state=ind_state,
-                    backtest_metrics=bt_metrics if bt_metrics else None,
-                    timeframe=timeframe,
-                )
-
-                if result["success"]:
-                    st.success(f"DeepSeek ({result.get('model','?')}) 分析完成")
-                    st.markdown(result["content"])
-                    st.caption(f"Tokens: {result.get('usage',{}).get('total_tokens','?')}")
-                else:
-                    st.error(f"分析失败: {result['error']}")
-
-
-# ============================================================
-# AI API 调用 (流式输出)
-# ============================================================
-def call_ai_api(messages: list, provider: str, api_key: str) -> str:
-    """调用 Anthropic 或 OpenAI API"""
-    import requests
-
-    if "anthropic" in provider:
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        # 分离 system prompt
-        system_msg = next((m for m in messages if m["role"] == "system"), None)
-        chat_msgs = [m for m in messages if m["role"] != "system"]
-        body = {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 1024,
-            "messages": chat_msgs,
-        }
-        if system_msg:
-            body["system"] = system_msg["content"]
-
-        resp = requests.post(url, headers=headers, json=body, timeout=30)
-        if resp.status_code != 200:
-            raise Exception(f"API错误 {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        return data["content"][0]["text"]
-
-    else:  # OpenAI
-        url = "https://api.openai.com/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        body = {
-            "model": "gpt-4o-mini",
-            "max_tokens": 1024,
-            "messages": messages,
-        }
-        resp = requests.post(url, headers=headers, json=body, timeout=30)
-        if resp.status_code != 200:
-            raise Exception(f"API错误 {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        return data["choices"][0]["message"]["content"]
-
-# ============================================================
+# (旧AI模块已整合到 🤖 祥哥 AI 对话舱 Tab)
 # 主界面头部
 # ============================================================
 st.title("📊 马总量化回测控制台 v3.4")
@@ -925,43 +724,55 @@ st.divider()
 # Tab 2: 祥哥 AI 对话舱
 # ============================================================
 if "AI" in st.session_state.active_tab:
-    from ai_assistant import chat as ai_chat, build_context, MODEL_PRESETS, QUICK_PROMPTS, DEFAULT_TRADING_NOTES
+    from ai_assistant import build_context, DEFAULT_TRADING_NOTES
 
-    # 配置区
+    # 模型预设 (整合所有主流API)
+    ALL_MODELS = {
+        "DeepSeek-V3 (推荐)":  {"base": "https://api.deepseek.com",      "model": "deepseek-chat"},
+        "DeepSeek-R1 (推理)":  {"base": "https://api.deepseek.com",      "model": "deepseek-reasoner"},
+        "OpenAI GPT-4o":       {"base": "https://api.openai.com",        "model": "gpt-4o"},
+        "OpenAI GPT-4o-mini":  {"base": "https://api.openai.com",        "model": "gpt-4o-mini"},
+        "Anthropic Claude 3.5":{"base": "https://api.anthropic.com",     "model": "claude-sonnet-4-20250514"},
+        "Google Gemini 2.0":   {"base": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash"},
+    }
+
     with st.expander("⚙️ AI 配置", expanded=not st.session_state.get("ai_configured", False)):
         c1, c2 = st.columns(2)
-        ai_key = c1.text_input("API Key", type="password",
+        ai_key = c1.text_input("API Key / 密钥", type="password",
                                value=os.environ.get("AI_API_KEY", ""),
-                               key="ai_main_key", placeholder="sk-...")
-        ai_model = c2.selectbox("模型", list(MODEL_PRESETS.keys()), index=0, key="ai_model_sel")
+                               key="ai_main_key", placeholder="sk-... 或 AIza...")
+        ai_model_name = c2.selectbox("模型", list(ALL_MODELS.keys()), index=0, key="ai_mdl")
 
-        if "自定义" in ai_model:
-            c1, c2 = st.columns(2)
-            ai_custom_url = c1.text_input("Base URL", "https://api.deepseek.com", key="ai_cust_url")
-            ai_custom_model = c2.text_input("Model Name", "deepseek-chat", key="ai_cust_model")
-
-        # 交易心法
         if "trading_notes" not in st.session_state:
             st.session_state.trading_notes = DEFAULT_TRADING_NOTES
-        st.caption("📝 我的交易心法与经验偏好 (自动注入 AI 对话)")
-        trading_notes = st.text_area("心法", value=st.session_state.trading_notes, height=120,
+        st.caption("翔哥私房交易心法 (自动注入 System Prompt)")
+        trading_notes = st.text_area("心法", value=st.session_state.trading_notes, height=100,
                                       key="tnotes", label_visibility="collapsed")
         st.session_state.trading_notes = trading_notes
 
-        if st.button("保存配置", use_container_width=True):
-            st.session_state.ai_configured = True; st.rerun()
-
     if not ai_key:
-        st.info("请在上方展开 ⚙️ AI 配置, 填入 DeepSeek/OpenAI API Key")
-        st.stop()
+        st.info("展开上方 ⚙️ AI 配置, 填入 API Key 即可使用")
+    else:
+        st.session_state.ai_configured = True
 
-    # 快捷提问
-    st.caption("快捷提问:")
-    qcols = st.columns(len(QUICK_PROMPTS))
+    # 快捷按钮行
+    qcols = st.columns(5)
+    quick_msgs = {
+        "💡 行情解读": "帮我解读当前行情是否符合我的交易心法。",
+        "🎯 共振策略": "结合我选的指标，帮我设计一套三体共振策略并讲解原理。",
+        "❓ 假突破检测": "现在的指标数据里，有没有出现'无量洗盘'或假突破的信号？",
+        "📊 参数优化": "根据回测结果，给出3条止盈止损参数优化建议。",
+        "🔍 风险诊断": "扫描我当前的策略配置，指出最大的3个风险点。",
+    }
     quick_clicked = None
-    for i, (label, prompt) in enumerate(QUICK_PROMPTS):
-        if qcols[i].button(label, use_container_width=True, key=f"qp_{i}"):
+    for i, (label, prompt) in enumerate(quick_msgs.items()):
+        if qcols[i].button(label, use_container_width=True, key=f"qp_{i}", disabled=not ai_key):
             quick_clicked = prompt
+
+    # 一键诊断按钮
+    dcol, _ = st.columns([1, 3])
+    if dcol.button("🧠 一键诊断当前行情与策略", use_container_width=True, type="primary", disabled=not ai_key):
+        quick_clicked = "请给我一份完整的策略诊断报告：1)当前多空格局解读 2)推荐的指标参数和止盈止损 3)Alpha因子优化建议。"
 
     # 聊天记录
     if "ai_chat_history" not in st.session_state:
@@ -971,17 +782,15 @@ if "AI" in st.session_state.active_tab:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    # 处理快捷提问或用户输入
-    user_msg = st.chat_input("和翔哥聊聊你的策略...", key="ai_main_chat")
+    user_msg = st.chat_input("和翔哥聊聊你的策略...", key="ai_main_chat", disabled=not ai_key)
     if quick_clicked:
         user_msg = quick_clicked
 
-    if user_msg:
+    if user_msg and ai_key:
         st.session_state.ai_chat_history.append({"role": "user", "content": user_msg})
-        with st.chat_message("user"):
-            st.write(user_msg)
+        with st.chat_message("user"): st.write(user_msg)
 
-        # 构建上下文
+        # 构建实时上下文
         try:
             df_ctx = load_cached_15min(coin)
             df_ctx.index = pd.to_datetime(df_ctx.index).tz_localize(None)
@@ -1008,17 +817,11 @@ if "AI" in st.session_state.active_tab:
             except: pass
 
         context = build_context(coin, timeframe, px, ind_ctx, bt)
-        system_msg = {"role": "system", "content": context}
-        msgs = [system_msg] + st.session_state.ai_chat_history[-8:]
+        msgs = [{"role": "system", "content": context}] + st.session_state.ai_chat_history[-8:]
 
         with st.chat_message("assistant"):
             with st.spinner("翔哥思考中..."):
-                result = ai_chat(
-                    messages=msgs, api_key=ai_key, model_name=ai_model,
-                    custom_base_url=ai_custom_url if "自定义" in ai_model else "",
-                    custom_model=ai_custom_model if "自定义" in ai_model else "",
-                    trading_notes=st.session_state.trading_notes,
-                )
+                result = _call_unified_api(msgs, ai_key, ai_model_name, trading_notes)
                 if result["success"]:
                     st.write(result["content"])
                     st.caption(f"模型: {result.get('model','?')}")
@@ -1026,12 +829,69 @@ if "AI" in st.session_state.active_tab:
                 else:
                     st.error(result["error"])
 
-    # 清空按钮
     if st.session_state.ai_chat_history:
         if st.button("🗑️ 清空对话", use_container_width=True):
             st.session_state.ai_chat_history = []; st.rerun()
 
-    st.stop()  # AI tab下不显示回测内容
+    st.stop()
+
+
+# ============================================================
+# 统一 API 调用 (DeepSeek / OpenAI / Anthropic / Gemini)
+# ============================================================
+def _call_unified_api(messages: list, api_key: str, model_name: str, trading_notes: str) -> dict:
+    import requests
+    if trading_notes.strip():
+        np = {"role": "system", "content": f"你是翔哥，马总的专属量化导师。精通加密货币技术分析。\n\n【马总交易心法】\n{trading_notes.strip()}\n\n用简洁中文回答, 直接给结论。"}
+        hs = any(m["role"] == "system" for m in messages)
+        if hs:
+            for m in messages:
+                if m["role"] == "system": m["content"] = np["content"] + "\n\n" + m["content"]
+        else: messages.insert(0, np)
+
+    # DeepSeek
+    if "DeepSeek" in model_name:
+        mdl = "deepseek-chat" if "V3" in model_name else "deepseek-reasoner"
+        r = requests.post("https://api.deepseek.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": mdl, "messages": messages, "max_tokens": 2000, "temperature": 0.7}, timeout=45)
+        if r.status_code == 200: d = r.json(); return {"success": True, "content": d["choices"][0]["message"]["content"], "model": d.get("model", mdl)}
+        return {"success": False, "error": f"DeepSeek {r.status_code}: {r.text[:200]}"}
+
+    # OpenAI
+    if "OpenAI" in model_name or "GPT" in model_name:
+        mdl = "gpt-4o" if "mini" not in model_name else "gpt-4o-mini"
+        r = requests.post("https://api.openai.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": mdl, "messages": messages, "max_tokens": 2000}, timeout=45)
+        if r.status_code == 200: d = r.json(); return {"success": True, "content": d["choices"][0]["message"]["content"], "model": d.get("model", mdl)}
+        return {"success": False, "error": f"OpenAI {r.status_code}: {r.text[:200]}"}
+
+    # Anthropic Claude
+    if "Claude" in model_name or "Anthropic" in model_name:
+        sm = next((m for m in messages if m["role"] == "system"), None)
+        cm = [m for m in messages if m["role"] != "system"]
+        body = {"model": "claude-sonnet-4-20250514", "max_tokens": 2000, "messages": cm}
+        if sm: body["system"] = sm["content"]
+        r = requests.post("https://api.anthropic.com/v1/messages",
+            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json=body, timeout=45)
+        if r.status_code == 200: d = r.json(); return {"success": True, "content": d["content"][0]["text"], "model": d.get("model", "claude")}
+        return {"success": False, "error": f"Claude {r.status_code}: {r.text[:200]}"}
+
+    # Google Gemini
+    if "Gemini" in model_name:
+        mdl = "gemini-2.0-flash"
+        contents = [{"role": "user" if m["role"] != "assistant" else "model", "parts": [{"text": m["content"]}]} for m in messages]
+        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={api_key}",
+            headers={"Content-Type": "application/json"}, json={"contents": contents}, timeout=45)
+        if r.status_code == 200:
+            d = r.json(); txt = d["candidates"][0]["content"]["parts"][0]["text"]
+            return {"success": True, "content": txt, "model": mdl}
+        return {"success": False, "error": f"Gemini {r.status_code}: {r.text[:200]}"}
+
+    return {"success": False, "error": f"Unknown model: {model_name}"}
+
 
 # ============================================================
 # Tab 1: 回测看板
