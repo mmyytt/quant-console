@@ -700,13 +700,13 @@ def resample_cached(df_15m, period: str):
     df["quote_vol"] = ((df["high"] + df["low"] + df["close"]) / 3 * df["vol"])
     return df
 
-# (旧AI模块已整合到 🤖 祥哥 AI 对话舱 Tab)
+# (旧AI模块已整合到 🤖 翔哥 AI 对话舱 Tab)
 # 主界面头部
 # ============================================================
 st.title("📊 马总量化回测控制台 v3.4")
 
 # Tab 导航
-tab_names = ["📈 回测看板", "🤖 祥哥 AI 对话舱"]
+tab_names = ["📈 回测看板", "🤖 翔哥 AI 对话舱"]
 if "active_tab" not in st.session_state: st.session_state.active_tab = "回测看板"
 tc1, tc2 = st.columns([1, 1])
 with tc1:
@@ -714,14 +714,14 @@ with tc1:
                  type="primary" if "回测" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "回测看板"; st.rerun()
 with tc2:
-    if st.button("🤖 祥哥 AI 对话舱", use_container_width=True,
+    if st.button("🤖 翔哥 AI 对话舱", use_container_width=True,
                  type="primary" if "AI" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "AI 对话舱"; st.rerun()
 
 st.divider()
 
 # ============================================================
-# Tab 2: 祥哥 AI 对话舱
+# Tab 2: 翔哥 AI 对话舱
 # ============================================================
 if "AI" in st.session_state.active_tab:
     from ai_assistant import build_context, DEFAULT_TRADING_NOTES
