@@ -743,6 +743,15 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
     lock_streak = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
     lock_days = c2.number_input("锁仓天数", 1, 30, 2)
+    c1, c2 = st.columns(2)
+    risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5,
+                                     help="每笔交易最大亏损占账户的百分比")
+    use_atr_stop = c2.checkbox("ATR动态止损", False, help="启用后止损=ATR*倍数, 替代固定止损%")
+    atr_period_val, atr_mult_val = 14, 2.0
+    if use_atr_stop:
+        c1, c2 = st.columns(2)
+        atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1, help="计算平均真实波幅的周期")
+        atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5, help="止损价=入场价±ATR*倍数")
     oos_enabled = st.checkbox("样本外测试 (OOS)", False)
     oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
 
@@ -996,6 +1005,15 @@ st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:10]) 
 
 st.divider()
 if submitted:
+    # 强制刷新最新行情数据
+    with st.spinner("检查最新行情数据..."):
+        try:
+            from data_loader import ensure_data
+            ensure_data(coin)
+            st.cache_data.clear()  # 清除旧缓存, 强制重新加载
+        except Exception as e:
+            st.caption(f"数据刷新跳过: {e}")
+
     # 加载数据
     with st.spinner("加载数据 & 计算指标..."):
         de = DataEngine()
