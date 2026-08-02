@@ -1,5 +1,5 @@
 """
-马总量化控制台 v3.2 — 百种指标积木 + AI策略导师
+马总量化控制台 — 百种指标积木 + AI策略导师
 ============================================================
 启动: streamlit run app.py
 """
@@ -35,7 +35,7 @@ def check_login():
     if not AUTH_CONFIG["enabled"]: return True
     if "logged_in" not in st.session_state: st.session_state.logged_in = False
     if st.session_state.logged_in: return True
-    st.markdown("<h1 style='text-align:center;margin-top:60px'>马总量化控制台 v3.2</h1>", unsafe_allow_html=True)
+    st.markdown("<h1 style='text-align:center;margin-top:60px'>马总量化控制台</h1>", unsafe_allow_html=True)
     st.markdown("<p style='text-align:center;opacity:0.5'>请输入账号密码</p>", unsafe_allow_html=True)
     _, c, _ = st.columns([1, 2, 1])
     with c:
@@ -53,14 +53,32 @@ def export_json(params):
 # ============================================================
 # 页面配置 + CSS
 # ============================================================
-st.set_page_config(page_title="马总量化 v3.2", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="马总量化", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""<style>
-@media (max-width:768px){body{padding:4px!important;font-size:13px!important}.stButton>button{padding:10px!important;font-size:14px!important}h1{font-size:18px!important}}
-.metric-card{background:#1e293b;border-radius:10px;padding:16px;text-align:center;margin:4px 0}
-.metric-card .value{font-size:28px;font-weight:800}.metric-card .label{font-size:11px;opacity:.5;margin-top:2px}
+/* === 全局暗黑科技风 === */
+body { font-family: 'Inter', 'Microsoft YaHei', sans-serif; }
+.stApp { background: #0b1120; }
+section[data-testid="stSidebar"] { background: #0d1320; }
+.stButton>button {
+    border-radius: 8px !important; border: 1px solid rgba(255,255,255,0.08) !important;
+    background: #1a1f35 !important; transition: all 0.2s;
+}
+.stButton>button:hover { background: #252b48 !important; border-color: rgba(129,140,248,0.3) !important; }
+.stButton>button[kind="primary"] { background: #4f46e5 !important; border-color: #4f46e5 !important; }
+div[data-testid="stForm"] { border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 12px; }
+div[data-testid="stExpander"] { border-radius: 8px; border: 1px solid rgba(255,255,255,0.06); }
+.stChatMessage { border-radius: 8px; }
+hr { margin: 10px 0; border-color: rgba(255,255,255,0.06); }
+input, select, .stNumberInput input, .stSlider div { border-radius: 6px !important; }
+
+/* === 手机端 === */
+@media (max-width:768px){
+    body{padding:4px!important;font-size:13px!important}
+    .stButton>button{padding:10px!important;font-size:14px!important}h1{font-size:18px!important}
+}
+.metric-card{background:#1a1f35;border-radius:8px;padding:14px;text-align:center;margin:4px 0;
+             border:1px solid rgba(255,255,255,0.06)}
 .g{color:#22c55e}.r{color:#ef4444}.b{color:#60a5fa}.y{color:#eab308}
-.stButton>button{width:100%}hr{margin:8px 0}
-.zoom-btn{font-size:11px!important;padding:4px 8px!important}
 </style>""", unsafe_allow_html=True)
 
 # 登录鉴权拦截 (放在所有UI之前, 登录页即使数据未就绪也能展示)
@@ -696,7 +714,7 @@ class DynamicStrategy(StrategyBase):
 # ============================================================
 # Sidebar: 基础设置
 # ============================================================
-st.sidebar.title("📊 马总控制台 v3.3")
+st.sidebar.title("📊 马总量化控制台")
 
 # 日期预设按钮 (在form外面, 立即可用)
 if "date_range" not in st.session_state: st.session_state.date_range = None
@@ -821,12 +839,34 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
     mf_enabled = c1.checkbox("多因子牛熊", True, key="mf_on")
     resonance_enabled = c2.checkbox("共振打分", False, key="res_on")
+    res_f1, res_f2, res_f3 = "", "", ""
     if resonance_enabled:
         cat_list = ["趋势类", "摆动类", "通道/支撑", "成交量", "K线形态"]
-        c1, c2, c3 = st.columns(3)
-        res_f1 = c1.selectbox("因子1", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] == cat_list[0]], key="rf1")
-        res_f2 = c2.selectbox("因子2", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[1:3]], key="rf2")
-        res_f3 = c3.selectbox("因子3", [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[3:]], key="rf3")
+        cat1_opts = [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] == cat_list[0]]
+        cat23_opts = [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[1:3]]
+        cat45_opts = [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[3:]]
+        # 堆叠布局, 避免文字截断
+        res_f1 = st.selectbox("因子1 (趋势类)", cat1_opts, key="rf1")
+        res_f2 = st.selectbox("因子2 (摆动/通道)", cat23_opts, key="rf2")
+        res_f3 = st.selectbox("因子3 (量价/形态)", cat45_opts, key="rf3")
+        # 展开选中因子的子参数
+        for label, fname in [("因子1", res_f1), ("因子2", res_f2), ("因子3", res_f3)]:
+            if fname and fname in INDICATOR_REGISTRY and INDICATOR_REGISTRY[fname]["params"]:
+                with st.expander(f"{label}: {fname} 参数", expanded=False):
+                    fparams = INDICATOR_REGISTRY[fname]["params"]
+                    cols = st.columns(min(2, len(fparams)))
+                    for i, (pk, pdef) in enumerate(fparams.items()):
+                        val_key = f"rf_param_{fname}_{pk}"
+                        # 从selected_indicators获取或默认值
+                        cur_val = st.session_state.selected_indicators.get(fname, {}).get("params", {}).get(pk, pdef["default"])
+                        new_val = cols[i % 2].number_input(
+                            pdef["label"], pdef["min"], pdef["max"],
+                            cur_val, pdef["step"], key=val_key,
+                            help=pdef.get("help", ""),
+                        )
+                        if fname not in st.session_state.selected_indicators:
+                            st.session_state.selected_indicators[fname] = {"enabled": True, "params": {}}
+                        st.session_state.selected_indicators[fname]["params"][pk] = new_val
     if mf_enabled:
         c1, c2 = st.columns(2)
         ema_w = c1.slider("EMA权重", 0.0, 1.0, 0.40, 0.05, key="mf_ew")
@@ -874,7 +914,7 @@ def resample_cached(df_15m, period: str):
 # (旧AI模块已整合到 🤖 翔哥 AI 对话舱 Tab)
 # 主界面头部
 # ============================================================
-st.title("📊 马总量化回测控制台 v3.4")
+st.title("📊 马总量化控制台")
 
 # Tab 导航
 tab_names = ["📈 回测看板", "🤖 翔哥 AI 对话舱"]
