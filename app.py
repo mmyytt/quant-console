@@ -648,6 +648,14 @@ with st.sidebar.expander("🔬 多因子牛熊", expanded=False):
     adx_th = st.slider("ADX阈值", 10, 50, 25, 5, key="mf_at")
     bull_th = st.slider("牛市判定", 0.10, 0.60, 0.30, 0.05, key="mf_bt")
 
+# 刷新行情
+if st.sidebar.button("🔄 刷新最新行情", use_container_width=True):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.success("缓存已清除, 正在重新加载最新数据...")
+    time.sleep(1)
+    st.rerun()
+
 # 导出
 st.sidebar.divider()
 cur_params = {"coin": coin, "tf": timeframe, "lev": leverage, "cap": initial_capital,
