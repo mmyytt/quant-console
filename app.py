@@ -784,6 +784,74 @@ with st.sidebar.expander("🤖 AI 策略导师 (翔哥)", expanded=False):
     if st.button("清空对话", use_container_width=True, key="ai_clear"):
         st.session_state.ai_messages = []; st.rerun()
 
+# ============================================================
+# DeepSeek 策略诊断 (侧边栏底部)
+# ============================================================
+st.sidebar.divider()
+with st.sidebar.expander("🧠 DeepSeek 策略诊断", expanded=False):
+    ds_key = st.text_input("DeepSeek API Key", type="password",
+                           value=os.environ.get("DEEPSEEK_API_KEY", ""),
+                           key="ds_key", placeholder="sk-...",
+                           help="https://platform.deepseek.com 获取")
+    if ds_key: os.environ["DEEPSEEK_API_KEY"] = ds_key
+
+    if st.button("🧠 一键诊断当前行情与指标", use_container_width=True, type="primary",
+                 disabled=not ds_key):
+        if not ds_key:
+            st.warning("请先填入 DeepSeek API Key")
+        else:
+            with st.spinner("DeepSeek 分析中..."):
+                # 构建指标状态
+                ind_state = {}
+                try:
+                    df_check = load_cached_15min(coin)
+                    df_check.index = pd.to_datetime(df_check.index).tz_localize(None)
+                    last_row = df_check.iloc[-1]
+                    current_price = float(last_row['close'])
+
+                    for name, cfg in st.session_state.selected_indicators.items():
+                        if not cfg.get("enabled"): continue
+                        info = INDICATOR_REGISTRY.get(name)
+                        if not info: continue
+                        try:
+                            df_tmp = df_check.tail(200).copy()
+                            info["compute"](df_tmp, cfg.get("params", {}))
+                            has_l = "_long" in df_tmp.columns and df_tmp["_long"].iloc[-1]
+                            has_s = "_short" in df_tmp.columns and df_tmp["_short"].iloc[-1]
+                            if has_l: ind_state[name] = "做多信号触发"
+                            elif has_s: ind_state[name] = "做空信号触发"
+                            else: ind_state[name] = "无信号"
+                        except:
+                            ind_state[name] = "计算异常"
+                except:
+                    current_price = 0
+                    ind_state = {"提示": "数据加载失败"}
+
+                # 最近的回测结果
+                bt_metrics = {}
+                bt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
+                if os.path.exists(bt_file):
+                    try:
+                        with open(bt_file) as f: bt_metrics = json.load(f)
+                    except: pass
+
+                from ai_analyst import analyze
+                result = analyze(
+                    api_key=ds_key,
+                    coin=coin,
+                    current_price=current_price,
+                    indicators_state=ind_state,
+                    backtest_metrics=bt_metrics if bt_metrics else None,
+                    timeframe=timeframe,
+                )
+
+                if result["success"]:
+                    st.success(f"DeepSeek ({result.get('model','?')}) 分析完成")
+                    st.markdown(result["content"])
+                    st.caption(f"Tokens: {result.get('usage',{}).get('total_tokens','?')}")
+                else:
+                    st.error(f"分析失败: {result['error']}")
+
 
 # ============================================================
 # AI API 调用 (流式输出)
