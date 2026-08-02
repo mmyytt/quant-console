@@ -593,8 +593,17 @@ class BacktestEngineV2:
             df = strategy.generate_signals(df)
             dfs_with_sigs[coin] = df
 
-        # 2. 找共同时间索引 (从预热期后开始)
-        warmup = 200  # EMA50 等慢线需要预热
+        # 2. 找共同时间索引 (从预热期后开始, 自动适配长周期指标)
+        # 检测策略中最长的EMA周期, 确保足够预热
+        max_ema = 200  # 默认EMA200
+        try:
+            for name, cfg_d in strategy.selected.items():
+                if not cfg_d.get("enabled", True): continue
+                for pname, pval in cfg_d.get("params", {}).items():
+                    if isinstance(pval, (int, float)) and pval > max_ema:
+                        max_ema = int(pval)
+        except: pass
+        warmup = max(200, max_ema * 3)  # 至少3倍最长周期
         common_index = dfs_with_sigs[coins[0]].index[warmup:]
         for coin in coins[1:]:
             common_index = common_index.intersection(dfs_with_sigs[coin].index)

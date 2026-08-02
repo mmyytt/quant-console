@@ -593,6 +593,19 @@ class DynamicStrategy(StrategyBase):
 
         if not long_conds and not short_conds:
             df['signal'] = 0
+        elif self.selected.get("_weighted", False):
+            # 加权打分模式: 统计满足的指标数, 超过阈值才触发
+            threshold = self.selected.get("_weighted_threshold", 2)
+            long_score = pd.Series(0, index=df.index)
+            short_score = pd.Series(0, index=df.index)
+            for c in long_conds:
+                long_score += c.fillna(False).astype(int)
+            for c in short_conds:
+                short_score += c.fillna(False).astype(int)
+            df['signal'] = 0
+            df.loc[(long_score >= threshold) & (short_score < threshold), 'signal'] = 1
+            df.loc[(short_score >= threshold) & (long_score < threshold), 'signal'] = -1
+            df['long_score'] = long_score; df['short_score'] = short_score
         else:
             ls = long_conds[0].fillna(False) if long_conds else pd.Series(False, index=df.index)
             for c in long_conds[1:]:
@@ -602,7 +615,6 @@ class DynamicStrategy(StrategyBase):
             for c in short_conds[1:]:
                 c = c.fillna(False)
                 ss = (ss & c) if self.use_and else (ss | c)
-            # NaN安全: 显式填False
             ls = ls.fillna(False); ss = ss.fillna(False)
             df['signal'] = 0
             df.loc[ls & ~ss, 'signal'] = 1; df.loc[ss & ~ls, 'signal'] = -1
@@ -696,8 +708,15 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
     st.divider(); st.caption("🧱 指标积木")
     st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
-    logic_mode = st.radio("触发逻辑", ["AND 全部满足", "OR 任一满足"], horizontal=True, key="logic_mode")
+    logic_mode = st.radio("信号组合模式",
+        ["AND 全部满足 (严格)", "OR 任一满足 (灵敏)", "加权打分 N个以上触发 (推荐)"],
+        horizontal=False, key="logic_mode")
     use_and = "AND" in logic_mode
+    use_weighted = "加权" in logic_mode
+    weighted_threshold = 2
+    if use_weighted:
+        weighted_threshold = st.slider("最少满足指标数", 1, 10, 2, 1,
+            help="勾选的指标中, 至少N个同时触发才开仓。值越大信号越少但质量越高")
 
     categories = {}
     for name, info in INDICATOR_REGISTRY.items():
@@ -1043,6 +1062,13 @@ if submitted:
         elif "_resonance_factors" in st.session_state.selected_indicators:
             del st.session_state.selected_indicators["_resonance_factors"]
 
+        # 加权打分模式参数
+        if use_weighted:
+            st.session_state.selected_indicators["_weighted"] = True
+            st.session_state.selected_indicators["_weighted_threshold"] = weighted_threshold
+        else:
+            st.session_state.selected_indicators.pop("_weighted", None)
+
         strategy = DynamicStrategy(
             selected=st.session_state.selected_indicators,
             use_and=use_and,
@@ -1071,21 +1097,41 @@ if submitted:
             r2 = e2.run({coin: df_test}, strategy)
             oos_m = PerformanceAnalyzer.analyze(r2)
 
-    # === 零交易检查 ===
+    # === 零交易检查 (三层诊断) ===
     if metrics.get('total_trades', 0) == 0:
-        st.warning("当前组合条件未触发任何交易！可能是所选指标阈值过于苛刻，或某个指标在当前时间段内缺乏数据，请尝试调松参数或更换指标。")
-        st.caption("已选指标数据诊断:")
+        total_warmup = max(200, max(
+            (cfg.get("params", {}).get(k, 20) for name, cfg in st.session_state.selected_indicators.items()
+             if cfg.get("enabled") for k in cfg.get("params", {}))
+        , default=200)) if st.session_state.selected_indicators else 200
+        st.warning(f"当前组合条件未触发任何交易！数据共 {len(df_train):,} 根K线 (含预热 {total_warmup} 根)")
+        st.caption("已选指标逐项诊断 (扫描最近500根K线):")
+
+        diag_rows = []
+        df_diag = df_train.tail(500).copy()
         for name, cfg in st.session_state.selected_indicators.items():
             if not cfg.get("enabled"): continue
             info = INDICATOR_REGISTRY.get(name)
             if not info: continue
             try:
-                info["compute"](df_train.tail(100).copy(), cfg.get("params", {}))
-                has_l = "_long" in df_train.tail(100).columns and df_train.tail(100)["_long"].any()
-                has_s = "_short" in df_train.tail(100).columns and df_train.tail(100)["_short"].any()
-                st.caption(f"  {name}: 做多信号={'有' if has_l else '无'}, 做空信号={'有' if has_s else '无'}")
-            except:
-                st.caption(f"  {name}: 计算失败")
+                df_tmp = df_diag.copy()
+                info["compute"](df_tmp, cfg.get("params", {}))
+                has_l = "_long" in df_tmp.columns
+                has_s = "_short" in df_tmp.columns
+                l_cnt = df_tmp["_long"].sum() if has_l else 0
+                s_cnt = df_tmp["_short"].sum() if has_s else 0
+                if l_cnt + s_cnt > 0:
+                    status = f"✅ 做多{l_cnt}次 / 做空{s_cnt}次"
+                else:
+                    status = "⚪ 计算正常, 但未触发信号 (条件未满足)"
+                diag_rows.append((name, status, "正常"))
+            except Exception as e:
+                diag_rows.append((name, f"❌ 计算失败: {str(e)[:60]}", "异常"))
+
+        if diag_rows:
+            df_diag_out = pd.DataFrame(diag_rows, columns=["指标", "状态", "类型"])
+            st.dataframe(df_diag_out, use_container_width=True, hide_index=True)
+
+        st.info("💡 建议: 1)切换为[OR/加权打分]模式 2)调松参数(如降低RSI阈值) 3)扩大时间范围")
         st.stop()
 
     # === 指标卡片 ===
