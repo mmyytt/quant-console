@@ -582,7 +582,9 @@ class DynamicStrategy(StrategyBase):
     def generate_signals(self, df):
         df = df.copy(); long_conds = []; short_conds = []
         for name, cfg in self.selected.items():
-            if not cfg.get("enabled"): continue
+            # 类型安全检查: 跳过元数据键(_weighted/_resonance_factors等)
+            if not isinstance(cfg, dict): continue
+            if not cfg.get("enabled", True): continue
             info = INDICATOR_REGISTRY.get(name)
             if not info: continue
             try:
@@ -633,15 +635,18 @@ class DynamicStrategy(StrategyBase):
             df['br'] = (df['regime'] == 'bear').astype(int).rolling(200, min_periods=1).mean()
 
         # === 共振评分: 统计用户指定的3个因子同时触发的情况 ===
-        res_factors = self.selected.get("_resonance_factors", [])
+        res_factors = self.selected.get("_resonance_factors")
+        if not isinstance(res_factors, list): res_factors = []
         df['resonance_score'] = 0
         if res_factors:
             for fname in res_factors:
                 if not fname: continue
                 info = INDICATOR_REGISTRY.get(fname)
                 if not info: continue
+                fcfg = self.selected.get(fname)
+                if not isinstance(fcfg, dict): continue
                 try:
-                    info["compute"](df, self.selected.get(fname, {}).get("params", {}))
+                    info["compute"](df, fcfg.get("params", {}))
                     if "_long" in df.columns or "_short" in df.columns:
                         has_l = "_long" in df.columns and df["_long"].any()
                         has_s = "_short" in df.columns and df["_short"].any()
@@ -1019,7 +1024,7 @@ p1, p2, p3, p4 = st.columns(4)
 p1.metric("标的", coin); p2.metric("周期", timeframe); p3.metric("杠杆", f"{leverage}x"); p4.metric("资金", f"${initial_capital:,}")
 
 # 已选指标摘要
-active_inds = [n for n, c in st.session_state.selected_indicators.items() if c.get("enabled")]
+active_inds = [n for n, c in st.session_state.selected_indicators.items() if isinstance(c, dict) and c.get("enabled")]
 st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:10]) + ("..." if len(active_inds) > 10 else ""))
 
 st.divider()
