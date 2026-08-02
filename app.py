@@ -335,20 +335,27 @@ INDICATOR_SCHEMA = {
     },
 }
 
-# 从 Schema 自动生成 Registry (保持向后兼容)
+# 从 Schema 自动生成 Registry (参数key用schema原始key, 显示用label)
 INDICATOR_REGISTRY = {}
 for _key, _schema in INDICATOR_SCHEMA.items():
-    # 转换 params: schema格式 → 旧tuple格式
-    _old_params = {}
+    _reg_params = {}
+    _param_labels = {}  # schema_key → 中文label
     for _pk, _pv in _schema["params"].items():
-        _step = _pv.get("step", 1)
-        _help = _pv.get("help", "")
-        _old_params[_pv["label"]] = (_pv["min"], _pv["max"], _pv["default"], _step, _help)
+        _reg_params[_pk] = {
+            "label": _pv["label"],
+            "default": _pv["default"],
+            "min": _pv["min"],
+            "max": _pv["max"],
+            "step": _pv.get("step", 1),
+            "help": _pv.get("help", ""),
+        }
+        _param_labels[_pk] = _pv["label"]
     INDICATOR_REGISTRY[_schema["name"]] = {
         "category": _schema["category"],
-        "params": _old_params,
+        "params": _reg_params,          # {schema_key: {label, default, min, max, step, help}}
+        "param_labels": _param_labels,  # {schema_key: "中文标签"}
         "desc": _schema["desc"],
-        "compute": _schema["compute"],
+        "compute": _schema["compute"],  # 直接用schema key取值
     }
 
 # (旧注册表已由Schema自动生成, 此段删除)
@@ -756,7 +763,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         if cat not in categories: categories[cat] = []
         categories[cat].append(name)
     if "selected_indicators" not in st.session_state:
-        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"短期快线周期": 7, "长期慢线周期": 21}}}
+        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"EMA_short": 7, "EMA_long": 21}}}
 
     for cat_name, ind_names in categories.items():
         with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
@@ -766,22 +773,26 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
                 checked = name in sel and sel[name].get("enabled", False)
                 new_checked = st.checkbox(name, checked, key=f"ind_{name}", help=info["desc"])
                 if new_checked and name not in sel:
-                    sel[name] = {"enabled": True, "params": {k: v[2] for k, v in info["params"].items()}}
+                    # 用schema key初始化params, 不是label
+                    sel[name] = {"enabled": True, "params": {
+                        pk: pv["default"] for pk, pv in info["params"].items()
+                    }}
                 elif not new_checked and name in sel:
                     sel[name]["enabled"] = False
 
-                # 展开子参数 (带标签 + tooltip)
+                # 展开子参数: 显示label, 存储用schema key
                 if new_checked and info["params"]:
-                    cols = st.columns(min(2, len(info["params"])))
-                    for i, (pname, prange) in enumerate(info["params"].items()):
-                        step = prange[3] if len(prange) > 3 else 1
-                        help_txt = prange[4] if len(prange) > 4 else ""
+                    param_items = list(info["params"].items())
+                    cols = st.columns(min(2, len(param_items)))
+                    for i, (pk, pdef) in enumerate(param_items):
+                        label = pdef["label"]
                         val = cols[i % 2].number_input(
-                            pname, prange[0], prange[1],
-                            sel[name]["params"].get(pname, prange[2]), step,
-                            key=f"p_{name}_{pname}", help=help_txt,
+                            label, pdef["min"], pdef["max"],
+                            sel[name]["params"].get(pk, pdef["default"]),
+                            pdef["step"], key=f"p_{name}_{pk}",
+                            help=pdef.get("help", ""),
                         )
-                        sel[name]["params"][pname] = val
+                        sel[name]["params"][pk] = val
 
     st.divider(); st.caption("🛡️ 风控")
     c1, c2 = st.columns(2)
