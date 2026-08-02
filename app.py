@@ -904,7 +904,138 @@ def call_ai_api(messages: list, provider: str, api_key: str) -> str:
 # ============================================================
 # 主界面头部
 # ============================================================
-st.title("📊 马总量化回测控制台 v3.3")
+st.title("📊 马总量化回测控制台 v3.4")
+
+# Tab 导航
+tab_names = ["📈 回测看板", "🤖 祥哥 AI 对话舱"]
+if "active_tab" not in st.session_state: st.session_state.active_tab = "回测看板"
+tc1, tc2 = st.columns([1, 1])
+with tc1:
+    if st.button("📈 回测看板", use_container_width=True,
+                 type="primary" if "回测" in st.session_state.active_tab else "secondary"):
+        st.session_state.active_tab = "回测看板"; st.rerun()
+with tc2:
+    if st.button("🤖 祥哥 AI 对话舱", use_container_width=True,
+                 type="primary" if "AI" in st.session_state.active_tab else "secondary"):
+        st.session_state.active_tab = "AI 对话舱"; st.rerun()
+
+st.divider()
+
+# ============================================================
+# Tab 2: 祥哥 AI 对话舱
+# ============================================================
+if "AI" in st.session_state.active_tab:
+    from ai_assistant import chat as ai_chat, build_context, MODEL_PRESETS, QUICK_PROMPTS, DEFAULT_TRADING_NOTES
+
+    # 配置区
+    with st.expander("⚙️ AI 配置", expanded=not st.session_state.get("ai_configured", False)):
+        c1, c2 = st.columns(2)
+        ai_key = c1.text_input("API Key", type="password",
+                               value=os.environ.get("AI_API_KEY", ""),
+                               key="ai_main_key", placeholder="sk-...")
+        ai_model = c2.selectbox("模型", list(MODEL_PRESETS.keys()), index=0, key="ai_model_sel")
+
+        if "自定义" in ai_model:
+            c1, c2 = st.columns(2)
+            ai_custom_url = c1.text_input("Base URL", "https://api.deepseek.com", key="ai_cust_url")
+            ai_custom_model = c2.text_input("Model Name", "deepseek-chat", key="ai_cust_model")
+
+        # 交易心法
+        if "trading_notes" not in st.session_state:
+            st.session_state.trading_notes = DEFAULT_TRADING_NOTES
+        st.caption("📝 我的交易心法与经验偏好 (自动注入 AI 对话)")
+        trading_notes = st.text_area("心法", value=st.session_state.trading_notes, height=120,
+                                      key="tnotes", label_visibility="collapsed")
+        st.session_state.trading_notes = trading_notes
+
+        if st.button("保存配置", use_container_width=True):
+            st.session_state.ai_configured = True; st.rerun()
+
+    if not ai_key:
+        st.info("请在上方展开 ⚙️ AI 配置, 填入 DeepSeek/OpenAI API Key")
+        st.stop()
+
+    # 快捷提问
+    st.caption("快捷提问:")
+    qcols = st.columns(len(QUICK_PROMPTS))
+    quick_clicked = None
+    for i, (label, prompt) in enumerate(QUICK_PROMPTS):
+        if qcols[i].button(label, use_container_width=True, key=f"qp_{i}"):
+            quick_clicked = prompt
+
+    # 聊天记录
+    if "ai_chat_history" not in st.session_state:
+        st.session_state.ai_chat_history = []
+
+    for msg in st.session_state.ai_chat_history:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+
+    # 处理快捷提问或用户输入
+    user_msg = st.chat_input("和翔哥聊聊你的策略...", key="ai_main_chat")
+    if quick_clicked:
+        user_msg = quick_clicked
+
+    if user_msg:
+        st.session_state.ai_chat_history.append({"role": "user", "content": user_msg})
+        with st.chat_message("user"):
+            st.write(user_msg)
+
+        # 构建上下文
+        try:
+            df_ctx = load_cached_15min(coin)
+            df_ctx.index = pd.to_datetime(df_ctx.index).tz_localize(None)
+            px = float(df_ctx['close'].iloc[-1])
+            ind_ctx = {}
+            for name, cfg in st.session_state.selected_indicators.items():
+                if not cfg.get("enabled"): continue
+                info = INDICATOR_REGISTRY.get(name)
+                if not info: continue
+                try:
+                    dft = df_ctx.tail(200).copy()
+                    info["compute"](dft, cfg.get("params", {}))
+                    l = "_long" in dft.columns and dft["_long"].iloc[-1]
+                    s = "_short" in dft.columns and dft["_short"].iloc[-1]
+                    ind_ctx[name] = "做多" if l else ("做空" if s else "无信号")
+                except: ind_ctx[name] = "异常"
+        except: px = 0; ind_ctx = {}
+
+        bt = {}
+        btf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
+        if os.path.exists(btf):
+            try:
+                with open(btf) as f: bt = json.load(f)
+            except: pass
+
+        context = build_context(coin, timeframe, px, ind_ctx, bt)
+        system_msg = {"role": "system", "content": context}
+        msgs = [system_msg] + st.session_state.ai_chat_history[-8:]
+
+        with st.chat_message("assistant"):
+            with st.spinner("翔哥思考中..."):
+                result = ai_chat(
+                    messages=msgs, api_key=ai_key, model_name=ai_model,
+                    custom_base_url=ai_custom_url if "自定义" in ai_model else "",
+                    custom_model=ai_custom_model if "自定义" in ai_model else "",
+                    trading_notes=st.session_state.trading_notes,
+                )
+                if result["success"]:
+                    st.write(result["content"])
+                    st.caption(f"模型: {result.get('model','?')}")
+                    st.session_state.ai_chat_history.append({"role": "assistant", "content": result["content"]})
+                else:
+                    st.error(result["error"])
+
+    # 清空按钮
+    if st.session_state.ai_chat_history:
+        if st.button("🗑️ 清空对话", use_container_width=True):
+            st.session_state.ai_chat_history = []; st.rerun()
+
+    st.stop()  # AI tab下不显示回测内容
+
+# ============================================================
+# Tab 1: 回测看板
+# ============================================================
 p1, p2, p3, p4 = st.columns(4)
 p1.metric("标的", coin); p2.metric("周期", timeframe); p3.metric("杠杆", f"{leverage}x"); p4.metric("资金", f"${initial_capital:,}")
 
