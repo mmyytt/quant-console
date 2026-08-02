@@ -160,10 +160,10 @@ class MultiFactorRegime:
         df['plus_di'] = plus_di
         df['minus_di'] = minus_di
 
-        # === Factor 3: 资金费率 (市场情绪) ===
+        # === Factor 3: 资金费率 (市场情绪, shift(1)防未来函数) ===
         if funding_rate is not None and len(funding_rate) > 0:
             # funding_rate > 0 → 多头拥挤(偏空信号), < 0 → 空头拥挤(偏多信号)
-            fr = funding_rate.reindex(df.index, method='ffill').fillna(0)
+            fr = funding_rate.reindex(df.index, method='ffill').fillna(0).shift(1)
             # 极端费率: >0.05% → 强烈偏空信号, <-0.05% → 强烈偏多信号
             funding_score = -(fr / 0.0005).clip(-1, 1)  # 取反: 正费率→做空信号(负分)
             df['funding_score'] = funding_score
@@ -277,6 +277,7 @@ class DataEngine:
         }
         # label='left': 时间戳标记在周期开始
         # closed='left': 左闭右开, 保证周期不重叠
+        # 当前bar已闭合时才可用 → 无未来函数泄露
         resampled = df.resample(rule, label='left', closed='left').agg(agg)
         return resampled.dropna()
 
@@ -593,20 +594,28 @@ class BacktestEngineV2:
             df = strategy.generate_signals(df)
             dfs_with_sigs[coin] = df
 
-        # 2. 找共同时间索引 (从预热期后开始, 自动适配长周期指标)
-        # 检测策略中最长的EMA周期, 确保足够预热
-        max_ema = 200  # 默认EMA200
+        # 2. 多币种对齐: 用主币时间轴 + ffill填充缺失
+        max_ema = 200
         try:
             for name, cfg_d in strategy.selected.items():
+                if not isinstance(cfg_d, dict): continue
                 if not cfg_d.get("enabled", True): continue
                 for pname, pval in cfg_d.get("params", {}).items():
                     if isinstance(pval, (int, float)) and pval > max_ema:
                         max_ema = int(pval)
         except: pass
-        warmup = max(200, max_ema * 3)  # 至少3倍最长周期
-        common_index = dfs_with_sigs[coins[0]].index[warmup:]
+        warmup = max(200, max_ema * 3)
+        primary_index = dfs_with_sigs[coins[0]].index[warmup:]
+        # 对其他币种用主时间轴 + ffill, 标记gap但不丢数据
         for coin in coins[1:]:
-            common_index = common_index.intersection(dfs_with_sigs[coin].index)
+            df_coin = dfs_with_sigs[coin]
+            # reindex到主时间轴, ffill前向填充
+            aligned = df_coin.reindex(primary_index, method='ffill')
+            # 标记gap列 (超过2根K线没数据 → 视为gap)
+            aligned['_gap'] = (~df_coin.index.isin(primary_index)).astype(int)
+            aligned['_gap'] = aligned['_gap'].rolling(3, min_periods=1).sum()
+            dfs_with_sigs[coin] = aligned
+        common_index = primary_index
 
         # 3. 逐根遍历
         for i, ts in enumerate(common_index):
@@ -665,8 +674,8 @@ class BacktestEngineV2:
             if side == 'LONG':
                 t_hit = bh >= tp_px; s_hit = bl <= sl_px
                 if t_hit and s_hit:
-                    exit_price = tp_px if bc >= bo else sl_px
-                    exit_reason = 'TP' if exit_price == tp_px else 'SL'
+                    # 保守原则: 同Bar双触发优先取SL (worst-case execution)
+                    exit_price = sl_px; exit_reason = 'SL'
                 elif t_hit:
                     exit_price = tp_px; exit_reason = 'TP'
                 elif s_hit:
@@ -674,8 +683,7 @@ class BacktestEngineV2:
             else:  # SHORT
                 t_hit = bl <= tp_px; s_hit = bh >= sl_px
                 if t_hit and s_hit:
-                    exit_price = tp_px if bc <= bo else sl_px
-                    exit_reason = 'TP' if exit_price == tp_px else 'SL'
+                    exit_price = sl_px; exit_reason = 'SL'
                 elif t_hit:
                     exit_price = tp_px; exit_reason = 'TP'
                 elif s_hit:
@@ -760,63 +768,46 @@ class BacktestEngineV2:
         if alloc <= 0:
             return
 
-        self._open(best['coin'], best['side'], best['price'], alloc, ts, regime)
+        self._open(best['coin'], best['side'], best['price'], alloc, ts, regime,
+                   best.get('resonance_score', 0))
 
     # ================================================================
     # 内部: 开仓 / 平仓
     # ================================================================
-    def _open(self, coin: str, side: str, price: float, alloc: float, ts, regime: str = 'range'):
+    def _open(self, coin: str, side: str, price: float, alloc: float, ts,
+              regime: str = 'range', resonance_score: int = 0):
         """
         开仓 (合约模式)。
-
-        关键计算:
-          margin = equity * alloc          # 分配给这次交易的保证金
-          position_value = margin * leverage
-          contracts = position_value / (price * face_value)
-
-        TP/SL 价格:
-          LONG:  tp = entry * (1 + tp_pct/leverage)
-                 sl = entry * (1 - sl_pct/leverage)
-          SHORT: tp = entry * (1 - tp_pct/leverage)
-                 sl = entry * (1 + sl_pct/leverage)
         """
+        # 负权益拦截
+        if self.equity <= 0:
+            return
+
         fv = self.CONTRACT_FV.get(coin, 1.0)
         lev = self.leverage
 
         margin = self.equity * alloc
-        position_value = margin * lev
-        contracts = position_value / (price * fv)
+        notional = margin * lev  # 名义本金
 
-        # 交易成本
-        cost = position_value * (TAKER_FEE + SLIPPAGE)
+        # 交易成本 (统一按名义本金计算)
+        cost = notional * (TAKER_FEE + SLIPPAGE)
         self.equity -= cost
 
-        # TP/SL 价格 (合约模式: 保证金% → 价格%)
-        tp_price_margin = self.tp_pct
-        sl_price_margin = self.sl_pct
-
+        # TP/SL 价格
         if side == 'LONG':
-            tp_price = price * (1 + tp_price_margin / lev)
-            sl_price = price * (1 - sl_price_margin / lev)
+            tp_price = price * (1 + self.tp_pct / lev)
+            sl_price = price * (1 - self.sl_pct / lev)
         else:
-            tp_price = price * (1 - tp_price_margin / lev)
-            sl_price = price * (1 + sl_price_margin / lev)
+            tp_price = price * (1 - self.tp_pct / lev)
+            sl_price = price * (1 + self.sl_pct / lev)
 
-        # 从candidate提取共振分 (如果存在)
-        res_score = best.get('resonance_score', 0) if 'best' in dir() else 0
         pos = {
-            'coin': coin,
-            'side': side,
-            'entry': price,
-            'contracts': round(contracts, 4),
-            'margin': margin,
-            'alloc': alloc,
-            'regime': regime,
-            'resonance_score': res_score,
-            'tp_price': tp_price,
-            'sl_price': sl_price,
-            'open_time': ts,
-            'cost': cost,
+            'coin': coin, 'side': side, 'entry': price,
+            'margin': margin, 'notional': notional,
+            'alloc': alloc, 'regime': regime,
+            'resonance_score': resonance_score,
+            'tp_price': tp_price, 'sl_price': sl_price,
+            'open_time': ts, 'cost': cost,
         }
         self.positions.append(pos)
 
@@ -828,6 +819,7 @@ class BacktestEngineV2:
     def _close(self, pos: Dict, price: float, reason: str, ts):
         """平仓并结算盈亏"""
         side = pos['side']; ep = pos['entry']; margin = pos['margin']
+        notional = pos.get('notional', margin * self.leverage)
         lev = self.leverage
 
         # 保证金收益率
@@ -836,11 +828,16 @@ class BacktestEngineV2:
         else:
             margin_pnl_pct = (ep - price) / ep * lev
 
+        # 爆仓判定: 浮亏超过保证金 → 强制归零
+        if margin_pnl_pct <= -1.0:
+            margin_pnl_pct = -1.0
+            reason = 'LIQUIDATED'
+            price = ep * (1 - 1.0/lev) if side == 'LONG' else ep * (1 + 1.0/lev)
+
         pnl_usd = margin * margin_pnl_pct
 
-        # 平仓手续费
-        position_value = margin * lev
-        exit_cost = position_value * (TAKER_FEE + SLIPPAGE)
+        # 平仓手续费 (统一按名义本金)
+        exit_cost = notional * (TAKER_FEE + SLIPPAGE)
         pnl_usd -= exit_cost
 
         # 保证金从未离开账户(只是锁定), 平仓时只结算盈亏
@@ -890,17 +887,22 @@ class BacktestEngineV2:
         return len(self.positions)
 
     def _calc_total_equity(self, dfs, ts) -> float:
-        """按当前 bar 收盘价估算总权益 (现金 + 浮动盈亏)"""
+        """按已确认价格估算总权益 (严禁未来函数: 用上一根close或当前open)"""
         total = self.equity
         for pos in self.positions:
             coin = pos['coin']
-            px = float(dfs[coin].loc[ts]['close'])
+            row = dfs[coin].loc[ts]
+            # 用开盘价评估浮盈 (已确认, 非未闭合收盘价)
+            px = float(row['open'])
             if pos['side'] == 'LONG':
                 float_pnl = (px - pos['entry']) / pos['entry'] * self.leverage
             else:
                 float_pnl = (pos['entry'] - px) / pos['entry'] * self.leverage
             total += pos['margin'] * float_pnl
-        return total
+            # 爆仓检测: 浮亏超过保证金 → 权益归零
+            if pos['margin'] + pos['margin'] * float_pnl <= 0:
+                return 0.0
+        return max(total, 0.0)
 
     def _build_result(self, strategy, coins, index) -> Dict:
         closed = [t for t in self.trades if t['reason'] in ('TP', 'SL', 'EOD')]

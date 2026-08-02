@@ -717,13 +717,14 @@ class DynamicStrategy(StrategyBase):
                 if not isinstance(fcfg, dict): continue
                 try:
                     info["compute"](df, fcfg.get("params", {}))
-                    if "_long" in df.columns or "_short" in df.columns:
-                        has_l = "_long" in df.columns and df["_long"].any()
-                        has_s = "_short" in df.columns and df["_short"].any()
-                        if has_l or has_s:
-                            df['resonance_score'] += ((df.get('_long', False) | df.get('_short', False)).astype(int))
-                        if "_long" in df.columns: df.drop("_long", axis=1, inplace=True)
-                        if "_short" in df.columns: df.drop("_short", axis=1, inplace=True)
+                    has_l = "_long" in df.columns
+                    has_s = "_short" in df.columns
+                    if has_l or has_s:
+                        long_col = df["_long"].fillna(False) if has_l else pd.Series(False, index=df.index)
+                        short_col = df["_short"].fillna(False) if has_s else pd.Series(False, index=df.index)
+                        df['resonance_score'] += (long_col | short_col).astype(int)
+                        if has_l: df.drop("_long", axis=1, inplace=True)
+                        if has_s: df.drop("_short", axis=1, inplace=True)
                 except: pass
         df['score'] = df['resonance_score'] if res_factors else abs(df['signal'])
         return df
