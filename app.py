@@ -827,10 +827,10 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1)
         st.caption("--- 现货腿 (SPOT LONG) ---")
         c1, c2 = st.columns(2)
-        spot_tp = c1.number_input("现货止盈%", 1.0, 50.0, 5.0, 0.5, key="spot_tp")
-        spot_sl = c2.number_input("现货止损%", 0.5, 20.0, 2.0, 0.5, key="spot_sl")
+        spot_tp = c1.number_input("现货止盈%", 1.0, 50.0, 5.0, 0.5, key="hedge_spot_tp")
+        spot_sl = c2.number_input("现货止损%", 0.5, 20.0, 2.0, 0.5, key="hedge_spot_sl")
         st.caption("--- 合约空单腿 (FUTURES SHORT) ---")
-        short_sl = st.number_input("空单止损%", 1.0, 20.0, 3.0, 0.5, key="short_sl")
+        short_sl = st.number_input("空单止损%", 1.0, 20.0, 3.0, 0.5, key="hedge_short_sl")
         st.caption("组合保护: 总权益回撤3%强行双边全平")
     elif strat_mode_key == "unlocking":
         st.caption("解封触发条件 (多条件OR触发)")
@@ -882,56 +882,6 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
     oos_enabled = st.checkbox("样本外测试 (OOS)", False)
     oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
-
-    # === 动态参数面板 ===
-    hedge_ratio = 0.5; unlock_pct = 5.0; unlock_indicator = "price"
-    max_pyramid = 3; pyramid_first = 0.3; pyramid_step_pct = 1.5
-    trailing_pct = 0.0; funding_threshold = 0.01
-
-    if strat_mode_key == "classic":
-        st.caption("经典模式: 使用下方指标积木 + 风控参数, 无额外配置")
-
-    elif strat_mode_key == "hedging":
-        st.caption("双腿独立风控 (现货 vs 合约空单)")
-        hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1,
-                                help="0.5=一半资金买现货, 一半保证金开空单")
-        st.caption("--- 现货腿 (SPOT LONG) ---")
-        c1, c2 = st.columns(2)
-        spot_tp = c1.number_input("现货止盈%", 1.0, 50.0, 5.0, 0.5, key="spot_tp")
-        spot_sl = c2.number_input("现货止损%", 0.5, 20.0, 2.0, 0.5, key="spot_sl")
-        st.caption("--- 合约空单腿 (FUTURES SHORT) ---")
-        short_sl = st.number_input("空单止损% (价格上涨X%平空)", 1.0, 20.0, 3.0, 0.5,
-                                    help="价格上涨超过开仓价X%时平掉空单止损", key="short_sl")
-        st.caption(f"组合保护: 总权益回撤3%强行双边全平")
-
-    elif strat_mode_key == "unlocking":
-        st.caption("解封触发条件 (通用, 多条件OR触发)")
-        c1, c2 = st.columns(2)
-        unlock_pct = c1.number_input("价格突破%", 1.0, 20.0, 5.0, 0.5,
-                                      help="锁仓后价格从建仓价上涨X%触发平空解锁")
-        use_ema_unlock = c2.checkbox("EMA金叉解锁", True, help="快线>慢线时触发")
-        use_rsi_unlock = st.checkbox("RSI突破解锁 (RSI>60)", False, help="RSI>60视为强势")
-        use_vol_unlock = st.checkbox("放量突破解锁", False, help="量>20日均量×1.5触发")
-        st.caption("解封后裸多风控:")
-        c1, c2 = st.columns(2)
-        unlock_sl = c1.number_input("解封后止损%", 1.0, 15.0, 3.0, 0.5,
-                                     help="解锁后现货跌X%全平止损")
-        unlock_tp = c2.number_input("解封后止盈%", 5.0, 50.0, 15.0, 0.5,
-                                     help="解锁后现货涨X%全平止盈")
-        use_unlock_trail = st.checkbox("启用移动止损", False)
-
-    elif strat_mode_key == "pyramiding":
-        st.caption("分批加仓控制")
-        c1, c2 = st.columns(2)
-        pyramid_first = c1.slider("首次建仓比例%", 10, 50, 30, 5) / 100
-        max_pyramid = c2.number_input("最大加仓次数", 1, 10, 3)
-        pyramid_step_pct = st.number_input("加仓间隔% (价格每变动X%加一次)", 0.5, 10.0, 1.5, 0.5,
-                                            help="价格每上涨/下跌X%触发一次加仓")
-        c1, c2 = st.columns(2)
-        trailing_pct = c1.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5,
-                                        help="价格新高/新低后回撤X%平仓") / 100
-        st.caption(f"仓位路径: 首仓{pyramid_first*100:.0f}% → 每次加仓{pyramid_first*100:.0f}% → 最多{max_pyramid}次 → 全部平仓")
-
 
     st.divider(); st.caption("🧱 指标积木")
     st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
