@@ -770,25 +770,6 @@ class BacktestEngineV2:
                 elif side == 'SHORT' and pos['lowest_price'] < ep * (1 - self.trailing_pct * 2):
                     pos['trailing_activated'] = True
 
-            # 金字塔加仓 (经典模式add-on): 浮盈达标 → 追加仓位
-            if self.strategy_mode == "classic" and self._pyramid_count > 0 and \
-               self._pyramid_count < self.max_pyramid and exit_price is None and \
-               self._pyramid_step > 0:
-                avg_entry = sum(p['entry'] * p['notional'] for p in self.positions
-                                if p['side'] == side and p['coin'] == coin) / \
-                            max(sum(p['notional'] for p in self.positions
-                                    if p['side'] == side and p['coin'] == coin), 1)
-                if side == 'LONG' and px >= avg_entry * (1 + self._pyramid_step):
-                    self._open(coin, side, px, alloc * self._pyramid_add_ratio,
-                               ts, regime, 0)
-                    self._pyramid_count += 1
-                    if self.verbose:
-                        print(f"[ADD_LONG] {ts} | {coin} | px={px:.2f} | pyramid {self._pyramid_count}/{self.max_pyramid}")
-                elif side == 'SHORT' and px <= avg_entry * (1 - self._pyramid_step):
-                    self._open(coin, side, px, alloc * self._pyramid_add_ratio,
-                               ts, regime, 0)
-                    self._pyramid_count += 1
-
             if exit_price is not None:
                 self._close(pos, exit_price, exit_reason, ts)
 
