@@ -827,13 +827,19 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         st.caption("经典模式: 下方指标积木 + 风控驱动")
         with st.expander("📈 顺势加仓管理 (Pyramiding)", expanded=False):
             enable_pyramiding = st.checkbox("启用加仓", False)
-            pyr_trigger_pct = 2.0; pyr_add_pct = 0.5; pyr_max = 3; pyr_trail = False
+            pyr_init_pct = 30; pyr_trigger_pct = 2.0; pyr_add_pct = 0.5
+            pyr_max = 3; pyr_trail = False
             if enable_pyramiding:
+                pyr_init_pct = st.slider("首次建仓比例%", 10, 100, 30, 5,
+                    help="信号触发时首次开仓占总资金的比例。建议20-40%以留足加仓空间")
                 c1, c2 = st.columns(2)
-                pyr_trigger_pct = c1.number_input("触发涨幅%", 0.5, 20.0, 2.0, 0.5)
-                pyr_add_pct = c2.slider("加仓比例%", 10, 100, 50, 5) / 100
+                pyr_trigger_pct = c1.number_input("触发涨幅%", 0.5, 20.0, 2.0, 0.5,
+                    help="持仓均价浮盈超过X%时触发加仓")
+                pyr_add_pct = c2.slider("加仓比例%", 10, 100, 50, 5,
+                    help="每次加仓占初始仓位的百分比") / 100
                 pyr_max = st.number_input("最大加仓次数", 1, 10, 3)
-                pyr_trail = st.checkbox("加仓后移动止损至均价", False)
+                pyr_trail = st.checkbox("加仓后移动止损至均价", False,
+                    help="加仓时将止损位拉抬至最新持仓均价, 实现保本止损")
     elif strat_mode_key == "hedging":
         st.caption("双腿独立风控 (现货 vs 合约空单)")
         hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1)
@@ -1268,6 +1274,7 @@ if submitted:
         st.session_state.selected_indicators["_pyramid_first"] = pyramid_first
         st.session_state.selected_indicators["_pyramid_step"] = pyramid_step_pct
         st.session_state.selected_indicators["_enable_pyramiding"] = enable_pyramiding if 'enable_pyramiding' in dir() else False
+        st.session_state.selected_indicators["_pyr_init_pct"] = pyr_init_pct if 'pyr_init_pct' in dir() else 30
         st.session_state.selected_indicators["_pyr_trigger_pct"] = pyr_trigger_pct if 'pyr_trigger_pct' in dir() else 2.0
         st.session_state.selected_indicators["_pyr_add_pct"] = pyr_add_pct if 'pyr_add_pct' in dir() else 0.5
         st.session_state.selected_indicators["_pyr_max"] = pyr_max if 'pyr_max' in dir() else 3
