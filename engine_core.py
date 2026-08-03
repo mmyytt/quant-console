@@ -874,10 +874,9 @@ class BacktestEngineV2:
         if alloc <= 0:
             return
 
-        # 金字塔首仓比例
-        pyr_enabled = getattr(self, '_enable_pyramiding', False)
-        if pyr_enabled and self._pyramid_count == 0:
-            alloc = self._pyr_init_pct / 100.0 if hasattr(self, '_pyr_init_pct') else 0.3
+        # 经典模式首仓比例 (不受加仓开关影响)
+        if self.strategy_mode == "classic" and hasattr(self, '_pyr_init_pct'):
+            alloc = self._pyr_init_pct / 100.0
         self._open(best['coin'], best['side'], best['price'], alloc, ts, regime,
                    best.get('resonance_score', 0))
         self._pyramid_count += 1

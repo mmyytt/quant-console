@@ -825,13 +825,14 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
     if strat_mode_key == "classic":
         st.caption("经典模式: 下方指标积木 + 风控驱动")
+        # 通用仓位控制 (不受加仓开关影响)
+        pyr_init_pct = st.slider("单笔建仓比例%", 10, 100, 30, 5,
+            help="信号触发时开仓占总资金的比例。设30%=留余量做加仓/对冲")
+        # 加仓子面板
         with st.expander("📈 顺势加仓管理 (Pyramiding)", expanded=False):
             enable_pyramiding = st.checkbox("启用加仓", False)
-            pyr_init_pct = 30; pyr_trigger_pct = 2.0; pyr_add_pct = 0.5
-            pyr_max = 3; pyr_trail = False
+            pyr_trigger_pct = 2.0; pyr_add_pct = 0.5; pyr_max = 3; pyr_trail = False
             if enable_pyramiding:
-                pyr_init_pct = st.slider("首次建仓比例%", 10, 100, 30, 5,
-                    help="信号触发时首次开仓占总资金的比例。建议20-40%以留足加仓空间")
                 c1, c2 = st.columns(2)
                 pyr_trigger_pct = c1.number_input("触发涨幅%", 0.5, 20.0, 2.0, 0.5,
                     help="持仓均价浮盈超过X%时触发加仓")
