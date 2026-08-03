@@ -1266,11 +1266,16 @@ if submitted:
 
         # 回测
         lock_bars = int(lock_days * 6) if timeframe == '4h' else int(lock_days * 24)
-        engine = BacktestEngineV2(
+        # 策略模式专属参数
+        strat_kwargs = dict(
             initial_capital=initial_capital, leverage=leverage, tp_pct=tp_pct, sl_pct=sl_pct,
             max_positions=1, bull_alloc=bull_a, range_alloc=range_a, bear_alloc=bear_a,
             lock_streak=int(lock_streak), lock_bars=lock_bars, cooldown_bars=2, verbose=False,
+            trailing_pct=trailing_pct, strategy_mode=strat_mode_key,
+            hedge_ratio=hedge_ratio, max_pyramid=max_pyramid,
+            pyramid_step=pyramid_step_pct / 100.0, unlock_pct=unlock_pct / 100.0,
         )
+        engine = BacktestEngineV2(**strat_kwargs)
         result = engine.run({coin: df_train}, strategy)
         metrics = PerformanceAnalyzer.analyze(result)
 
@@ -1278,11 +1283,7 @@ if submitted:
     oos_m = None
     if oos_enabled and df_test is not None and len(df_test) > 200:
         with st.spinner("样本外测试..."):
-            e2 = BacktestEngineV2(
-                initial_capital=initial_capital, leverage=leverage, tp_pct=tp_pct, sl_pct=sl_pct,
-                max_positions=1, bull_alloc=bull_a, range_alloc=range_a, bear_alloc=bear_a,
-                lock_streak=int(lock_streak), lock_bars=lock_bars, cooldown_bars=2, verbose=False,
-            )
+            e2 = BacktestEngineV2(**strat_kwargs)
             r2 = e2.run({coin: df_test}, strategy)
             oos_m = PerformanceAnalyzer.analyze(r2)
 

@@ -919,7 +919,7 @@ class BacktestEngineV2:
             'side': pos['side'],
             'entry': round(ep, 4),
             'exit': round(price, 4),
-            'contracts': pos['contracts'],
+            'contracts': pos.get('contracts', pos.get('notional', 0) / (pos.get('entry', 1) * self.CONTRACT_FV.get(pos.get('coin', 'ETH'), 1.0))),
             'margin': round(margin, 2),
             'regime': pos.get('regime', '?'),
             'resonance_score': pos.get('resonance_score', 0),
