@@ -770,6 +770,22 @@ if st.session_state.date_range:
 
 st.sidebar.divider()
 
+# 策略模式默认值 (form内可能被覆盖, 这里提前声明防NameError)
+strat_mode_key = "classic"
+hedge_ratio = 0.5; unlock_pct = 5.0; max_pyramid = 3
+pyramid_first = 0.3; pyramid_step_pct = 1.5; trailing_pct = 0.0
+spot_tp = 5.0; spot_sl = 2.0; short_sl = 3.0; funding_threshold = 0.01
+tp_pct = 10.0; sl_pct = 5.0; bull_a = 1.0; range_a = 0.5; bear_a = 0.3
+lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
+use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
+oos_enabled = False; oos_ratio = 70
+use_weighted = False; weighted_threshold = 2
+resonance_enabled = False; mf_enabled = True
+ema_w = 0.40; adx_w = 0.35; adx_th = 25; bull_th = 0.30
+res_f1 = res_f2 = res_f3 = ""
+unlock_indicator = "price"; use_ema_unlock = True; use_rsi_unlock = False; use_vol_unlock = False
+is_dual_leg = False
+
 # ============================================================
 # 配置表单: 所有参数控件包在form里, 勾选/拖动不触发重渲染
 # ============================================================
