@@ -838,25 +838,35 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
                         sel[name]["params"][pk] = val
 
     st.divider(); st.caption("🛡️ 风控")
-    c1, c2 = st.columns(2)
-    tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
-    sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
-    c1, c2, c3 = st.columns(3)
-    bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
-    range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
-    bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
-    c1, c2 = st.columns(2)
-    lock_streak = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
-    lock_days = c2.number_input("锁仓天数", 1, 30, 2)
-    c1, c2 = st.columns(2)
-    risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5,
-                                     help="每笔交易最大亏损占账户的百分比")
-    use_atr_stop = c2.checkbox("ATR动态止损", False, help="启用后止损=ATR*倍数, 替代固定止损%")
-    atr_period_val, atr_mult_val = 14, 2.0
-    if use_atr_stop:
+    is_dual_leg = strat_mode_key in ("hedging", "unlocking")
+    if is_dual_leg:
+        st.caption("(对冲/解锁模式使用上方双腿独立风控, 全局风控已自动屏蔽)")
+        tp_pct = 10.0; sl_pct = 5.0  # 占位, 不生效
+    else:
         c1, c2 = st.columns(2)
-        atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1, help="计算平均真实波幅的周期")
-        atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5, help="止损价=入场价±ATR*倍数")
+        tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
+        sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
+    if not is_dual_leg:
+        c1, c2, c3 = st.columns(3)
+        bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
+        range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
+        bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
+        c1, c2 = st.columns(2)
+        lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
+        lock_days = c2.number_input("锁仓天数", 1, 30, 2)
+        c1, c2 = st.columns(2)
+        risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5,
+                                         help="每笔交易最大亏损占账户的百分比")
+        use_atr_stop = c2.checkbox("ATR动态止损", False, help="启用后止损=ATR*倍数, 替代固定止损%")
+        atr_period_val, atr_mult_val = 14, 2.0
+        if use_atr_stop:
+            c1, c2 = st.columns(2)
+            atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1, help="计算平均真实波幅的周期")
+            atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5, help="止损价=入场价±ATR*倍数")
+    else:
+        bull_a = 1.0; range_a = 0.5; bear_a = 0.3
+        lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
+        use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
     oos_enabled = st.checkbox("样本外测试 (OOS)", False)
     oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
 
@@ -1286,7 +1296,7 @@ if submitted:
         strat_kwargs = dict(
             initial_capital=initial_capital, leverage=leverage, tp_pct=tp_pct, sl_pct=sl_pct,
             max_positions=1, bull_alloc=bull_a, range_alloc=range_a, bear_alloc=bear_a,
-            lock_streak=int(lock_streak), lock_bars=lock_bars, cooldown_bars=2, verbose=False,
+            lock_streak=int(lock_streak_val), lock_bars=lock_bars, cooldown_bars=2, verbose=False,
             trailing_pct=trailing_pct, strategy_mode=strat_mode_key,
             hedge_ratio=hedge_ratio, max_pyramid=max_pyramid,
             pyramid_step=pyramid_step_pct / 100.0, unlock_pct=unlock_pct / 100.0,

@@ -667,8 +667,11 @@ class BacktestEngineV2:
                 for t in self.trades[-3:]  # 只检查最近3笔
             )
 
-            # ---- 开仓: 轮动选币 ----
-            if not paused and not just_closed and len(self.positions) < self.max_positions:
+            # ---- 开仓: 轮动选币 (对冲LOCKED状态下彻底屏蔽!) ----
+            hedge_blocked = (self.strategy_mode in ("hedging", "unlocking") and
+                             self._hedge_state in ("LOCKED", "UNLOCKED"))
+            if not paused and not just_closed and not hedge_blocked and \
+               len(self.positions) < self.max_positions:
                 self._try_rotate_entry(ts, dfs_with_sigs, coins, i)
 
             # ---- 权益曲线 + Delta暴露 ----
