@@ -884,31 +884,35 @@ class BacktestEngineV2:
         # === IDLE: 建双腿仓 (只建一次!) ===
         if self._hedge_state == "IDLE":
             if self.equity <= 0: return
-            # 现货多头 (1x, 独立)
+            # 现货多头
             spot_margin = self.equity * self.hedge_ratio
-            spot_cost = spot_margin * (TAKER_FEE + SLIPPAGE)
+            spot_notional = spot_margin  # 现货1x
+            spot_cost = spot_notional * (TAKER_FEE + SLIPPAGE)
             self.equity -= spot_cost
             self._spot_leg = {
-                'leg': 'SPOT', 'side': 'LONG', 'entry': px,
-                'margin': spot_margin, 'notional': spot_margin,
-                'tp_pct': self._spot_tp, 'sl_pct': self._spot_sl,
-                'open_time': ts,
+                'coin': coin, 'side': 'LONG', 'entry': px,
+                'margin': spot_margin, 'notional': spot_notional,
+                'open_time': ts, 'tp_price': px * (1 + self._spot_tp),
+                'sl_price': px * (1 - self._spot_sl),
+                'leg': 'SPOT',
             }
-            # 合约空头 (杠杆)
+            # 注册到 positions (让引擎感知)
+            self.positions.append(self._spot_leg)
+            # 合约空头
             short_margin = self.equity * self.hedge_ratio
             short_notional = short_margin * self.leverage
             short_cost = short_notional * (TAKER_FEE + SLIPPAGE)
             self.equity -= short_cost
             self._short_leg = {
-                'leg': 'FUTURES', 'side': 'SHORT', 'entry': px,
+                'coin': coin, 'side': 'SHORT', 'entry': px,
                 'margin': short_margin, 'notional': short_notional,
-                'tp_pct': self._short_tp, 'sl_pct': self._short_sl,
-                'unlock_pct': self.unlock_pct,
-                'open_time': ts,
+                'open_time': ts, 'tp_price': px * (1 - self._short_tp / self.leverage),
+                'sl_price': px * (1 + self._short_sl / self.leverage),
+                'leg': 'FUTURES',
             }
+            self.positions.append(self._short_leg)
             self._hedge_state = "LOCKED"; self._hedge_entry_price = px
-            if self.verbose:
-                print(f"[双腿建仓] {ts} | {coin} | SPOT ${spot_margin:.0f} + SHORT ${short_notional:.0f} | Delta=0")
+            print(f"[DEBUG] 对冲建仓 at bar 0 | {coin} | SPOT=${spot_margin:.0f} + SHORT=${short_notional:.0f} | positions={len(self.positions)}", flush=True)
 
         # === LOCKED / UNLOCKED: 逐bar评估双腿 ===
         else:
@@ -1213,7 +1217,12 @@ class PerformanceAnalyzer:
 
         # ---- 交易统计 ----
         if trades:
-            closed = [t for t in trades if t['reason'] in ('TP', 'SL', 'EOD')]
+            closed = [t for t in trades if t.get('reason', '') in
+                      ('TP', 'SL', 'EOD', 'TRAIL', 'LIQUIDATED',
+                       'SPOT_TP', 'SPOT_SL', 'PORTFOLIO_STOP',
+                       'UNLOCK_price_breakout', 'UNLOCK_ema_cross',
+                       'UNLOCK_rsi', 'UNLOCK_volume') or
+                      str(t.get('reason', '')).startswith('UNLOCK_')]
             if closed:
                 wins = [t for t in closed if t['pnl'] > 0]
                 losses = [t for t in closed if t['pnl'] <= 0]
@@ -1280,7 +1289,9 @@ class PerformanceAnalyzer:
 
         # 最近交易
         trades = result.get('trades', [])
-        closed = [t for t in trades if t.get('reason') in ('TP', 'SL', 'EOD')][-8:]
+        closed = [t for t in trades if t.get('reason', '') in
+                  ('TP','SL','EOD','TRAIL','LIQUIDATED','SPOT_TP','SPOT_SL','PORTFOLIO_STOP') or
+                  str(t.get('reason','')).startswith('UNLOCK_')][-8:]
         if closed:
             print(f"\n  {'─' * 45}")
             print(f"  [最近交易]")
