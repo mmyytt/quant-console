@@ -929,15 +929,17 @@ class BacktestEngineV2:
                 unlock_triggered = True; reason = "short_sl"
 
             if unlock_triggered:
+                s_notional = self._short_leg.get('notional', 0)
+                s_margin = self._short_leg.get('margin', 0)
                 # 空单盈亏 = 名义本金 * (入场-出场)/入场 - 手续费
-                short_pnl = short_notional * (short_ep - px) / short_ep
-                short_pnl -= short_notional * (TAKER_FEE + SLIPPAGE)
-                self.equity += short_margin + short_pnl
+                short_pnl = s_notional * (short_ep - px) / short_ep if short_ep > 0 else 0
+                short_pnl -= s_notional * (TAKER_FEE + SLIPPAGE)
+                self.equity += s_margin + short_pnl
                 self.trades.append({
                     'open_time':str(self._short_leg['open_time']),'close_time':str(ts),
                     'coin':coin,'side':'SHORT','entry':short_ep,'exit':px,
                     'reason':f'UNLOCK_{reason}','pnl':round(short_pnl,2),
-                    'pnl_pct':round(short_pnl/short_margin*100,2),
+                    'pnl_pct':round(short_pnl/s_margin*100,2) if s_margin > 0 else 0,
                 })
                 self.positions = [p for p in self.positions if p is not self._short_leg]
                 self._short_leg = None; self._hedge_state = "UNLOCKED"
@@ -954,23 +956,28 @@ class BacktestEngineV2:
             elif bl <= spot_sl: close_spot = True; spot_reason = "SPOT_SL"; spot_px = spot_sl
 
             if close_spot:
-                spot_pnl = spot_notional * (spot_px - spot_ep) / spot_ep
-                spot_pnl -= spot_notional * (TAKER_FEE + SLIPPAGE)
-                self.equity += spot_margin + spot_pnl
+                sn_val = self._spot_leg.get('notional', spot_notional) if self._spot_leg else spot_notional
+                sm_val = self._spot_leg.get('margin', spot_margin) if self._spot_leg else spot_margin
+                spot_pnl = sn_val * (spot_px - spot_ep) / spot_ep if spot_ep > 0 else 0
+                spot_pnl -= sn_val * (TAKER_FEE + SLIPPAGE)
+                self.equity += sm_val + spot_pnl
                 self.trades.append({
                     'open_time':str(self._spot_leg['open_time']),'close_time':str(ts),
                     'coin':coin,'side':'LONG','entry':spot_ep,'exit':spot_px,
                     'reason':spot_reason,'pnl':round(spot_pnl,2),
-                    'pnl_pct':round(spot_pnl/spot_margin*100,2),
+                    'pnl_pct':round(spot_pnl/sm_val*100,2) if sm_val > 0 else 0,
                 })
                 self.positions = [p for p in self.positions if p is not self._spot_leg]
                 self._spot_leg = None
                 # 现货平仓 → 重置状态, 下一bar自动re-hedge
                 # 如果空单还在, 也平掉
                 if self._short_leg is not None:
-                    short_pnl = self._short_leg['notional'] * (self._short_leg['entry']-px)/self._short_leg['entry']
-                    short_pnl -= self._short_leg['notional'] * (TAKER_FEE+SLIPPAGE)
-                    self.equity += self._short_leg['margin'] + short_pnl
+                    se = self._short_leg.get('entry', px)
+                    sn = self._short_leg.get('notional', 0)
+                    sm = self._short_leg.get('margin', 0)
+                    short_pnl = sn * (se - px) / se if se > 0 else 0
+                    short_pnl -= sn * (TAKER_FEE + SLIPPAGE)
+                    self.equity += sm + short_pnl
                     self.positions = [p for p in self.positions if p is not self._short_leg]
                     self._short_leg = None
                 self._hedge_state = "FLAT"  # 下一bar IDLE检测 → 自动re-hedge
