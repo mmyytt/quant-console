@@ -687,6 +687,11 @@ class BacktestEngineV2:
                len(self.positions) < self.max_positions:
                 self._try_rotate_entry(ts, dfs_with_sigs, coins, i)
 
+            # 破产熔断
+            if self.equity <= 0:
+                self.equity = 0.0
+                break
+
             # ---- 权益曲线 + Delta暴露 ----
             eq = self._calc_total_equity(dfs_with_sigs, ts)
             # 计算净Delta (多头名义-空头名义)
@@ -880,6 +885,9 @@ class BacktestEngineV2:
     def _hedge_state_machine(self, ts, dfs, coins, bar_idx):
         coin = coins[0]; df = dfs[coin]; row = df.loc[ts]
         bh = float(row['high']); bl = float(row['low']); px = float(row['open'])
+        # 安全初始化
+        spot_ep = 0.0; spot_margin = 0.0; spot_notional = 0.0
+        short_ep = 0.0; short_margin = 0.0; short_notional = 0.0
 
         # === IDLE or FLAT: 建/重建双腿仓 ===
         if self._hedge_state in ("IDLE", "FLAT"):
@@ -933,7 +941,7 @@ class BacktestEngineV2:
                 # 空单盈亏 = 名义本金 * (入场-出场)/入场 - 手续费
                 short_pnl = s_notional * (short_ep - px) / short_ep if short_ep > 0 else 0
                 short_pnl -= s_notional * (TAKER_FEE + SLIPPAGE)
-                self.equity += s_margin + short_pnl
+                self.equity += short_pnl  # 只加净PnL, margin从未离开账户
                 self.trades.append({
                     'open_time':str(self._short_leg['open_time']),'close_time':str(ts),
                     'coin':coin,'side':'SHORT','entry':short_ep,'exit':px,
@@ -958,7 +966,7 @@ class BacktestEngineV2:
                 sm_val = self._spot_leg.get('margin', spot_margin) if self._spot_leg else spot_margin
                 spot_pnl = sn_val * (spot_px - spot_ep) / spot_ep if spot_ep > 0 else 0
                 spot_pnl -= sn_val * (TAKER_FEE + SLIPPAGE)
-                self.equity += sm_val + spot_pnl
+                self.equity += spot_pnl  # 只加净PnL
                 self.trades.append({
                     'open_time':str(self._spot_leg['open_time']),'close_time':str(ts),
                     'coin':coin,'side':'LONG','entry':spot_ep,'exit':spot_px,
@@ -973,7 +981,7 @@ class BacktestEngineV2:
                     sm = self._short_leg.get('margin', 0)
                     short_pnl = sn * (se - px) / se if se > 0 else 0
                     short_pnl -= sn * (TAKER_FEE + SLIPPAGE)
-                    self.equity += sm + short_pnl
+                    self.equity += short_pnl
                     self._short_leg = None
                 self._hedge_state = "FLAT"  # 下一bar IDLE检测 → 自动re-hedge
 
@@ -1195,7 +1203,8 @@ class PerformanceAnalyzer:
         # ---- 最大回撤 ----
         peak = np.maximum.accumulate(equity_arr)
         drawdown = (peak - equity_arr) / peak
-        metrics['max_drawdown'] = round(np.max(drawdown) * 100, 2)
+        dd_val = np.max(drawdown) if len(drawdown) > 0 else 0
+        metrics['max_drawdown'] = round(float(dd_val) * 100, 2) if not np.isnan(dd_val) and not np.isinf(dd_val) else 100.0
 
         # ---- 夏普比率 ----
         returns = np.diff(equity_arr) / equity_arr[:-1]
@@ -1237,8 +1246,13 @@ class PerformanceAnalyzer:
 
         # ---- 买入持有对比 ----
         metrics['buy_hold_return'] = round(
-            (equity_arr[-1] / equity_arr[0] - 1) * 100, 2
+            (equity_arr[-1] / max(equity_arr[0], 1) - 1) * 100, 2
         )
+        # 最终NaN清理
+        for k in list(metrics.keys()):
+            v = metrics[k]
+            if isinstance(v, float) and (np.isnan(v) or np.isinf(v)):
+                metrics[k] = 0.0
 
         return metrics
 
