@@ -793,7 +793,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     st.caption("📋 基础设置")
     c1, c2 = st.columns(2)
     coin = c1.selectbox("标的", ["ETH", "BTC", "SOL"], 0)
-    timeframe = c2.selectbox("K线周期", ["15m", "1h", "4h", "1d"], 2)
+    timeframe = c2.selectbox("K线周期", ["5m", "15m", "1h", "4h", "1d"], 3)
     c1, c2 = st.columns(2)
     leverage = c1.slider("杠杆", 1, 20, 3, 1)
     initial_capital = c2.number_input("初始资金", 100, 1000000, 10000, 1000)
@@ -1011,7 +1011,7 @@ def resample_cached(df_15m, period: str):
     from pandas import DataFrame
     if period == "15m":
         return df_15m.copy()
-    rule_map = {"1h": "1h", "4h": "4h", "1D": "1d"}
+    rule_map = {"5m": "5min", "15m": "15min", "1h": "1h", "4h": "4h", "1D": "1d"}
     rule = rule_map.get(period, "4h")
     df = df_15m.resample(rule, label="left", closed="left").agg({
         "open": "first", "high": "max", "low": "min", "close": "last",
@@ -1443,10 +1443,11 @@ if submitted:
     # 缩放按钮
     zc1, zc2, zc3, zc4, zc5, zc6 = st.columns([1,1,1,1,1,2])
     zoom_n = min(2000, len(df_train))  # 默认最多2000根, 点[全部]显示所有
-    if zc1.button("1月", use_container_width=True, key="z1m"): zoom_n = int(30 * 24 / {"15m":0.25,"1h":1,"4h":4,"1d":24}[timeframe])
-    if zc2.button("6月", use_container_width=True, key="z6m"): zoom_n = int(180 * 24 / {"15m":0.25,"1h":1,"4h":4,"1d":24}[timeframe])
-    if zc3.button("1年", use_container_width=True, key="z1y"): zoom_n = int(365 * 24 / {"15m":0.25,"1h":1,"4h":4,"1d":24}[timeframe])
-    if zc4.button("3年", use_container_width=True, key="z3y"): zoom_n = int(1095 * 24 / {"15m":0.25,"1h":1,"4h":4,"1d":24}[timeframe])
+    tf_hours = {"5m": 1/12, "15m": 0.25, "1h": 1, "4h": 4, "1d": 24}
+    if zc1.button("1月", use_container_width=True, key="z1m"): zoom_n = int(30 * 24 / tf_hours.get(timeframe, 4))
+    if zc2.button("6月", use_container_width=True, key="z6m"): zoom_n = int(180 * 24 / tf_hours.get(timeframe, 4))
+    if zc3.button("1年", use_container_width=True, key="z1y"): zoom_n = int(365 * 24 / tf_hours.get(timeframe, 4))
+    if zc4.button("3年", use_container_width=True, key="z3y"): zoom_n = int(1095 * 24 / tf_hours.get(timeframe, 4))
     if zc5.button("全部", use_container_width=True, key="zall"): zoom_n = len(df_train)
     zc6.caption(f"显示最近 {min(zoom_n, len(df_train))} 根")
 
@@ -1553,15 +1554,15 @@ else:
     st.info("👆 左侧配置策略 & 指标 → 点【运行策略回测】")
 
     # === 图表专属周期切换器 (独立于回测周期) ===
-    chart_periods = ["15m", "1h", "4h", "1D"]
+    chart_periods = ["5m", "15m", "1h", "4h", "1D"]
     if "chart_period" not in st.session_state:
         st.session_state.chart_period = timeframe  # 初始同步侧边栏
 
     st.divider()
     st.subheader(f"📈 {coin} 数据预览")
-    cc1, cc2, cc3, cc4, cc5 = st.columns([1, 1, 1, 1, 4])
+    cc_cols = st.columns([1, 1, 1, 1, 1, 3])
     for i, period in enumerate(chart_periods):
-        col = [cc1, cc2, cc3, cc4][i]
+        col = cc_cols[i]
         is_active = st.session_state.chart_period == period
         if col.button(period, use_container_width=True,
                       type="primary" if is_active else "secondary",
