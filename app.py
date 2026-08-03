@@ -804,55 +804,6 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     regime_filter_enabled = c2.checkbox("牛熊方向过滤", True,
         help="牛市禁止做空, 熊市禁止做多, 震荡市双向允许。关闭则不限制方向。")
 
-    st.divider(); st.caption("🧱 指标积木")
-    st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
-    logic_mode = st.radio("信号组合模式",
-        ["AND 全部满足 (严格)", "OR 任一满足 (灵敏)", "加权打分 N个以上触发 (推荐)"],
-        horizontal=False, key="logic_mode")
-    use_and = "AND" in logic_mode
-    use_weighted = "加权" in logic_mode
-    weighted_threshold = 2
-    if use_weighted:
-        weighted_threshold = st.slider("最少满足指标数", 1, 10, 2, 1,
-            help="勾选的指标中, 至少N个同时触发才开仓。值越大信号越少但质量越高")
-
-    categories = {}
-    for name, info in INDICATOR_REGISTRY.items():
-        cat = info["category"]
-        if cat not in categories: categories[cat] = []
-        categories[cat].append(name)
-    if "selected_indicators" not in st.session_state:
-        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"EMA_short": 7, "EMA_long": 21}}}
-
-    for cat_name, ind_names in categories.items():
-        with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
-            for name in ind_names:
-                info = INDICATOR_REGISTRY[name]
-                sel = st.session_state.selected_indicators
-                checked = name in sel and sel[name].get("enabled", False)
-                new_checked = st.checkbox(name, checked, key=f"ind_{name}", help=info["desc"])
-                if new_checked and name not in sel:
-                    # 用schema key初始化params, 不是label
-                    sel[name] = {"enabled": True, "params": {
-                        pk: pv["default"] for pk, pv in info["params"].items()
-                    }}
-                elif not new_checked and name in sel:
-                    sel[name]["enabled"] = False
-
-                # 展开子参数: 显示label, 存储用schema key
-                if new_checked and info["params"]:
-                    param_items = list(info["params"].items())
-                    cols = st.columns(min(2, len(param_items)))
-                    for i, (pk, pdef) in enumerate(param_items):
-                        label = pdef["label"]
-                        val = cols[i % 2].number_input(
-                            label, pdef["min"], pdef["max"],
-                            sel[name]["params"].get(pk, pdef["default"]),
-                            pdef["step"], key=f"p_{name}_{pk}",
-                            help=pdef.get("help", ""),
-                        )
-                        sel[name]["params"][pk] = val
-
     st.divider(); st.caption("🏗️ 策略模式与参数")
     strategy_mode = st.selectbox("策略模式", [
         "经典单向信号 (Classic Single-Leg)",
@@ -980,6 +931,56 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         trailing_pct = c1.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5,
                                         help="价格新高/新低后回撤X%平仓") / 100
         st.caption(f"仓位路径: 首仓{pyramid_first*100:.0f}% → 每次加仓{pyramid_first*100:.0f}% → 最多{max_pyramid}次 → 全部平仓")
+
+
+    st.divider(); st.caption("🧱 指标积木")
+    st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
+    logic_mode = st.radio("信号组合模式",
+        ["AND 全部满足 (严格)", "OR 任一满足 (灵敏)", "加权打分 N个以上触发 (推荐)"],
+        horizontal=False, key="logic_mode")
+    use_and = "AND" in logic_mode
+    use_weighted = "加权" in logic_mode
+    weighted_threshold = 2
+    if use_weighted:
+        weighted_threshold = st.slider("最少满足指标数", 1, 10, 2, 1,
+            help="勾选的指标中, 至少N个同时触发才开仓。值越大信号越少但质量越高")
+
+    categories = {}
+    for name, info in INDICATOR_REGISTRY.items():
+        cat = info["category"]
+        if cat not in categories: categories[cat] = []
+        categories[cat].append(name)
+    if "selected_indicators" not in st.session_state:
+        st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"EMA_short": 7, "EMA_long": 21}}}
+
+    for cat_name, ind_names in categories.items():
+        with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
+            for name in ind_names:
+                info = INDICATOR_REGISTRY[name]
+                sel = st.session_state.selected_indicators
+                checked = name in sel and sel[name].get("enabled", False)
+                new_checked = st.checkbox(name, checked, key=f"ind_{name}", help=info["desc"])
+                if new_checked and name not in sel:
+                    # 用schema key初始化params, 不是label
+                    sel[name] = {"enabled": True, "params": {
+                        pk: pv["default"] for pk, pv in info["params"].items()
+                    }}
+                elif not new_checked and name in sel:
+                    sel[name]["enabled"] = False
+
+                # 展开子参数: 显示label, 存储用schema key
+                if new_checked and info["params"]:
+                    param_items = list(info["params"].items())
+                    cols = st.columns(min(2, len(param_items)))
+                    for i, (pk, pdef) in enumerate(param_items):
+                        label = pdef["label"]
+                        val = cols[i % 2].number_input(
+                            label, pdef["min"], pdef["max"],
+                            sel[name]["params"].get(pk, pdef["default"]),
+                            pdef["step"], key=f"p_{name}_{pk}",
+                            help=pdef.get("help", ""),
+                        )
+                        sel[name]["params"][pk] = val
 
     st.divider(); st.caption("🔬 多因子牛熊 + 共振")
     c1, c2 = st.columns(2)
