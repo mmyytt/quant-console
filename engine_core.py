@@ -583,6 +583,8 @@ class BacktestEngineV2:
         self.verbose = verbose
         self._pyramid_count = 0
         self._last_entry_price = 0
+        self._pyramid_step = 0.02    # 加仓触发涨幅
+        self._pyramid_add_ratio = 0.5 # 加仓比例
         self._portfolio_curve = []
         # 对冲状态机
         self._hedge_state = "IDLE"
@@ -762,6 +764,25 @@ class BacktestEngineV2:
                 elif side == 'SHORT' and pos['lowest_price'] < ep * (1 - self.trailing_pct * 2):
                     pos['trailing_activated'] = True
 
+            # 金字塔加仓 (经典模式add-on): 浮盈达标 → 追加仓位
+            if self.strategy_mode == "classic" and self._pyramid_count > 0 and \
+               self._pyramid_count < self.max_pyramid and exit_price is None and \
+               self._pyramid_step > 0:
+                avg_entry = sum(p['entry'] * p['notional'] for p in self.positions
+                                if p['side'] == side and p['coin'] == coin) / \
+                            max(sum(p['notional'] for p in self.positions
+                                    if p['side'] == side and p['coin'] == coin), 1)
+                if side == 'LONG' and px >= avg_entry * (1 + self._pyramid_step):
+                    self._open(coin, side, px, alloc * self._pyramid_add_ratio,
+                               ts, regime, 0)
+                    self._pyramid_count += 1
+                    if self.verbose:
+                        print(f"[ADD_LONG] {ts} | {coin} | px={px:.2f} | pyramid {self._pyramid_count}/{self.max_pyramid}")
+                elif side == 'SHORT' and px <= avg_entry * (1 - self._pyramid_step):
+                    self._open(coin, side, px, alloc * self._pyramid_add_ratio,
+                               ts, regime, 0)
+                    self._pyramid_count += 1
+
             if exit_price is not None:
                 self._close(pos, exit_price, exit_reason, ts)
 
@@ -832,36 +853,18 @@ class BacktestEngineV2:
         # 策略模式过滤
         regime = best['regime']
         if self.strategy_mode == "unlocking":
-            # 解锁模式: 只做多, 熊市不下注
             if regime == 'bear' or best['side'] == 'SHORT':
                 return
-        elif self.strategy_mode == "pyramiding":
-            # 金字塔: 震荡市禁止加仓
-            if regime == 'range' and self._pyramid_count > 0:
-                return
-            # 金字塔加仓间距检查
-            if self._pyramid_count > 0 and self._last_entry_price > 0:
-                gap = abs(best['price'] - self._last_entry_price) / self._last_entry_price
-                if gap < self.pyramid_step:
-                    return  # 间距不够, 不加
 
         # 动态仓位
-        if self.strategy_mode == "pyramiding":
-            # 首仓用 pyramid_first 比例, 后续等量
-            alloc = 0.3 if self._pyramid_count == 0 else 0.3
+        if regime == 'bull':
+            alloc = self.bull_alloc
+        elif regime == 'bear':
+            alloc = self.bear_alloc
         else:
-            if regime == 'bull':
-                alloc = self.bull_alloc
-            elif regime == 'bear':
-                alloc = self.bear_alloc
-            else:
-                alloc = self.range_alloc
+            alloc = self.range_alloc
 
         if alloc <= 0:
-            return
-
-        # 金字塔最大次数限制
-        if self.strategy_mode == "pyramiding" and self._pyramid_count >= self.max_pyramid:
             return
 
         self._open(best['coin'], best['side'], best['price'], alloc, ts, regime,

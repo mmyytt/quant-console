@@ -810,12 +810,11 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
     st.divider(); st.caption("🏗️ 策略模式与参数")
     strategy_mode = st.selectbox("策略模式", [
-        "经典单向信号 (Classic Single-Leg)",
-        "Delta中性对冲 (Hedging)",
-        "动能突破解封 (Breakout Unlocking)",
-        "分批加仓 (Pyramiding)",
-    ], index=0, help="切换模式后下方参数面板自动联动")
-    mode_map = {"经典": "classic", "Delta": "hedging", "动能": "unlocking", "分批": "pyramiding"}
+        "经典单向策略 (Classic Directional)",
+        "Delta中性对冲 (Delta-Neutral Hedging)",
+        "动能突破解封 (Momentum Unlocking)",
+    ], index=0, help="经典=指标信号驱动 | 对冲=双腿锁仓 | 解封=突破平空裸多")
+    mode_map = {"经典": "classic", "Delta": "hedging", "动能": "unlocking"}
     strat_mode_key = [v for k, v in mode_map.items() if k in strategy_mode][0]
     is_dual_leg = strat_mode_key in ("hedging", "unlocking")
 
@@ -825,7 +824,16 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     spot_tp = 5.0; spot_sl = 2.0; short_sl = 3.0; funding_threshold = 0.01
 
     if strat_mode_key == "classic":
-        st.caption("经典模式: 使用下方指标积木 + 风控参数, 无额外配置")
+        st.caption("经典模式: 下方指标积木 + 风控驱动")
+        with st.expander("📈 顺势加仓管理 (Pyramiding)", expanded=False):
+            enable_pyramiding = st.checkbox("启用加仓", False)
+            pyr_trigger_pct = 2.0; pyr_add_pct = 0.5; pyr_max = 3; pyr_trail = False
+            if enable_pyramiding:
+                c1, c2 = st.columns(2)
+                pyr_trigger_pct = c1.number_input("触发涨幅%", 0.5, 20.0, 2.0, 0.5)
+                pyr_add_pct = c2.slider("加仓比例%", 10, 100, 50, 5) / 100
+                pyr_max = st.number_input("最大加仓次数", 1, 10, 3)
+                pyr_trail = st.checkbox("加仓后移动止损至均价", False)
     elif strat_mode_key == "hedging":
         st.caption("双腿独立风控 (现货 vs 合约空单)")
         hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1)
@@ -847,15 +855,6 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
         unlock_sl = c1.number_input("解封后止损%", 1.0, 15.0, 3.0, 0.5)
         unlock_tp = c2.number_input("解封后止盈%", 5.0, 50.0, 15.0, 0.5)
-    elif strat_mode_key == "pyramiding":
-        st.caption("分批加仓控制")
-        c1, c2 = st.columns(2)
-        pyramid_first = c1.slider("首次建仓比例%", 10, 50, 30, 5) / 100
-        max_pyramid = c2.number_input("最大加仓次数", 1, 10, 3)
-        pyramid_step_pct = st.number_input("加仓间隔%", 0.5, 10.0, 1.5, 0.5)
-        c1, c2 = st.columns(2)
-        trailing_pct = c1.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5) / 100
-        st.caption(f"仓位: 首仓{pyramid_first*100:.0f}%x{max_pyramid}次")
 
     # === 单向风控 (仅非对冲模式渲染) ===
     if not is_dual_leg:
@@ -1265,6 +1264,11 @@ if submitted:
         st.session_state.selected_indicators["_max_pyramid"] = max_pyramid
         st.session_state.selected_indicators["_pyramid_first"] = pyramid_first
         st.session_state.selected_indicators["_pyramid_step"] = pyramid_step_pct
+        st.session_state.selected_indicators["_enable_pyramiding"] = enable_pyramiding if 'enable_pyramiding' in dir() else False
+        st.session_state.selected_indicators["_pyr_trigger_pct"] = pyr_trigger_pct if 'pyr_trigger_pct' in dir() else 2.0
+        st.session_state.selected_indicators["_pyr_add_pct"] = pyr_add_pct if 'pyr_add_pct' in dir() else 0.5
+        st.session_state.selected_indicators["_pyr_max"] = pyr_max if 'pyr_max' in dir() else 3
+        st.session_state.selected_indicators["_pyr_trail"] = pyr_trail if 'pyr_trail' in dir() else False
         st.session_state.selected_indicators["_trailing_pct"] = trailing_pct
         st.session_state.selected_indicators["_unlock_pct"] = unlock_pct
         st.session_state.selected_indicators["_unlock_indicator"] = unlock_indicator
