@@ -860,27 +860,58 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     oos_enabled = st.checkbox("样本外测试 (OOS)", False)
     oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
 
-    st.divider(); st.caption("🏗️ 仓位与对冲管理")
+    st.divider(); st.caption("🏗️ 策略模式与参数")
     strategy_mode = st.selectbox("策略模式", [
         "经典单向信号 (Classic Single-Leg)",
         "Delta中性对冲 (Hedging)",
         "动能突破解封 (Breakout Unlocking)",
         "分批加仓 (Pyramiding)",
-    ], index=0, help="CLASSIC=单腿信号 | HEDGING=现货+合约对冲 | UNLOCKING=锁仓→突破解锁 | PYRAMIDING=分批建仓")
+    ], index=0, help="切换模式后下方参数面板自动联动")
     mode_map = {"经典": "classic", "Delta": "hedging", "动能": "unlocking", "分批": "pyramiding"}
     strat_mode_key = [v for k, v in mode_map.items() if k in strategy_mode][0]
 
-    hedge_ratio = 0.5; max_pyramid = 3; trailing_pct = 0.0
-    if strat_mode_key == "hedging":
-        hedge_ratio = st.slider("对冲比例 (现货:空单)", 0.1, 1.0, 0.5, 0.1,
-                                help="50%=一半现货一半空单, Delta接近0")
-    elif strat_mode_key == "unlocking":
-        st.caption("锁仓后价格突破X%自动平空单解锁")
-    elif strat_mode_key == "pyramiding":
+    # === 动态参数面板 ===
+    hedge_ratio = 0.5; unlock_pct = 5.0; unlock_indicator = "price"
+    max_pyramid = 3; pyramid_first = 0.3; pyramid_step_pct = 1.5
+    trailing_pct = 0.0; funding_threshold = 0.01
+
+    if strat_mode_key == "classic":
+        st.caption("经典模式: 使用下方指标积木 + 风控参数, 无额外配置")
+
+    elif strat_mode_key == "hedging":
+        st.caption("对冲专有参数")
         c1, c2 = st.columns(2)
-        max_pyramid = c1.number_input("最大加仓次数", 1, 10, 3)
-        trailing_pct = c2.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5,
+        hedge_ratio = c1.slider("现货/合约比例", 0.1, 1.0, 0.5, 0.1,
+                                help="0.5=一半现货一半空单, Delta接近0")
+        funding_threshold = c2.number_input("费率对冲阈值%", 0.001, 0.100, 0.010, 0.001,
+                                            format="%.3f", help="资金费率超过此值触发对冲")
+        st.caption(f"预期: 年化对冲收益 ≈ {funding_threshold*365*3:.1f}% (费率×365×3次/天)")
+
+    elif strat_mode_key == "unlocking":
+        st.caption("解封触发条件")
+        c1, c2 = st.columns(2)
+        unlock_indicator = c1.selectbox("突破判定指标",
+            ["价格突破%", "成交量突破", "RSI突破", "均线突破"], index=0)
+        unlock_pct = c2.number_input("突破阈值%", 1.0, 20.0, 5.0, 0.5,
+                                      help="锁仓后价格突破X%触发平空解锁")
+        if unlock_indicator == "成交量突破":
+            vol_unlock_mult = st.slider("量能倍数", 1.0, 5.0, 1.5, 0.1)
+        elif unlock_indicator == "RSI突破":
+            rsi_unlock = st.slider("RSI阈值", 50, 80, 60)
+        unlock_sl = st.slider("解封后保护止损%", 1.0, 10.0, 3.0, 0.5,
+                              help="解锁后裸多头寸如果跌3%立即止损")
+
+    elif strat_mode_key == "pyramiding":
+        st.caption("分批加仓控制")
+        c1, c2 = st.columns(2)
+        pyramid_first = c1.slider("首次建仓比例%", 10, 50, 30, 5) / 100
+        max_pyramid = c2.number_input("最大加仓次数", 1, 10, 3)
+        pyramid_step_pct = st.number_input("加仓间隔% (价格每变动X%加一次)", 0.5, 10.0, 1.5, 0.5,
+                                            help="价格每上涨/下跌X%触发一次加仓")
+        c1, c2 = st.columns(2)
+        trailing_pct = c1.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5,
                                         help="价格新高/新低后回撤X%平仓") / 100
+        st.caption(f"仓位路径: 首仓{pyramid_first*100:.0f}% → 每次加仓{pyramid_first*100:.0f}% → 最多{max_pyramid}次 → 全部平仓")
 
     st.divider(); st.caption("🔬 多因子牛熊 + 共振")
     c1, c2 = st.columns(2)
@@ -1205,6 +1236,18 @@ if submitted:
             del st.session_state.selected_indicators["_resonance_factors"]
 
         # 交易方向参数
+        # 策略模式参数注入
+        st.session_state.selected_indicators["_strategy_mode"] = strat_mode_key
+        st.session_state.selected_indicators["_hedge_ratio"] = hedge_ratio
+        st.session_state.selected_indicators["_max_pyramid"] = max_pyramid
+        st.session_state.selected_indicators["_pyramid_first"] = pyramid_first
+        st.session_state.selected_indicators["_pyramid_step"] = pyramid_step_pct
+        st.session_state.selected_indicators["_trailing_pct"] = trailing_pct
+        st.session_state.selected_indicators["_unlock_pct"] = unlock_pct
+        st.session_state.selected_indicators["_unlock_indicator"] = unlock_indicator
+        st.session_state.selected_indicators["_unlock_sl"] = unlock_sl if strat_mode_key == "unlocking" else 3.0
+        st.session_state.selected_indicators["_funding_threshold"] = funding_threshold
+
         st.session_state.selected_indicators["_trade_mode"] = trade_mode
         st.session_state.selected_indicators["_regime_filter"] = regime_filter_enabled
 

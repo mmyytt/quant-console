@@ -541,6 +541,12 @@ class BacktestEngineV2:
                  lock_streak: int = 3,
                  lock_bars: int = 12,
                  cooldown_bars: int = 2,
+                 trailing_pct: float = 0.0,     # 移动止损%
+                 strategy_mode: str = "classic",
+                 hedge_ratio: float = 0.5,
+                 max_pyramid: int = 3,
+                 pyramid_step: float = 0.015,
+                 unlock_pct: float = 0.05,
                  verbose: bool = True,
                  ):
         self.initial_capital = initial_capital
@@ -555,7 +561,16 @@ class BacktestEngineV2:
         self.lock_streak = lock_streak
         self.lock_bars = lock_bars
         self.cooldown_bars = cooldown_bars
+        self.trailing_pct = trailing_pct   # 移动止损
+        self.strategy_mode = strategy_mode
+        self.hedge_ratio = hedge_ratio
+        self.max_pyramid = max_pyramid
+        self.pyramid_step = pyramid_step
+        self.unlock_pct = unlock_pct
         self.verbose = verbose
+        self._pyramid_count = 0
+        self._last_entry_price = 0
+        self._portfolio_curve = []
 
         # 内部状态 (每次 run 时重置)
         self.equity = initial_capital
@@ -638,11 +653,18 @@ class BacktestEngineV2:
             if not paused and not just_closed and len(self.positions) < self.max_positions:
                 self._try_rotate_entry(ts, dfs_with_sigs, coins, i)
 
-            # ---- 权益曲线 ----
+            # ---- 权益曲线 + Delta暴露 ----
             eq = self._calc_total_equity(dfs_with_sigs, ts)
+            # 计算净Delta (多头名义-空头名义)
+            long_val = sum(p['notional'] for p in self.positions if p['side'] == 'LONG')
+            short_val = sum(p['notional'] for p in self.positions if p['side'] == 'SHORT')
+            net_delta = long_val - short_val
             self.equity_curve.append({
-                'timestamp': ts,
-                'equity': round(eq, 2),
+                'timestamp': ts, 'equity': round(eq, 2),
+            })
+            self._portfolio_curve.append({
+                'timestamp': ts, 'net_delta': round(net_delta, 2),
+                'state': 'LOCKED' if abs(net_delta) < max(long_val, short_val) * 0.05 and (long_val + short_val) > 0 else 'UNLOCKED',
             })
 
         # 4. 强制平仓
@@ -688,6 +710,26 @@ class BacktestEngineV2:
                     exit_price = tp_px; exit_reason = 'TP'
                 elif s_hit:
                     exit_price = sl_px; exit_reason = 'SL'
+
+            # 移动止损检查
+            if exit_price is None and self.trailing_pct > 0:
+                if side == 'LONG':
+                    trail_stop = pos['highest_price'] * (1 - self.trailing_pct)
+                    if bl <= trail_stop and pos.get('trailing_activated'):
+                        exit_price = trail_stop; exit_reason = 'TRAIL'
+                else:
+                    trail_stop = pos['lowest_price'] * (1 + self.trailing_pct)
+                    if bh >= trail_stop and pos.get('trailing_activated'):
+                        exit_price = trail_stop; exit_reason = 'TRAIL'
+
+            # 更新极值 (移动止损用)
+            if exit_price is None:
+                pos['highest_price'] = max(pos.get('highest_price', ep), bh)
+                pos['lowest_price'] = min(pos.get('lowest_price', ep), bl)
+                if side == 'LONG' and pos['highest_price'] > ep * (1 + self.trailing_pct * 2):
+                    pos['trailing_activated'] = True
+                elif side == 'SHORT' and pos['lowest_price'] < ep * (1 - self.trailing_pct * 2):
+                    pos['trailing_activated'] = True
 
             if exit_price is not None:
                 self._close(pos, exit_price, exit_reason, ts)
@@ -756,20 +798,45 @@ class BacktestEngineV2:
         # 选评分最高的
         best = max(candidates, key=lambda x: x['score'])
 
-        # 动态仓位: 根据行情决定分配比例
+        # 策略模式过滤
         regime = best['regime']
-        if regime == 'bull':
-            alloc = self.bull_alloc
-        elif regime == 'bear':
-            alloc = self.bear_alloc
+        if self.strategy_mode == "unlocking":
+            # 解锁模式: 只做多, 熊市不下注
+            if regime == 'bear' or best['side'] == 'SHORT':
+                return
+        elif self.strategy_mode == "pyramiding":
+            # 金字塔: 震荡市禁止加仓
+            if regime == 'range' and self._pyramid_count > 0:
+                return
+            # 金字塔加仓间距检查
+            if self._pyramid_count > 0 and self._last_entry_price > 0:
+                gap = abs(best['price'] - self._last_entry_price) / self._last_entry_price
+                if gap < self.pyramid_step:
+                    return  # 间距不够, 不加
+
+        # 动态仓位
+        if self.strategy_mode == "pyramiding":
+            # 首仓用 pyramid_first 比例, 后续等量
+            alloc = 0.3 if self._pyramid_count == 0 else 0.3
         else:
-            alloc = self.range_alloc
+            if regime == 'bull':
+                alloc = self.bull_alloc
+            elif regime == 'bear':
+                alloc = self.bear_alloc
+            else:
+                alloc = self.range_alloc
 
         if alloc <= 0:
             return
 
+        # 金字塔最大次数限制
+        if self.strategy_mode == "pyramiding" and self._pyramid_count >= self.max_pyramid:
+            return
+
         self._open(best['coin'], best['side'], best['price'], alloc, ts, regime,
                    best.get('resonance_score', 0))
+        self._pyramid_count += 1
+        self._last_entry_price = best['price']
 
     # ================================================================
     # 内部: 开仓 / 平仓
@@ -808,6 +875,8 @@ class BacktestEngineV2:
             'resonance_score': resonance_score,
             'tp_price': tp_price, 'sl_price': sl_price,
             'open_time': ts, 'cost': cost,
+            'highest_price': price, 'lowest_price': price,
+            'trailing_activated': False,
         }
         self.positions.append(pos)
 
@@ -878,9 +947,12 @@ class BacktestEngineV2:
         self.positions = []
         self.trades = []
         self.equity_curve = []
+        self._portfolio_curve = []
         self.cooldown = {}
         self.lock_until = -1
         self.losestreak = 0
+        self._pyramid_count = 0
+        self._last_entry_price = 0
 
     def _count_positions_before(self, bar_idx):
         """数一下指定 bar 之前的持仓数 (用于检测 just_closed)"""
@@ -918,6 +990,7 @@ class BacktestEngineV2:
             'closed_trades': closed,
             'equity_curve': self.equity_curve,
             'equity_array': equity_arr,
+            'portfolio_curve': self._portfolio_curve,
             'data_bars': len(index),
             'data_start': str(index[0]),
             'data_end': str(index[-1]),
@@ -1367,6 +1440,7 @@ def run_backtest(
         range_alloc=range_alloc,
         bear_alloc=bear_alloc,
         bear_ratio_limit=bear_ratio_limit,
+        trailing_pct=0.0,
         verbose=verbose,
     )
     result = engine.run(dfs, strategy)
