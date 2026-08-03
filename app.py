@@ -853,39 +853,6 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
                         )
                         sel[name]["params"][pk] = val
 
-    st.divider(); st.caption("🛡️ 风控")
-    is_dual_leg = strat_mode_key in ("hedging", "unlocking")
-    if is_dual_leg:
-        st.caption("(对冲/解锁模式使用上方双腿独立风控, 全局风控已自动屏蔽)")
-        tp_pct = 10.0; sl_pct = 5.0  # 占位, 不生效
-    else:
-        c1, c2 = st.columns(2)
-        tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
-        sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
-    if not is_dual_leg:
-        c1, c2, c3 = st.columns(3)
-        bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
-        range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
-        bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
-        c1, c2 = st.columns(2)
-        lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
-        lock_days = c2.number_input("锁仓天数", 1, 30, 2)
-        c1, c2 = st.columns(2)
-        risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5,
-                                         help="每笔交易最大亏损占账户的百分比")
-        use_atr_stop = c2.checkbox("ATR动态止损", False, help="启用后止损=ATR*倍数, 替代固定止损%")
-        atr_period_val, atr_mult_val = 14, 2.0
-        if use_atr_stop:
-            c1, c2 = st.columns(2)
-            atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1, help="计算平均真实波幅的周期")
-            atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5, help="止损价=入场价±ATR*倍数")
-    else:
-        bull_a = 1.0; range_a = 0.5; bear_a = 0.3
-        lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
-        use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
-    oos_enabled = st.checkbox("样本外测试 (OOS)", False)
-    oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
-
     st.divider(); st.caption("🏗️ 策略模式与参数")
     strategy_mode = st.selectbox("策略模式", [
         "经典单向信号 (Classic Single-Leg)",
@@ -895,6 +862,75 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     ], index=0, help="切换模式后下方参数面板自动联动")
     mode_map = {"经典": "classic", "Delta": "hedging", "动能": "unlocking", "分批": "pyramiding"}
     strat_mode_key = [v for k, v in mode_map.items() if k in strategy_mode][0]
+    is_dual_leg = strat_mode_key in ("hedging", "unlocking")
+
+    # === 动态参数面板 ===
+    hedge_ratio = 0.5; unlock_pct = 5.0; max_pyramid = 3
+    pyramid_first = 0.3; pyramid_step_pct = 1.5; trailing_pct = 0.0
+    spot_tp = 5.0; spot_sl = 2.0; short_sl = 3.0; funding_threshold = 0.01
+
+    if strat_mode_key == "classic":
+        st.caption("经典模式: 使用下方指标积木 + 风控参数, 无额外配置")
+    elif strat_mode_key == "hedging":
+        st.caption("双腿独立风控 (现货 vs 合约空单)")
+        hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1)
+        st.caption("--- 现货腿 (SPOT LONG) ---")
+        c1, c2 = st.columns(2)
+        spot_tp = c1.number_input("现货止盈%", 1.0, 50.0, 5.0, 0.5, key="spot_tp")
+        spot_sl = c2.number_input("现货止损%", 0.5, 20.0, 2.0, 0.5, key="spot_sl")
+        st.caption("--- 合约空单腿 (FUTURES SHORT) ---")
+        short_sl = st.number_input("空单止损%", 1.0, 20.0, 3.0, 0.5, key="short_sl")
+        st.caption("组合保护: 总权益回撤3%强行双边全平")
+    elif strat_mode_key == "unlocking":
+        st.caption("解封触发条件 (多条件OR触发)")
+        c1, c2 = st.columns(2)
+        unlock_pct = c1.number_input("价格突破%", 1.0, 20.0, 5.0, 0.5)
+        use_ema_unlock = c2.checkbox("EMA金叉解锁", True)
+        use_rsi_unlock = st.checkbox("RSI突破解锁", False)
+        use_vol_unlock = st.checkbox("放量突破解锁", False)
+        st.caption("解封后裸多风控:")
+        c1, c2 = st.columns(2)
+        unlock_sl = c1.number_input("解封后止损%", 1.0, 15.0, 3.0, 0.5)
+        unlock_tp = c2.number_input("解封后止盈%", 5.0, 50.0, 15.0, 0.5)
+    elif strat_mode_key == "pyramiding":
+        st.caption("分批加仓控制")
+        c1, c2 = st.columns(2)
+        pyramid_first = c1.slider("首次建仓比例%", 10, 50, 30, 5) / 100
+        max_pyramid = c2.number_input("最大加仓次数", 1, 10, 3)
+        pyramid_step_pct = st.number_input("加仓间隔%", 0.5, 10.0, 1.5, 0.5)
+        c1, c2 = st.columns(2)
+        trailing_pct = c1.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5) / 100
+        st.caption(f"仓位: 首仓{pyramid_first*100:.0f}%x{max_pyramid}次")
+
+    # === 单向风控 (仅非对冲模式渲染) ===
+    if not is_dual_leg:
+        st.divider(); st.caption("🛡️ 单向风控")
+        c1, c2 = st.columns(2)
+        tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
+        sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
+        c1, c2, c3 = st.columns(3)
+        bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
+        range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
+        bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
+        c1, c2 = st.columns(2)
+        lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
+        lock_days = c2.number_input("锁仓天数", 1, 30, 2)
+        c1, c2 = st.columns(2)
+        risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5)
+        use_atr_stop = c2.checkbox("ATR动态止损", False)
+        atr_period_val, atr_mult_val = 14, 2.0
+        if use_atr_stop:
+            c1, c2 = st.columns(2)
+            atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1)
+            atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5)
+    else:
+        tp_pct = 10.0; sl_pct = 5.0
+        bull_a = 1.0; range_a = 0.5; bear_a = 0.3
+        lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
+        use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
+
+    oos_enabled = st.checkbox("样本外测试 (OOS)", False)
+    oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
 
     # === 动态参数面板 ===
     hedge_ratio = 0.5; unlock_pct = 5.0; unlock_indicator = "price"
