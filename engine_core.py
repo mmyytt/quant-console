@@ -892,7 +892,8 @@ class BacktestEngineV2:
             self._spot_leg = {
                 'coin': coin, 'side': 'LONG', 'entry': px,
                 'margin': spot_margin, 'notional': spot_notional,
-                'open_time': ts, 'tp_price': px * (1 + self._spot_tp),
+                'open_time': ts, 'tp_pct': self._spot_tp, 'sl_pct': self._spot_sl,
+                'tp_price': px * (1 + self._spot_tp),
                 'sl_price': px * (1 - self._spot_sl),
                 'leg': 'SPOT',
             }
@@ -906,7 +907,8 @@ class BacktestEngineV2:
             self._short_leg = {
                 'coin': coin, 'side': 'SHORT', 'entry': px,
                 'margin': short_margin, 'notional': short_notional,
-                'open_time': ts, 'tp_price': px * (1 - self._short_tp / self.leverage),
+                'open_time': ts, 'tp_pct': self._short_tp, 'sl_pct': self._short_sl,
+                'tp_price': px * (1 - self._short_tp / self.leverage),
                 'sl_price': px * (1 + self._short_sl / self.leverage),
                 'leg': 'FUTURES',
             }
@@ -927,9 +929,12 @@ class BacktestEngineV2:
                         should_unlock = True; reason = "EMA金叉"
                     elif 'rsi' in row.index and row['rsi'] > 60:
                         should_unlock = True; reason = f"RSI{row['rsi']:.0f}"
-                # 空单止损: 价格上涨超限
+                # 空单止损: 价格上涨超限 (安全读取sl_pct)
                 if self.strategy_mode == "hedging":
-                    short_sl = short_ep * (1 + self._short_leg['sl_pct'] / self.leverage)
+                    sl_pct_val = (self._short_leg.get('sl_pct') or
+                                  self._short_leg.get('sl', 0) or
+                                  self._short_sl)
+                    short_sl = short_ep * (1 + sl_pct_val / self.leverage)
                     if bh >= short_sl:
                         should_unlock = True; reason = "空单止损"
 
@@ -953,8 +958,11 @@ class BacktestEngineV2:
             # -- 现货腿: 检查止盈止损 --
             if self._spot_leg is not None:
                 spot_ep = self._spot_leg['entry']
-                spot_tp = spot_ep * (1 + self._spot_leg['tp_pct'])
-                spot_sl = spot_ep * (1 - self._spot_leg['sl_pct'])
+                spot_tp_pct = (self._spot_leg.get('tp_pct') or self._spot_tp)
+                spot_sl_pct = (self._spot_leg.get('sl_pct') or
+                               self._spot_leg.get('sl', 0) or self._spot_sl)
+                spot_tp = spot_ep * (1 + spot_tp_pct)
+                spot_sl = spot_ep * (1 - spot_sl_pct)
                 close_spot = False; spot_reason = ""; spot_px = px
 
                 if bh >= spot_tp:
