@@ -1076,6 +1076,236 @@ class PerformanceAnalyzer:
 
 
 # ============================================================
+# 模块五: 多Leg仓位与对冲系统
+# ============================================================
+from enum import Enum
+
+class LegType(str, Enum):
+    SPOT_LONG = "SPOT_LONG"
+    FUTURES_LONG = "FUTURES_LONG"
+    FUTURES_SHORT = "FUTURES_SHORT"
+
+class StrategyMode(str, Enum):
+    CLASSIC = "classic"           # 单向信号模式
+    HEDGING = "hedging"          # Delta中性对冲
+    UNLOCKING = "unlocking"      # 动能突破解封
+    PYRAMIDING = "pyramiding"    # 分批加仓
+
+class PositionLeg:
+    """单条持仓腿"""
+    def __init__(self, coin: str, leg_type: LegType, entry_price: float,
+                 margin: float, leverage: int = 1):
+        self.coin = coin
+        self.leg_type = leg_type
+        self.entry_price = entry_price
+        self.margin = margin
+        self.leverage = leverage
+        self.notional = margin * leverage
+        self.quantity = self.notional / entry_price
+        self.open_time = None
+        self.highest_price = entry_price   # trailing stop用
+        self.lowest_price = entry_price
+        self.trailing_activated = False
+
+    @property
+    def delta(self) -> float:
+        """Delta暴露: 现货=正, 合约多头=正, 合约空头=负"""
+        if self.leg_type == LegType.FUTURES_SHORT:
+            return -self.notional
+        return self.notional
+
+    def update_extremes(self, high: float, low: float):
+        self.highest_price = max(self.highest_price, high)
+        self.lowest_price = min(self.lowest_price, low)
+
+    def unrealized_pnl(self, current_price: float) -> float:
+        if self.leg_type == LegType.FUTURES_SHORT:
+            return (self.entry_price - current_price) / self.entry_price * self.notional
+        return (current_price - self.entry_price) / self.entry_price * self.notional
+
+
+class PortfolioManager:
+    """
+    多腿仓位管理器。
+
+    支持:
+      - 同账户 SPOT + FUTURES_LONG + FUTURES_SHORT 混合持仓
+      - 实时 Delta 暴露计算
+      - 分批建仓 (Pyramiding)
+      - 状态机 (LOCKED/UNLOCKED/CLOSED)
+      - ATR移动止损
+    """
+
+    def __init__(self, initial_capital: float, leverage: int = 3,
+                 tp_pct: float = 0.10, sl_pct: float = 0.05,
+                 mode: StrategyMode = StrategyMode.CLASSIC,
+                 hedge_ratio: float = 0.5,
+                 max_pyramid: int = 3,
+                 pyramid_ratios: List[float] = None,
+                 unlock_trigger: str = "price",
+                 trailing_pct: float = 0.0):
+        self.initial_capital = initial_capital
+        self.cash = initial_capital
+        self.leverage = leverage
+        self.tp_pct = tp_pct
+        self.sl_pct = sl_pct
+        self.mode = mode
+        self.hedge_ratio = hedge_ratio
+        self.max_pyramid = max_pyramid
+        self.pyramid_ratios = pyramid_ratios or [0.3, 0.3, 0.4]
+        self.unlock_trigger = unlock_trigger
+        self.trailing_pct = trailing_pct
+
+        self.legs: List[PositionLeg] = []
+        self.state = "UNLOCKED"   # LOCKED / UNLOCKED / CLOSED
+        self.trades_log: List[Dict] = []
+        self.pyramid_count = 0
+        self._unlock_price = None
+
+    # ---- Delta ----
+    @property
+    def net_delta(self) -> float:
+        return sum(leg.delta for leg in self.legs)
+
+    @property
+    def is_hedged(self) -> bool:
+        """Delta接近0 → 对冲锁定"""
+        total = sum(abs(leg.notional) for leg in self.legs)
+        if total == 0: return False
+        return abs(self.net_delta) / total < 0.05
+
+    @property
+    def spot_value(self) -> float:
+        return sum(leg.notional for leg in self.legs if leg.leg_type == LegType.SPOT_LONG)
+
+    @property
+    def futures_long_value(self) -> float:
+        return sum(leg.notional for leg in self.legs if leg.leg_type == LegType.FUTURES_LONG)
+
+    @property
+    def futures_short_value(self) -> float:
+        return sum(leg.notional for leg in self.legs if leg.leg_type == LegType.FUTURES_SHORT)
+
+    # ---- 开仓 ----
+    def open_leg(self, coin: str, leg_type: LegType, price: float,
+                 alloc: float = 1.0, ts=None) -> Optional[PositionLeg]:
+        """开仓一条腿 (分批模式下自动计算alloc)"""
+        if self.cash <= 0:
+            return None
+
+        # 状态检查
+        if self.mode == StrategyMode.HEDGING and self.state == "LOCKED":
+            return None  # 对冲锁定状态不开新仓
+
+        if self.mode == StrategyMode.PYRAMIDING and self.pyramid_count >= self.max_pyramid:
+            return None
+
+        if self.mode == StrategyMode.PYRAMIDING:
+            idx = min(self.pyramid_count, len(self.pyramid_ratios) - 1)
+            alloc = self.pyramid_ratios[idx] * alloc
+
+        margin = self.cash * alloc
+        lev = 1 if leg_type == LegType.SPOT_LONG else self.leverage
+
+        leg = PositionLeg(coin, leg_type, price, margin, lev)
+        leg.open_time = ts
+
+        cost = leg.notional * (TAKER_FEE + SLIPPAGE)
+        self.cash -= cost
+        self.legs.append(leg)
+        self.pyramid_count += 1
+
+        return leg
+
+    # ---- 平仓 ----
+    def close_leg(self, leg: PositionLeg, price: float, reason: str = "manual", ts=None) -> float:
+        """平掉指定腿, 返回PnL"""
+        if leg not in self.legs:
+            return 0.0
+
+        pnl = leg.unrealized_pnl(price)
+        exit_cost = leg.notional * (TAKER_FEE + SLIPPAGE)
+        pnl -= exit_cost
+
+        self.cash += leg.margin + pnl
+        self.trades_log.append({
+            'coin': leg.coin, 'type': leg.leg_type.value,
+            'entry': leg.entry_price, 'exit': price,
+            'margin': leg.margin, 'pnl': round(pnl, 2),
+            'reason': reason, 'time': str(ts) if ts else '',
+        })
+        self.legs.remove(leg)
+        return pnl
+
+    def close_all(self, price: float, coin: str = None, reason: str = "close_all", ts=None) -> float:
+        """平掉所有(或指定币种)的腿"""
+        total_pnl = 0.0
+        to_close = [l for l in self.legs if coin is None or l.coin == coin]
+        for leg in to_close:
+            total_pnl += self.close_leg(leg, price, reason, ts)
+        return total_pnl
+
+    def close_legs_by_type(self, leg_type: LegType, price: float, reason: str = "unlock", ts=None) -> float:
+        """只平特定类型的腿 (如只平合约空单, 保留现货)"""
+        return sum(self.close_leg(l, price, reason, ts)
+                   for l in list(self.legs) if l.leg_type == leg_type)
+
+    # ---- 动态止损 ----
+    def check_trailing_stop(self, current_high: float, current_low: float,
+                            current_close: float) -> List[PositionLeg]:
+        """检查移动止损触发, 返回需要平仓的腿列表"""
+        triggered = []
+        if self.trailing_pct <= 0:
+            return triggered
+
+        for leg in self.legs:
+            leg.update_extremes(current_high, current_low)
+            if leg.leg_type == LegType.FUTURES_SHORT:
+                # 空单: 价格新低 → 更新止损线
+                trail_price = leg.lowest_price * (1 + self.trailing_pct)
+                if current_close >= trail_price and leg.trailing_activated:
+                    triggered.append(leg)
+                elif leg.lowest_price < leg.entry_price:
+                    leg.trailing_activated = True
+            else:
+                # 多单: 价格新高 → 更新止盈线
+                trail_price = leg.highest_price * (1 - self.trailing_pct)
+                if current_close <= trail_price and leg.trailing_activated:
+                    triggered.append(leg)
+                elif leg.highest_price > leg.entry_price:
+                    leg.trailing_activated = True
+        return triggered
+
+    # ---- 状态机 ----
+    def update_state(self, price: float, indicators: dict = None):
+        """根据当前价格和指标更新状态机"""
+        if self.mode == StrategyMode.UNLOCKING:
+            if self.state == "LOCKED" and self._unlock_price:
+                if price >= self._unlock_price:
+                    self.state = "UNLOCKED"
+                    # 解锁: 平掉对冲空单
+                    self.close_legs_by_type(LegType.FUTURES_SHORT, price, "unlock")
+            elif self.state == "UNLOCKED":
+                if self.is_hedged:
+                    self.state = "LOCKED"
+                    self._unlock_price = price * 1.05  # 默认5%突破解锁
+
+    # ---- 权益 ----
+    def total_equity(self, current_price: float) -> float:
+        return self.cash + sum(leg.unrealized_pnl(current_price) + leg.margin
+                               for leg in self.legs)
+
+    # ---- 重置 ----
+    def reset(self):
+        self.cash = self.initial_capital
+        self.legs = []
+        self.trades_log = []
+        self.state = "UNLOCKED"
+        self.pyramid_count = 0
+        self._unlock_price = None
+
+
+# ============================================================
 # 快捷运行入口
 # ============================================================
 def run_backtest(

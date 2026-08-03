@@ -860,6 +860,28 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     oos_enabled = st.checkbox("样本外测试 (OOS)", False)
     oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
 
+    st.divider(); st.caption("🏗️ 仓位与对冲管理")
+    strategy_mode = st.selectbox("策略模式", [
+        "经典单向信号 (Classic Single-Leg)",
+        "Delta中性对冲 (Hedging)",
+        "动能突破解封 (Breakout Unlocking)",
+        "分批加仓 (Pyramiding)",
+    ], index=0, help="CLASSIC=单腿信号 | HEDGING=现货+合约对冲 | UNLOCKING=锁仓→突破解锁 | PYRAMIDING=分批建仓")
+    mode_map = {"经典": "classic", "Delta": "hedging", "动能": "unlocking", "分批": "pyramiding"}
+    strat_mode_key = [v for k, v in mode_map.items() if k in strategy_mode][0]
+
+    hedge_ratio = 0.5; max_pyramid = 3; trailing_pct = 0.0
+    if strat_mode_key == "hedging":
+        hedge_ratio = st.slider("对冲比例 (现货:空单)", 0.1, 1.0, 0.5, 0.1,
+                                help="50%=一半现货一半空单, Delta接近0")
+    elif strat_mode_key == "unlocking":
+        st.caption("锁仓后价格突破X%自动平空单解锁")
+    elif strat_mode_key == "pyramiding":
+        c1, c2 = st.columns(2)
+        max_pyramid = c1.number_input("最大加仓次数", 1, 10, 3)
+        trailing_pct = c2.number_input("移动止损%", 0.0, 10.0, 2.0, 0.5,
+                                        help="价格新高/新低后回撤X%平仓") / 100
+
     st.divider(); st.caption("🔬 多因子牛熊 + 共振")
     c1, c2 = st.columns(2)
     mf_enabled = c1.checkbox("多因子牛熊", True, key="mf_on")
@@ -1285,6 +1307,34 @@ if submitted:
     st.caption(f"回测时长: {yrs:.1f}年 ({days}天) | 年化 = 总收益按此区间复利折算为365天标准收益率")
     final_eq = result.get('final_equity', initial_capital)
     c[6].metric("最终权益", f"${final_eq:,.0f}")
+
+    # Delta暴露曲线 & 仓位状态 (多Leg模式)
+    portfolio_data = result.get('portfolio_curve', [])
+    if portfolio_data:
+        st.subheader("📐 Delta 暴露 & 仓位状态")
+        delta_times = [p['timestamp'] for p in portfolio_data]
+        delta_vals = [p['net_delta'] for p in portfolio_data]
+        states = [p.get('state', '?') for p in portfolio_data]
+
+        fig_delta = go.Figure()
+        fig_delta.add_trace(go.Scattergl(x=delta_times, y=delta_vals, mode='lines',
+                                          name='Net Delta', line=dict(color='#60a5fa', width=2),
+                                          fill='tozeroy', fillcolor='rgba(96,165,250,0.1)'))
+        fig_delta.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5,
+                             annotation_text="Delta Neutral")
+        # 标记状态切换
+        prev_s = None
+        for i, s in enumerate(states):
+            if s != prev_s and i > 0:
+                fig_delta.add_vline(x=delta_times[i], line_dash="dot",
+                                     line_color="#eab308", opacity=0.5,
+                                     annotation_text=s)
+            prev_s = s
+        fig_delta.update_layout(height=250, template="plotly_dark",
+                                 margin=dict(l=0,r=0,t=0,b=0),
+                                 paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+        st.plotly_chart(fig_delta, use_container_width=True,
+                        config={'responsive': True, 'displayModeBar': False})
 
     # 多空统计
     closed_trades = result.get('closed_trades', [])
