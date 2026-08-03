@@ -888,18 +888,20 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         st.caption(f"预期: 年化对冲收益 ≈ {funding_threshold*365*3:.1f}% (费率×365×3次/天)")
 
     elif strat_mode_key == "unlocking":
-        st.caption("解封触发条件")
+        st.caption("解封触发条件 (通用, 多条件OR触发)")
         c1, c2 = st.columns(2)
-        unlock_indicator = c1.selectbox("突破判定指标",
-            ["价格突破%", "成交量突破", "RSI突破", "均线突破"], index=0)
-        unlock_pct = c2.number_input("突破阈值%", 1.0, 20.0, 5.0, 0.5,
-                                      help="锁仓后价格突破X%触发平空解锁")
-        if unlock_indicator == "成交量突破":
-            vol_unlock_mult = st.slider("量能倍数", 1.0, 5.0, 1.5, 0.1)
-        elif unlock_indicator == "RSI突破":
-            rsi_unlock = st.slider("RSI阈值", 50, 80, 60)
-        unlock_sl = st.slider("解封后保护止损%", 1.0, 10.0, 3.0, 0.5,
-                              help="解锁后裸多头寸如果跌3%立即止损")
+        unlock_pct = c1.number_input("价格突破%", 1.0, 20.0, 5.0, 0.5,
+                                      help="锁仓后价格从建仓价上涨X%触发平空解锁")
+        use_ema_unlock = c2.checkbox("EMA金叉解锁", True, help="快线>慢线时触发")
+        use_rsi_unlock = st.checkbox("RSI突破解锁 (RSI>60)", False, help="RSI>60视为强势")
+        use_vol_unlock = st.checkbox("放量突破解锁", False, help="量>20日均量×1.5触发")
+        st.caption("解封后裸多风控:")
+        c1, c2 = st.columns(2)
+        unlock_sl = c1.number_input("解封后止损%", 1.0, 15.0, 3.0, 0.5,
+                                     help="解锁后现货跌X%全平止损")
+        unlock_tp = c2.number_input("解封后止盈%", 5.0, 50.0, 15.0, 0.5,
+                                     help="解锁后现货涨X%全平止盈")
+        use_unlock_trail = st.checkbox("启用移动止损", False)
 
     elif strat_mode_key == "pyramiding":
         st.caption("分批加仓控制")
@@ -1246,6 +1248,10 @@ if submitted:
         st.session_state.selected_indicators["_unlock_pct"] = unlock_pct
         st.session_state.selected_indicators["_unlock_indicator"] = unlock_indicator
         st.session_state.selected_indicators["_unlock_sl"] = unlock_sl if strat_mode_key == "unlocking" else 3.0
+        st.session_state.selected_indicators["_unlock_tp"] = unlock_tp if 'unlock_tp' in dir() else 15.0
+        st.session_state.selected_indicators["_use_ema_unlock"] = use_ema_unlock if 'use_ema_unlock' in dir() else True
+        st.session_state.selected_indicators["_use_rsi_unlock"] = use_rsi_unlock if 'use_rsi_unlock' in dir() else False
+        st.session_state.selected_indicators["_use_vol_unlock"] = use_vol_unlock if 'use_vol_unlock' in dir() else False
         st.session_state.selected_indicators["_funding_threshold"] = funding_threshold
 
         st.session_state.selected_indicators["_trade_mode"] = trade_mode
