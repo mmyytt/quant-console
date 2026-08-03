@@ -895,7 +895,7 @@ class BacktestEngineV2:
                 'tp_price':px*(1+self._spot_tp),'sl_price':px*(1-self._spot_sl),
                 'leg':'SPOT',
             }
-            self.positions.append(self._spot_leg)
+            # 对冲腿不加入self.positions(避免_check_positions重复触发)
             # 合约空头
             short_margin = self.equity * self.hedge_ratio
             short_notional = short_margin * self.leverage
@@ -909,7 +909,6 @@ class BacktestEngineV2:
                 'sl_price':px*(1+self._short_sl/self.leverage),
                 'leg':'FUTURES',
             }
-            self.positions.append(self._short_leg)
             self._hedge_state = "LOCKED"; self._hedge_entry_price = px
             return
 
@@ -941,7 +940,6 @@ class BacktestEngineV2:
                     'reason':f'UNLOCK_{reason}','pnl':round(short_pnl,2),
                     'pnl_pct':round(short_pnl/s_margin*100,2) if s_margin > 0 else 0,
                 })
-                self.positions = [p for p in self.positions if p is not self._short_leg]
                 self._short_leg = None; self._hedge_state = "UNLOCKED"
 
         # -- 现货腿 --
@@ -967,10 +965,8 @@ class BacktestEngineV2:
                     'reason':spot_reason,'pnl':round(spot_pnl,2),
                     'pnl_pct':round(spot_pnl/sm_val*100,2) if sm_val > 0 else 0,
                 })
-                self.positions = [p for p in self.positions if p is not self._spot_leg]
                 self._spot_leg = None
-                # 现货平仓 → 重置状态, 下一bar自动re-hedge
-                # 如果空单还在, 也平掉
+                # 现货平仓 → 如果空单还在, 也平掉 → 重置状态
                 if self._short_leg is not None:
                     se = self._short_leg.get('entry', px)
                     sn = self._short_leg.get('notional', 0)
@@ -978,7 +974,6 @@ class BacktestEngineV2:
                     short_pnl = sn * (se - px) / se if se > 0 else 0
                     short_pnl -= sn * (TAKER_FEE + SLIPPAGE)
                     self.equity += sm + short_pnl
-                    self.positions = [p for p in self.positions if p is not self._short_leg]
                     self._short_leg = None
                 self._hedge_state = "FLAT"  # 下一bar IDLE检测 → 自动re-hedge
 
@@ -1170,26 +1165,27 @@ class PerformanceAnalyzer:
 
         metrics = {}
 
-        # ---- 收益率 ----
+        # ---- 收益率 (NaN防护) ----
         final = equity_arr[-1]
-        metrics['total_return'] = round((final - initial) / initial * 100, 2)
+        if initial > 0 and not np.isnan(final) and not np.isinf(final):
+            total_ret = (final - initial) / initial * 100
+            metrics['total_return'] = round(total_ret, 2) if abs(total_ret) < 1e12 else 999999.0
+        else:
+            metrics['total_return'] = -100.0
 
-        # 年化: 用真实时间跨度, 不用K线数估算
+        # 年化 (NaN防护)
         start_str = result.get('data_start', '')
         end_str = result.get('data_end', '')
         try:
-            start_dt = pd.to_datetime(start_str)
-            end_dt = pd.to_datetime(end_str)
+            start_dt = pd.to_datetime(start_str); end_dt = pd.to_datetime(end_str)
             total_days = (end_dt - start_dt).total_seconds() / 86400.0
-            years = max(total_days / 365.25, 1 / 365.25)  # 至少1天
+            years = max(total_days / 365.25, 1 / 365.25)
         except:
-            # 降级: K线数估算
-            n_bars = len(equity_arr)
-            years = n_bars * 4 / (365 * 24)
-        if years > 0 and initial > 0:
-            total_ratio = final / initial
-            if total_ratio > 0:
-                metrics['annual_return'] = round((total_ratio ** (1 / years) - 1) * 100, 2)
+            years = len(equity_arr) * 4 / (365 * 24)
+        if years > 0 and initial > 0 and final > 0 and not np.isnan(final):
+            ratio = final / initial
+            if 0 < ratio < 1e12:
+                metrics['annual_return'] = round((ratio ** (1 / years) - 1) * 100, 2)
             else:
                 metrics['annual_return'] = -100.0
         else:
