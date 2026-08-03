@@ -1601,7 +1601,10 @@ else:
         MAX_BARS = 1000
         df_show = df_pv if len(df_pv) <= MAX_BARS else df_pv.tail(MAX_BARS)
         if len(df_pv) > MAX_BARS:
-            st.caption(f"数据共 {len(df_pv):,} 根, 图表显示最近 {MAX_BARS:,} 根 (流畅渲染)")
+            # DEBUG: 打印数据范围
+        july_bars = len(df_pv["2026-07-01":"2026-07-31"]) if len(df_pv) > 0 else 0
+        st.sidebar.info(f"🔍 数据: {len(df_pv):,}根 | {df_pv.index[0]} ~ {df_pv.index[-1]} | 7月={july_bars}根")
+        st.caption(f"数据共 {len(df_pv):,} 根, 图表显示最近 {MAX_BARS:,} 根 (流畅渲染)")
 
         fig_pv = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
