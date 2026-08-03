@@ -222,11 +222,21 @@ class DataEngine:
         if coin in self._cache:
             return self._cache[coin].copy()
 
-        path = os.path.join(self.data_dir, f"{coin}_15m.parquet")
-        if not os.path.exists(path):
-            # 云端: 尝试下载
-            if not ensure_data_ready(coin):
-                raise FileNotFoundError(f"数据文件不存在且下载失败: {path}")
+        # 优先5m, 降级15m
+        path_5m = os.path.join(self.data_dir, f"{coin}_5m.parquet")
+        path_15m = os.path.join(self.data_dir, f"{coin}_15m.parquet")
+        if os.path.exists(path_5m) and os.path.getsize(path_5m) > 100000:
+            path = path_5m
+            interval = "5m"
+        elif os.path.exists(path_15m) and os.path.getsize(path_15m) > 100000:
+            path = path_15m
+            interval = "15m"
+        else:
+            path = path_15m
+            interval = "15m"
+            if not os.path.exists(path):
+                if not ensure_data_ready(coin):
+                    raise FileNotFoundError(f"数据文件不存在且下载失败: {path}")
 
         df = pd.read_parquet(path)
 
