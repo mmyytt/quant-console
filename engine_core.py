@@ -627,12 +627,13 @@ class BacktestEngineV2:
         """
         self._reset()
 
-        # 1. 对每个币种计算信号
+        # 1. 对每个币种计算信号 (对冲模式跳过, 不需要指标)
         coins = list(dfs.keys())
         dfs_with_sigs = {}
         for coin in coins:
             df = dfs[coin].copy()
-            df = strategy.generate_signals(df)
+            if self.strategy_mode not in ("hedging", "unlocking"):
+                df = strategy.generate_signals(df)
             dfs_with_sigs[coin] = df
 
         # 2. 多币种对齐: 用主币时间轴 + ffill填充缺失
@@ -663,7 +664,7 @@ class BacktestEngineV2:
             paused = i < self.lock_until
             just_closed = False
 
-            # ---- 对冲状态机 (HEDGING / UNLOCKING 模式) ----
+            # ---- 对冲/解锁状态机 (每bar调用, IDLE→首Bar自动建仓) ----
             if self.strategy_mode in ("hedging", "unlocking"):
                 self._hedge_state_machine(ts, dfs_with_sigs, coins, i)
 

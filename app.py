@@ -1215,7 +1215,10 @@ p1.metric("标的", coin); p2.metric("周期", timeframe); p3.metric("杠杆", f
 
 # 已选指标摘要
 active_inds = [n for n, c in st.session_state.selected_indicators.items() if isinstance(c, dict) and c.get("enabled")]
-st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:10]) + ("..." if len(active_inds) > 10 else ""))
+if is_dual_leg:
+    st.caption("Delta中性对冲/解锁模式 (无需技术指标，自动建仓对冲)")
+else:
+    st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:10]) + ("..." if len(active_inds) > 10 else ""))
 
 st.divider()
 if submitted:
