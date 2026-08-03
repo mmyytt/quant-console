@@ -879,13 +879,17 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         st.caption("经典模式: 使用下方指标积木 + 风控参数, 无额外配置")
 
     elif strat_mode_key == "hedging":
-        st.caption("对冲专有参数")
+        st.caption("双腿独立风控 (现货 vs 合约空单)")
+        hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1,
+                                help="0.5=一半资金买现货, 一半保证金开空单")
+        st.caption("--- 现货腿 (SPOT LONG) ---")
         c1, c2 = st.columns(2)
-        hedge_ratio = c1.slider("现货/合约比例", 0.1, 1.0, 0.5, 0.1,
-                                help="0.5=一半现货一半空单, Delta接近0")
-        funding_threshold = c2.number_input("费率对冲阈值%", 0.001, 0.100, 0.010, 0.001,
-                                            format="%.3f", help="资金费率超过此值触发对冲")
-        st.caption(f"预期: 年化对冲收益 ≈ {funding_threshold*365*3:.1f}% (费率×365×3次/天)")
+        spot_tp = c1.number_input("现货止盈%", 1.0, 50.0, 5.0, 0.5, key="spot_tp")
+        spot_sl = c2.number_input("现货止损%", 0.5, 20.0, 2.0, 0.5, key="spot_sl")
+        st.caption("--- 合约空单腿 (FUTURES SHORT) ---")
+        short_sl = st.number_input("空单止损% (价格上涨X%平空)", 1.0, 20.0, 3.0, 0.5,
+                                    help="价格上涨超过开仓价X%时平掉空单止损", key="short_sl")
+        st.caption(f"组合保护: 总权益回撤3%强行双边全平")
 
     elif strat_mode_key == "unlocking":
         st.caption("解封触发条件 (通用, 多条件OR触发)")
@@ -1253,6 +1257,9 @@ if submitted:
         st.session_state.selected_indicators["_use_rsi_unlock"] = use_rsi_unlock if 'use_rsi_unlock' in dir() else False
         st.session_state.selected_indicators["_use_vol_unlock"] = use_vol_unlock if 'use_vol_unlock' in dir() else False
         st.session_state.selected_indicators["_funding_threshold"] = funding_threshold
+        st.session_state.selected_indicators["_spot_tp"] = spot_tp if 'spot_tp' in dir() else 5.0
+        st.session_state.selected_indicators["_spot_sl"] = spot_sl if 'spot_sl' in dir() else 2.0
+        st.session_state.selected_indicators["_short_sl"] = short_sl if 'short_sl' in dir() else 3.0
 
         st.session_state.selected_indicators["_trade_mode"] = trade_mode
         st.session_state.selected_indicators["_regime_filter"] = regime_filter_enabled
@@ -1273,6 +1280,9 @@ if submitted:
         # 回测
         lock_bars = int(lock_days * 6) if timeframe == '4h' else int(lock_days * 24)
         # 策略模式专属参数
+        _spot_tp_val = spot_tp if 'spot_tp' in dir() else tp_pct
+        _spot_sl_val = spot_sl if 'spot_sl' in dir() else sl_pct
+        _short_sl_val = short_sl if 'short_sl' in dir() else sl_pct
         strat_kwargs = dict(
             initial_capital=initial_capital, leverage=leverage, tp_pct=tp_pct, sl_pct=sl_pct,
             max_positions=1, bull_alloc=bull_a, range_alloc=range_a, bear_alloc=bear_a,
@@ -1280,6 +1290,7 @@ if submitted:
             trailing_pct=trailing_pct, strategy_mode=strat_mode_key,
             hedge_ratio=hedge_ratio, max_pyramid=max_pyramid,
             pyramid_step=pyramid_step_pct / 100.0, unlock_pct=unlock_pct / 100.0,
+            spot_tp=_spot_tp_val, spot_sl=_spot_sl_val, short_sl=_short_sl_val,
         )
         engine = BacktestEngineV2(**strat_kwargs)
         result = engine.run({coin: df_train}, strategy)

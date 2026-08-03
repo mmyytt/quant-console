@@ -547,6 +547,9 @@ class BacktestEngineV2:
                  max_pyramid: int = 3,
                  pyramid_step: float = 0.015,
                  unlock_pct: float = 0.05,
+                 spot_tp: float = 5.0,          # 现货止盈%
+                 spot_sl: float = 2.0,          # 现货止损%
+                 short_sl: float = 3.0,         # 空单止损%
                  verbose: bool = True,
                  ):
         self.initial_capital = initial_capital
@@ -572,11 +575,16 @@ class BacktestEngineV2:
         self._last_entry_price = 0
         self._portfolio_curve = []
         # 对冲状态机
-        self._hedge_state = "IDLE"     # IDLE → LOCKED → UNLOCKED → EXIT
-        self._hedge_entry_price = 0     # 建仓价
-        self._spot_leg = None           # 现货腿引用
-        self._short_leg = None          # 空单腿引用
+        self._hedge_state = "IDLE"
+        self._hedge_entry_price = 0
+        self._spot_leg = None
+        self._short_leg = None
         self._hedge_open_time = None
+        # 双腿独立风控参数 (UI可配置)
+        self._spot_tp = spot_tp / 100.0    # 现货止盈 (价格%)
+        self._spot_sl = spot_sl / 100.0    # 现货止损
+        self._short_tp = spot_tp / 100.0   # 空单止盈
+        self._short_sl = short_sl / 100.0  # 空单止损
 
         # 内部状态 (每次 run 时重置)
         self.equity = initial_capital
@@ -849,125 +857,114 @@ class BacktestEngineV2:
         self._last_entry_price = best['price']
 
     # ================================================================
-    # 对冲状态机: LOCKED → UNLOCKED → EXIT
+    # 双腿独立对冲系统: pos_spot / pos_futures 各自风控
     # ================================================================
     def _hedge_state_machine(self, ts, dfs, coins, bar_idx):
-        """通用对冲解封状态机。支持 HEDGING 和 UNLOCKING 两种模式。"""
-        coin = coins[0]  # 主币种
-        df = dfs[coin]
-        row = df.loc[ts]
-        px = float(row['open'])
-        bh = float(row['high']); bl = float(row['low'])
-        regime = row.get('regime', 'range')
+        """双腿独立风控对冲引擎。每根bar评估: 空单是否解封? 现货是否止盈止损?"""
+        coin = coins[0]; df = dfs[coin]; row = df.loc[ts]
+        bh = float(row['high']); bl = float(row['low']); px = float(row['open'])
 
-        # === State: IDLE → LOCKED (建对冲仓) ===
+        # === IDLE: 建双腿仓 (只建一次!) ===
         if self._hedge_state == "IDLE":
-            if self.equity <= 0:
-                return
-            spot_alloc = self.hedge_ratio
-            short_alloc = self.hedge_ratio
-            # 开现货多头
-            self._open_hedge_leg(coin, 'LONG', px, spot_alloc, ts, "SPOT")
-            # 开合约空头
-            self._open_hedge_leg(coin, 'SHORT', px, short_alloc, ts, "FUTURES")
-            self._hedge_state = "LOCKED"
-            self._hedge_entry_price = px
-            self._hedge_open_time = ts
+            if self.equity <= 0: return
+            # 现货多头 (1x, 独立)
+            spot_margin = self.equity * self.hedge_ratio
+            spot_cost = spot_margin * (TAKER_FEE + SLIPPAGE)
+            self.equity -= spot_cost
+            self._spot_leg = {
+                'leg': 'SPOT', 'side': 'LONG', 'entry': px,
+                'margin': spot_margin, 'notional': spot_margin,
+                'tp_pct': self._spot_tp, 'sl_pct': self._spot_sl,
+                'open_time': ts,
+            }
+            # 合约空头 (杠杆)
+            short_margin = self.equity * self.hedge_ratio
+            short_notional = short_margin * self.leverage
+            short_cost = short_notional * (TAKER_FEE + SLIPPAGE)
+            self.equity -= short_cost
+            self._short_leg = {
+                'leg': 'FUTURES', 'side': 'SHORT', 'entry': px,
+                'margin': short_margin, 'notional': short_notional,
+                'tp_pct': self._short_tp, 'sl_pct': self._short_sl,
+                'unlock_pct': self.unlock_pct,
+                'open_time': ts,
+            }
+            self._hedge_state = "LOCKED"; self._hedge_entry_price = px
             if self.verbose:
-                print(f"[HEDGE_LOCK] {ts} | {coin} | SPOT LONG + FUTURES SHORT | "
-                      f"px={px:.2f} | ratio={self.hedge_ratio:.0%} | Delta=0")
+                print(f"[双腿建仓] {ts} | {coin} | SPOT ${spot_margin:.0f} + SHORT ${short_notional:.0f} | Delta=0")
 
-        # === State: LOCKED → 检查解锁条件 ===
-        elif self._hedge_state == "LOCKED":
-            should_unlock = False
-            unlock_reason = ""
-
-            if self.strategy_mode == "unlocking":
-                # 条件1: 价格突破%
-                if px >= self._hedge_entry_price * (1 + self.unlock_pct):
-                    should_unlock = True
-                    unlock_reason = f"price_breakout_{self.unlock_pct*100:.0f}%"
-                # 条件2: EMA金叉
-                if 'ema_fast' in row.index and 'ema_slow' in row.index:
-                    if row['ema_fast'] > row['ema_slow']:
-                        should_unlock = True
-                        unlock_reason = "ema_cross_up"
-                # 条件3: RSI突破
-                if 'rsi' in row.index and row['rsi'] > 60:
-                    should_unlock = True
-                    unlock_reason = f"rsi_{row['rsi']:.0f}"
-                # 条件4: 放量突破
-                if 'vol' in row.index and 'vol_ma' in row.index:
-                    if row['vol'] > row['vol_ma'] * 1.5:
-                        should_unlock = True
-                        unlock_reason = "volume_breakout"
-
-            # 对冲模式: 始终锁仓不做解锁 (或在特定条件解锁)
-            elif self.strategy_mode == "hedging":
-                pass  # 对冲模式不解锁, 一直锁仓
-
-            if should_unlock:
-                # 平掉合约空单
-                for pos in list(self.positions):
-                    if pos['side'] == 'SHORT':
-                        self._close(pos, px, f"UNLOCK_{unlock_reason}", ts)
-                self._hedge_state = "UNLOCKED"
-                if self.verbose:
-                    print(f"[UNLOCK] {ts} | {coin} | reason={unlock_reason} | "
-                          f"now long-only | px={px:.2f}")
-
-        # === State: UNLOCKED → 检查裸多止盈止损 ===
-        elif self._hedge_state == "UNLOCKED":
-            for pos in list(self.positions):
-                if pos['side'] != 'LONG':
-                    continue
-                ep = pos['entry']; tp_px = pos.get('tp_price', ep*99)
-                sl_px = pos.get('sl_price', 0)
-
-                # 止盈
-                if bh >= tp_px:
-                    self._close(pos, tp_px, 'SPOT_TP', ts)
-                    self._hedge_state = "IDLE"
-                    if self.verbose:
-                        print(f"[SPOT_TP] {ts} | {coin} | px={tp_px:.2f}")
-                # 止损
-                elif bl <= sl_px:
-                    self._close(pos, sl_px, 'SPOT_SL', ts)
-                    self._hedge_state = "IDLE"
-                    if self.verbose:
-                        print(f"[SPOT_SL] {ts} | {coin} | px={sl_px:.2f}")
-
-    def _open_hedge_leg(self, coin: str, side: str, price: float,
-                        alloc: float, ts, leg_label: str = ""):
-        """开对冲腿 (现货/合约通用)"""
-        if self.equity <= 0:
-            return
-        # 现货用1x杠杆
-        lev = 1 if leg_label == "SPOT" else self.leverage
-        fv = self.CONTRACT_FV.get(coin, 1.0)
-        margin = self.equity * alloc
-        notional = margin * lev
-        cost = notional * (TAKER_FEE + SLIPPAGE)
-        self.equity -= cost
-
-        if side == 'LONG':
-            tp_price = price * (1 + self.tp_pct / lev)
-            sl_price = price * (1 - self.sl_pct / lev)
+        # === LOCKED / UNLOCKED: 逐bar评估双腿 ===
         else:
-            tp_price = price * (1 - self.tp_pct / lev)
-            sl_price = price * (1 + self.sl_pct / lev)
+            # -- 空单腿: 检查解封条件 --
+            if self._short_leg is not None:
+                short_ep = self._short_leg['entry']
+                should_unlock = False; reason = ""
+                if self.strategy_mode == "unlocking":
+                    if px >= short_ep * (1 + self.unlock_pct):
+                        should_unlock = True; reason = f"突破{self.unlock_pct*100:.0f}%"
+                    elif 'ema_fast' in row.index and row['ema_fast'] > row.get('ema_slow', 0):
+                        should_unlock = True; reason = "EMA金叉"
+                    elif 'rsi' in row.index and row['rsi'] > 60:
+                        should_unlock = True; reason = f"RSI{row['rsi']:.0f}"
+                # 空单止损: 价格上涨超限
+                if self.strategy_mode == "hedging":
+                    short_sl = short_ep * (1 + self._short_leg['sl_pct'] / self.leverage)
+                    if bh >= short_sl:
+                        should_unlock = True; reason = "空单止损"
 
-        pos = {
-            'coin': coin, 'side': side, 'entry': price,
-            'margin': margin, 'notional': notional,
-            'alloc': alloc, 'regime': 'hedge',
-            'resonance_score': 0, 'tp_price': tp_price,
-            'sl_price': sl_price, 'open_time': ts,
-            'cost': cost, 'leg_label': leg_label,
-            'highest_price': price, 'lowest_price': price,
-            'trailing_activated': False,
-        }
-        self.positions.append(pos)
+                if should_unlock:
+                    # 结算空单盈亏
+                    short_pnl = (short_ep - px) / short_ep * self._short_leg['notional']
+                    exit_cost = self._short_leg['notional'] * (TAKER_FEE + SLIPPAGE)
+                    short_pnl -= exit_cost
+                    self.equity += self._short_leg['margin'] + short_pnl
+                    self.trades.append({
+                        'open_time': str(self._short_leg['open_time']),
+                        'close_time': str(ts), 'coin': coin, 'side': 'SHORT',
+                        'entry': short_ep, 'exit': px, 'reason': f'UNLOCK_{reason}',
+                        'pnl': round(short_pnl, 2),
+                        'pnl_pct': round(short_pnl / self._short_leg['margin'] * 100, 2),
+                    })
+                    self._short_leg = None; self._hedge_state = "UNLOCKED"
+                    if self.verbose:
+                        print(f"[平空解封] {ts} | {reason} | 空单PL={short_pnl:.2f}")
+
+            # -- 现货腿: 检查止盈止损 --
+            if self._spot_leg is not None:
+                spot_ep = self._spot_leg['entry']
+                spot_tp = spot_ep * (1 + self._spot_leg['tp_pct'])
+                spot_sl = spot_ep * (1 - self._spot_leg['sl_pct'])
+                close_spot = False; spot_reason = ""; spot_px = px
+
+                if bh >= spot_tp:
+                    close_spot = True; spot_reason = "SPOT_TP"; spot_px = spot_tp
+                elif bl <= spot_sl:
+                    close_spot = True; spot_reason = "SPOT_SL"; spot_px = spot_sl
+                # 组合回撤保护: 总权益回撤超过账户3%强制全平
+                total_eq = self._calc_total_equity(dfs, ts)
+                if total_eq < self.initial_capital * 0.97 and self._hedge_state != "IDLE":
+                    close_spot = True; spot_reason = "PORTFOLIO_STOP"; spot_px = px
+                    # 也平空单
+                    if self._short_leg is not None:
+                        spnl = (self._short_leg['entry'] - px) / self._short_leg['entry'] * self._short_leg['notional']
+                        self.equity += self._short_leg['margin'] + spnl
+                        self._short_leg = None
+
+                if close_spot:
+                    spot_pnl = (spot_px - spot_ep) / spot_ep * self._spot_leg['notional']
+                    exit_cost = self._spot_leg['notional'] * (TAKER_FEE + SLIPPAGE)
+                    spot_pnl -= exit_cost
+                    self.equity += self._spot_leg['margin'] + spot_pnl
+                    self.trades.append({
+                        'open_time': str(self._spot_leg['open_time']),
+                        'close_time': str(ts), 'coin': coin, 'side': 'LONG',
+                        'entry': spot_ep, 'exit': spot_px, 'reason': spot_reason,
+                        'pnl': round(spot_pnl, 2),
+                        'pnl_pct': round(spot_pnl / self._spot_leg['margin'] * 100, 2),
+                    })
+                    self._spot_leg = None; self._hedge_state = "FLAT"
+                    if self.verbose:
+                        print(f"[{spot_reason}] {ts} | 现货PL={spot_pnl:.2f}")
 
     # ================================================================
     # 内部: 开仓 / 平仓
