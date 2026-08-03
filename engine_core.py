@@ -883,46 +883,45 @@ class BacktestEngineV2:
         self._last_entry_price = best['price']
 
     def _check_pyramiding(self, ts, dfs, coins):
-        """金字塔加仓: 持仓浮盈达标→追加仓位+更新均价"""
+        """金字塔加仓: 持仓浮盈达标→追加仓位+加权均价+更新TP/SL"""
         for pos in self.positions:
-            side = pos['side']; ep = pos['entry']
-            coin = pos['coin']; row = dfs[coin].loc[ts]
-            px = float(row['open']); regime = pos.get('regime', 'range')
+            side = pos['side']; coin = pos['coin']
+            row = dfs[coin].loc[ts]; px = float(row['open'])
+            regime = pos.get('regime', 'range')
+            lev = self.leverage
 
-            # 计算当前持仓均价
+            # 当前同向持仓加权均价 (by notional)
             same_side = [p for p in self.positions if p['side'] == side and p['coin'] == coin]
             total_notional = sum(p['notional'] for p in same_side)
-            avg_entry = sum(p['entry'] * p['notional'] for p in same_side) / max(total_notional, 1)
+            if total_notional <= 0: continue
+            avg_entry = sum(p['entry'] * p['notional'] for p in same_side) / total_notional
 
-            if side == 'LONG' and px >= avg_entry * (1 + self._pyr_trigger_pct / 100.0):
-                alloc = self._pyr_add_pct  # 加仓比例
-                self._open(coin, side, px, alloc, ts, regime, 0)
-                self._pyramid_count += 1
-                # 更新所有同向持仓的均价 (新开仓用open价)
-                new_avg = (total_notional * avg_entry + alloc * self.equity * px) / \
-                          max(total_notional + alloc * self.equity, 1)
-                for p in same_side:
-                    p['entry'] = new_avg
-                # 移动止损至均价
-                if self._pyr_trail:
-                    for p in same_side:
-                        p['sl_price'] = new_avg
-                if self.verbose:
-                    print(f"[PYR] {ts} | {coin} {side} +{alloc*100:.0f}% | avg={new_avg:.2f} | count={self._pyramid_count}")
+            trigger = self._pyr_trigger_pct / 100.0
+            should_add = (side == 'LONG' and px >= avg_entry * (1 + trigger)) or \
+                         (side == 'SHORT' and px <= avg_entry * (1 - trigger))
 
-            elif side == 'SHORT' and px <= avg_entry * (1 - self._pyr_trigger_pct / 100.0):
-                alloc = self._pyr_add_pct
-                self._open(coin, side, px, alloc, ts, regime, 0)
+            if should_add:
+                add_margin = self.equity * self._pyr_add_pct
+                add_notional = add_margin * lev
+                self._open(coin, side, px, self._pyr_add_pct, ts, regime, 0)
                 self._pyramid_count += 1
-                new_avg = (total_notional * avg_entry + alloc * self.equity * px) / \
-                          max(total_notional + alloc * self.equity, 1)
-                for p in same_side:
-                    p['entry'] = new_avg
+
+                # 加权均价: Σ(notional_i * entry_i) / Σ(notional_i)
+                total_n = total_notional + add_notional
+                new_avg = (total_notional * avg_entry + add_notional * px) / max(total_n, 1)
+                for p in same_side + self.positions[-1:]:  # 包括刚开的
+                    if p['side'] == side and p['coin'] == coin:
+                        p['entry'] = new_avg
+                        p['tp_price'] = new_avg * (1 + self.tp_pct / lev) if side == 'LONG' else \
+                                        new_avg * (1 - self.tp_pct / lev)
+                # 保本止损: 均价即新的止损线
                 if self._pyr_trail:
-                    for p in same_side:
-                        p['sl_price'] = new_avg
+                    for p in same_side + self.positions[-1:]:
+                        if p['side'] == side and p['coin'] == coin:
+                            p['sl_price'] = new_avg
                 if self.verbose:
-                    print(f"[PYR] {ts} | {coin} {side} +{alloc*100:.0f}% | avg={new_avg:.2f} | count={self._pyramid_count}")
+                    print(f"[PYR] {ts} | {coin} {side} +{self._pyr_add_pct*100:.0f}% | "
+                          f"avg={new_avg:.2f} | n={self._pyramid_count}/{self._pyr_max}")
 
     # ================================================================
     # 双腿独立对冲系统 (仅 HEDGING / UNLOCKING 模式)
