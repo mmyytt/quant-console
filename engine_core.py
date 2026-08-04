@@ -700,6 +700,16 @@ class BacktestEngineV2:
                 self.equity = 0.0
                 break
 
+            # ---- 资金费率结算 (每8h, 模拟永续合约) ----
+            if self.leverage > 1 and i % 2 == 0:  # 4H周期: 每2根=8h
+                for pos in self.positions:
+                    if pos.get('leg') == 'SPOT': continue  # 现货不收资金费
+                    funding_fee = pos['notional'] * 0.0001  # 默认0.01%费率
+                    if pos['side'] == 'LONG':
+                        self.equity -= funding_fee
+                    else:  # SHORT: 做空收资金费(牛市通常为正)
+                        self.equity += funding_fee * 0.5  # 保守估计
+
             # ---- 金字塔加仓检测 (经典模式) ----
             if self._enable_pyramiding and self._pyramid_count > 0 and \
                self._pyramid_count < self._pyr_max and not paused:
@@ -782,6 +792,16 @@ class BacktestEngineV2:
                     pos['trailing_activated'] = True
                 elif side == 'SHORT' and pos['lowest_price'] < ep * (1 - self.trailing_pct * 2):
                     pos['trailing_activated'] = True
+
+            # 爆仓检测: 浮亏超过保证金 → 强平
+            if exit_price is None:
+                if side == 'LONG':
+                    u_pnl_pct = (bl - ep) / ep * lev  # worst-case (low)
+                else:
+                    u_pnl_pct = (ep - bh) / ep * lev   # worst-case (high)
+                if u_pnl_pct <= -1.0:
+                    exit_price = bl if side == 'LONG' else bh
+                    exit_reason = 'LIQUIDATED'
 
             if exit_price is not None:
                 self._close(pos, exit_price, exit_reason, ts)
@@ -1044,26 +1064,29 @@ class BacktestEngineV2:
         margin = self.equity * alloc
         notional = margin * lev  # 名义本金
 
-        # 交易成本 (统一按名义本金计算)
-        cost = notional * (TAKER_FEE + SLIPPAGE)
-        self.equity -= cost
+        # 滑点计入成交价 (做多=买贵, 做空=卖贱)
+        fill_price = price * (1 + SLIPPAGE) if side == 'LONG' else price * (1 - SLIPPAGE)
 
-        # TP/SL 价格
+        # 手续费 (按名义本金)
+        fee = notional * TAKER_FEE
+        self.equity -= fee
+
+        # TP/SL 基于真实成交价
         if side == 'LONG':
-            tp_price = price * (1 + self.tp_pct / lev)
-            sl_price = price * (1 - self.sl_pct / lev)
+            tp_price = fill_price * (1 + self.tp_pct / lev)
+            sl_price = fill_price * (1 - self.sl_pct / lev)
         else:
-            tp_price = price * (1 - self.tp_pct / lev)
-            sl_price = price * (1 + self.sl_pct / lev)
+            tp_price = fill_price * (1 - self.tp_pct / lev)
+            sl_price = fill_price * (1 + self.sl_pct / lev)
 
         pos = {
-            'coin': coin, 'side': side, 'entry': price,
+            'coin': coin, 'side': side, 'entry': fill_price,
             'margin': margin, 'notional': notional,
             'alloc': alloc, 'regime': regime,
             'resonance_score': resonance_score,
             'tp_price': tp_price, 'sl_price': sl_price,
-            'open_time': ts, 'cost': cost,
-            'highest_price': price, 'lowest_price': price,
+            'open_time': ts, 'cost': fee,
+            'highest_price': fill_price, 'lowest_price': fill_price,
             'trailing_activated': False,
         }
         self.positions.append(pos)
@@ -1095,9 +1118,11 @@ class BacktestEngineV2:
 
         pnl_usd = margin * margin_pnl_pct
 
-        # 平仓手续费 (统一按名义本金)
-        exit_cost = notional * (TAKER_FEE + SLIPPAGE)
-        pnl_usd -= exit_cost
+        # 平仓滑点: 做多平仓=卖贱, 做空平仓=买贵
+        exit_slip = -SLIPPAGE if side == 'LONG' else SLIPPAGE
+        pnl_usd += notional * exit_slip
+        # 平仓手续费
+        pnl_usd -= notional * TAKER_FEE
 
         # 保证金从未离开账户(只是锁定), 平仓时只结算盈亏
         self.equity += pnl_usd
