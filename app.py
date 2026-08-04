@@ -1584,7 +1584,10 @@ if submitted:
             intensity = min(abs(val) / 20.0, 1.0)
             if val > 0: return f'background-color: rgba(34,197,94,{intensity:.2f})'
             return f'background-color: rgba(239,68,68,{intensity:.2f})'
-        styled = monthly.style.format("{:+.1f}%").applymap(color_monthly)
+        if hasattr(monthly.style, 'map'):
+            styled = monthly.style.format("{:+.1f}%").map(color_monthly)
+        else:
+            styled = monthly.style.format("{:+.1f}%").applymap(color_monthly)
         st.dataframe(styled, use_container_width=True)
 
         # 年度过滤 → 重新计算指标
