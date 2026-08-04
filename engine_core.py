@@ -239,7 +239,20 @@ class DataEngine:
                     raise FileNotFoundError(f"数据文件不存在且下载失败: {path}")
 
         df = pd.read_parquet(path)
-        print(f"[DataEngine] Loaded {coin} from {path}: {len(df):,} bars", flush=True)
+        # 检查数据是否过期 (>7天未更新 → 触发重新下载)
+        time_col = df.columns[0]
+        df[time_col] = pd.to_datetime(df[time_col])
+        last_ts = df[time_col].max()
+        days_stale = (datetime.now() - last_ts).days
+        if days_stale > 7:
+            print(f"[DataEngine] {coin} data is {days_stale}d stale, triggering refresh...", flush=True)
+            from data_loader import ensure_data
+            ensure_data(coin)
+            # 清除本引擎缓存触发重读
+            if coin in self._cache:
+                del self._cache[coin]
+            df = pd.read_parquet(path)
+        print(f"[DataEngine] Loaded {coin} from {path}: {len(df):,} bars, last={df[time_col].max()}", flush=True)
 
         # 时间列修复: reset_index 后列名可能是 '0'
         time_col = df.columns[0]
