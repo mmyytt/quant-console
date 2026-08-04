@@ -239,6 +239,7 @@ class DataEngine:
                     raise FileNotFoundError(f"数据文件不存在且下载失败: {path}")
 
         df = pd.read_parquet(path)
+        print(f"[DataEngine] Loaded {coin} from {path}: {len(df):,} bars", flush=True)
 
         # 时间列修复: reset_index 后列名可能是 '0'
         time_col = df.columns[0]
