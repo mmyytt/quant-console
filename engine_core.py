@@ -794,11 +794,11 @@ class BacktestEngineV2:
                     pos['trailing_activated'] = True
 
             # 爆仓检测: 浮亏超过保证金 → 强平
-            if exit_price is None:
+            if exit_price is None and ep > 0:
                 if side == 'LONG':
-                    u_pnl_pct = (bl - ep) / ep * lev  # worst-case (low)
+                    u_pnl_pct = (bl - ep) / ep * self.leverage
                 else:
-                    u_pnl_pct = (ep - bh) / ep * lev   # worst-case (high)
+                    u_pnl_pct = (ep - bh) / ep * self.leverage
                 if u_pnl_pct <= -1.0:
                     exit_price = bl if side == 'LONG' else bh
                     exit_reason = 'LIQUIDATED'
