@@ -1560,6 +1560,43 @@ if submitted:
             rc3.metric("累计盈亏", f"{_ar(strong):+.1f}%")
             rc4.metric("弱信号(1-2分)", f"{len(weak)}笔", delta=f"胜率{_wr(weak):.0f}%")
 
+    # 年度筛选 + 月度热力图
+    if closed:
+        # 按年份汇总
+        closed_df = pd.DataFrame(closed)
+        closed_df['year'] = pd.to_datetime(closed_df['close_time']).dt.year
+        closed_df['month'] = pd.to_datetime(closed_df['close_time']).dt.month
+        years_available = sorted(closed_df['year'].unique())
+
+        st.subheader("📊 年度/月度分析")
+        yr_cols = st.columns([1, 4])
+        selected_year = yr_cols[0].selectbox("年度筛选", ["全部"] + [str(y) for y in years_available], key="year_filter")
+        # 月度热力图
+        monthly = closed_df.pivot_table(values='pnl_pct', index='year', columns='month', aggfunc='sum')
+        # 补全12个月
+        for m in range(1, 13):
+            if m not in monthly.columns: monthly[m] = 0.0
+        monthly = monthly[sorted(monthly.columns)]
+        monthly['YTD'] = monthly.sum(axis=1)
+        # 颜色映射
+        def color_monthly(val):
+            if pd.isna(val) or val == 0: return ''
+            intensity = min(abs(val) / 20.0, 1.0)
+            if val > 0: return f'background-color: rgba(34,197,94,{intensity:.2f})'
+            return f'background-color: rgba(239,68,68,{intensity:.2f})'
+        styled = monthly.style.format("{:+.1f}%").applymap(color_monthly)
+        st.dataframe(styled, use_container_width=True)
+
+        # 年度过滤 → 重新计算指标
+        if selected_year != "全部":
+            yr = int(selected_year)
+            yr_closed = closed_df[closed_df['year'] == yr]
+            yr_wins = yr_closed[yr_closed['pnl_pct'] > 0]
+            yr_pnl = yr_closed['pnl_pct'].sum()
+            st.caption(f"{selected_year}年: {len(yr_closed)}笔 | "
+                       f"胜率{len(yr_wins)/max(len(yr_closed),1)*100:.0f}% | "
+                       f"累计{yr_pnl:+.1f}%")
+
     # 交易记录
     if closed:
         st.subheader("📋 最近交易")
@@ -1568,6 +1605,37 @@ if submitted:
                  "出场": f"${t.get('exit',0):.2f}", "原因": t.get('reason','?'),
                  "盈亏%": f"{t.get('pnl_pct',0):+.2f}%"} for t in closed[-15:]]
         st.dataframe(pd.DataFrame(rows[::-1]), use_container_width=True, height=300)
+
+    # === AI 策略诊断 ===
+    with st.expander("🤖 AI 策略诊断与优化意见", expanded=False):
+        if st.button("🧠 生成 AI 诊断报告", use_container_width=True):
+            ai_k = os.environ.get("AI_API_KEY", "")
+            if not ai_k:
+                st.warning("请先在 AI 对话舱配置 API Key")
+            else:
+                with st.spinner("AI 分析中..."):
+                    ytd = ""
+                    if closed:
+                        try:
+                            ydf = pd.DataFrame(closed)
+                            ydf['year'] = pd.to_datetime(ydf['close_time']).dt.year
+                            for yr, grp in ydf.groupby('year'):
+                                ytd += f"  {yr}年: {grp['pnl_pct'].sum():+.1f}% ({len(grp)}笔)\n"
+                        except: pass
+                    diag_prompt = f"""回测诊断:
+标的:{coin} {timeframe} {leverage}x
+收益:{metrics.get('total_return',0):+.1f}% 年化:{metrics.get('annual_return',0):+.1f}%
+回撤:{metrics.get('max_drawdown',0):.1f}% 夏普:{metrics.get('sharpe_ratio',0):.3f}
+胜率:{metrics.get('win_rate',0):.1f}% 交易:{metrics.get('total_trades',0)}笔
+分年:{ytd}
+输出:1)策略评分(1-100) 2)牛熊点评 3)最大回撤预警 4)2条优化建议。中文,200字。"""
+                    result = _call_unified_api(
+                        [{"role": "user", "content": diag_prompt}],
+                        ai_k, "DeepSeek-V3 (推荐)", st.session_state.get("trading_notes", ""))
+                    if result["success"]:
+                        st.markdown(result["content"])
+                    else:
+                        st.error(result["error"])
 
 else:
     st.info("👆 左侧配置策略 & 指标 → 点【运行策略回测】")
