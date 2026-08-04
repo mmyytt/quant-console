@@ -1243,6 +1243,8 @@ if submitted:
         de = DataEngine()
         all_tf = de.get_multi_timeframe(coin)
         df = all_tf.get(timeframe, all_tf['4h'])
+        # 数据范围校验
+        st.caption(f"已加载 {timeframe} 数据: {len(df):,}根 | {df.index[0]} ~ {df.index[-1]}")
 
         # 时间范围过滤
         dr = st.session_state.date_range
