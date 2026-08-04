@@ -583,6 +583,8 @@ class BacktestEngineV2:
         self.verbose = verbose
         self._pyramid_count = 0
         self._last_entry_price = 0
+        self._last_closed_bar = -1
+        self._bar_idx = 0
         self._enable_pyramiding = False
         self._pyr_init_pct = 30
         self._pyr_trigger_pct = 2.0
@@ -647,7 +649,7 @@ class BacktestEngineV2:
         dfs_with_sigs = {}
         for coin in coins:
             df = dfs[coin].copy()
-            if self.strategy_mode not in ("hedging", "unlocking"):
+            if self.strategy_mode != "hedging":  # 解锁模式仍需指标(EMA/RSI检测)
                 df = strategy.generate_signals(df)
             dfs_with_sigs[coin] = df
 
@@ -676,9 +678,8 @@ class BacktestEngineV2:
 
         # 3. 逐根遍历
         for i, ts in enumerate(common_index):
+            self._bar_idx = i
             paused = i < self.lock_until
-            just_closed = False
-
             # ---- 对冲/解锁状态机 (每bar调用, IDLE→首Bar自动建仓) ----
             if self.strategy_mode in ("hedging", "unlocking"):
                 self._hedge_state_machine(ts, dfs_with_sigs, coins, i)
@@ -686,18 +687,10 @@ class BacktestEngineV2:
             # ---- 检查持仓 TP/SL ----
             self._check_positions(ts, dfs_with_sigs, i)
 
-            # 更新 just_closed 标记
-            if len(self.positions) < self._count_positions_before(i):
-                just_closed = True
-            # 简化: 用平仓记录判断
-            just_closed = any(
-                t['close_time'] == str(ts) and t['reason'] in ('TP', 'SL')
-                for t in self.trades[-3:]  # 只检查最近3笔
-            )
-
             # ---- 开仓: 轮动选币 (对冲LOCKED状态下彻底屏蔽!) ----
             hedge_blocked = (self.strategy_mode in ("hedging", "unlocking") and
                              self._hedge_state in ("LOCKED", "UNLOCKED"))
+            just_closed = (i == self._last_closed_bar)
             if not paused and not just_closed and not hedge_blocked and \
                len(self.positions) < self.max_positions:
                 self._try_rotate_entry(ts, dfs_with_sigs, coins, i)
@@ -949,9 +942,9 @@ class BacktestEngineV2:
                 'leg':'SPOT',
             }
             # 对冲腿不加入self.positions(避免_check_positions重复触发)
-            # 合约空头
-            short_margin = self.equity * self.hedge_ratio
-            short_notional = short_margin * self.leverage
+            # 合约空头 (强制Delta中性: short_notional = spot_notional)
+            short_notional = spot_notional
+            short_margin = short_notional / self.leverage
             short_cost = short_notional * (TAKER_FEE + SLIPPAGE)
             self.equity -= short_cost
             self._short_leg = {
@@ -985,6 +978,9 @@ class BacktestEngineV2:
                 s_margin = self._short_leg.get('margin', 0)
                 # 空单盈亏 = 名义本金 * (入场-出场)/入场 - 手续费
                 short_pnl = s_notional * (short_ep - px) / short_ep if short_ep > 0 else 0
+                # 爆仓保护: 亏损不超过保证金
+                if short_pnl < -s_margin:
+                    short_pnl = -s_margin
                 short_pnl -= s_notional * (TAKER_FEE + SLIPPAGE)
                 self.equity += short_pnl  # 只加净PnL, margin从未离开账户
                 self.trades.append({
@@ -1073,6 +1069,8 @@ class BacktestEngineV2:
         self.positions.append(pos)
 
         if self.verbose:
+            fv = self.CONTRACT_FV.get(coin, 1.0)
+            contracts = notional / (price * fv) if (price * fv) > 0 else 0.0
             print(f"[OPEN]  {ts} | {coin:4s} {side:5s} | "
                   f"px={price:.2f} | ctr={contracts:.4f} | "
                   f"margin={margin:.2f} | alloc={alloc*100:.0f}% | {regime}")
@@ -1129,6 +1127,7 @@ class BacktestEngineV2:
                   f"pnl={mark}{pnl_usd:.2f} ({margin_pnl_pct*100:+.1f}%) | "
                   f"eq={self.equity:.2f}")
 
+        self._last_closed_bar = self._bar_idx if hasattr(self, '_bar_idx') else -1
         self.positions.remove(pos)
 
     # ================================================================
@@ -1144,6 +1143,7 @@ class BacktestEngineV2:
         self.lock_until = -1
         self.losestreak = 0
         self._pyramid_count = 0
+        self._last_closed_bar = -1  # 防同Bar重开
         self._last_entry_price = 0
 
     def _count_positions_before(self, bar_idx):
@@ -1151,21 +1151,23 @@ class BacktestEngineV2:
         return len(self.positions)
 
     def _calc_total_equity(self, dfs, ts) -> float:
-        """按已确认价格估算总权益 (严禁未来函数: 用上一根close或当前open)"""
+        """按已确认价格估算总权益 (含对冲腿浮动盈亏)"""
         total = self.equity
+        coin = list(dfs.keys())[0] if dfs else None
+        px = float(dfs[coin].loc[ts]['open']) if coin else 0
         for pos in self.positions:
-            coin = pos['coin']
-            row = dfs[coin].loc[ts]
-            # 用开盘价评估浮盈 (已确认, 非未闭合收盘价)
-            px = float(row['open'])
             if pos['side'] == 'LONG':
                 float_pnl = (px - pos['entry']) / pos['entry'] * self.leverage
             else:
                 float_pnl = (pos['entry'] - px) / pos['entry'] * self.leverage
             total += pos['margin'] * float_pnl
-            # 爆仓检测: 浮亏超过保证金 → 权益归零
-            if pos['margin'] + pos['margin'] * float_pnl <= 0:
-                return 0.0
+        # 对冲腿浮动盈亏
+        if self._spot_leg is not None:
+            spot_ep = self._spot_leg['entry']; spot_mg = self._spot_leg['margin']
+            total += spot_mg * (px - spot_ep) / spot_ep if spot_ep > 0 else 0
+        if self._short_leg is not None:
+            short_ep = self._short_leg['entry']; short_mg = self._short_leg['margin']
+            total += short_mg * (short_ep - px) / short_ep * self.leverage if short_ep > 0 else 0
         return max(total, 0.0)
 
     def _build_result(self, strategy, coins, index) -> Dict:
@@ -1251,11 +1253,18 @@ class PerformanceAnalyzer:
         dd_val = np.max(drawdown) if len(drawdown) > 0 else 0
         metrics['max_drawdown'] = round(float(dd_val) * 100, 2) if not np.isnan(dd_val) and not np.isinf(dd_val) else 100.0
 
-        # ---- 夏普比率 ----
+        # ---- 夏普比率 (动态年化因子) ----
         returns = np.diff(equity_arr) / equity_arr[:-1]
         if len(returns) > 1 and np.std(returns) > 0:
-            # 年化夏普 (4H K线: 365*6 = 2190 根/年)
-            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365 * 6)
+            # 根据数据时间跨度估算每日bar数
+            try:
+                start_dt = pd.to_datetime(result.get('data_start', ''))
+                end_dt = pd.to_datetime(result.get('data_end', ''))
+                total_days = max((end_dt - start_dt).days, 1)
+                bars_per_day = len(equity_arr) / total_days
+            except:
+                bars_per_day = 6  # 降级: 假设4H
+            sharpe = np.mean(returns) / np.std(returns) * np.sqrt(365 * max(bars_per_day, 1))
             metrics['sharpe_ratio'] = round(sharpe, 3)
         else:
             metrics['sharpe_ratio'] = 0.0
@@ -1506,7 +1515,7 @@ class PortfolioManager:
         exit_cost = leg.notional * (TAKER_FEE + SLIPPAGE)
         pnl -= exit_cost
 
-        self.cash += leg.margin + pnl
+        self.cash += pnl  # 只加净PnL, margin从未离开账户
         self.trades_log.append({
             'coin': leg.coin, 'type': leg.leg_type.value,
             'entry': leg.entry_price, 'exit': price,
