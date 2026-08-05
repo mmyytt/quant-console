@@ -966,29 +966,28 @@ class BacktestEngineV2:
         # === IDLE or FLAT: 建/重建双腿仓 ===
         if self._hedge_state in ("IDLE", "FLAT"):
             if self.equity <= 0: return
-            # 现货多头
-            spot_margin = self.equity * self.hedge_ratio
-            spot_cost = spot_margin * (TAKER_FEE + SLIPPAGE)
-            self.equity -= spot_cost
+            # 现货多头 (滑点入价+手续费按名义本金)
+            spot_notional = self.equity * self.hedge_ratio
+            spot_fill = px * (1 + SLIPPAGE)
+            self.equity -= spot_notional * TAKER_FEE
             self._spot_leg = {
-                'coin':coin,'side':'LONG','entry':px,
-                'margin':spot_margin,'notional':spot_margin,
+                'coin':coin,'side':'LONG','entry':spot_fill,
+                'margin':spot_notional,'notional':spot_notional,
                 'open_time':ts,'tp_pct':self._spot_tp,'sl_pct':self._spot_sl,
-                'tp_price':px*(1+self._spot_tp),'sl_price':px*(1-self._spot_sl),
+                'tp_price':spot_fill*(1+self._spot_tp),'sl_price':spot_fill*(1-self._spot_sl),
                 'leg':'SPOT',
             }
-            # 对冲腿不加入self.positions(避免_check_positions重复触发)
-            # 合约空头 (强制Delta中性: short_notional = spot_notional)
+            # 合约空头 (强制Delta中性: short_notional=spot_notional, 滑点入价)
             short_notional = spot_notional
             short_margin = short_notional / self.leverage
-            short_cost = short_notional * (TAKER_FEE + SLIPPAGE)
-            self.equity -= short_cost
+            short_fill = px * (1 - SLIPPAGE)
+            self.equity -= short_notional * TAKER_FEE
             self._short_leg = {
-                'coin':coin,'side':'SHORT','entry':px,
+                'coin':coin,'side':'SHORT','entry':short_fill,
                 'margin':short_margin,'notional':short_notional,
                 'open_time':ts,'tp_pct':self._short_tp,'sl_pct':self._short_sl,
-                'tp_price':px*(1-self._short_tp/self.leverage),
-                'sl_price':px*(1+self._short_sl/self.leverage),
+                'tp_price':short_fill*(1-self._short_tp/self.leverage),
+                'sl_price':short_fill*(1+self._short_sl/self.leverage),
                 'leg':'FUTURES',
             }
             self._hedge_state = "LOCKED"; self._hedge_entry_price = px
@@ -1014,10 +1013,9 @@ class BacktestEngineV2:
                 s_margin = self._short_leg.get('margin', 0)
                 # 空单盈亏 = 名义本金 * (入场-出场)/入场 - 手续费
                 short_pnl = s_notional * (short_ep - px) / short_ep if short_ep > 0 else 0
-                # 爆仓保护: 亏损不超过保证金
-                if short_pnl < -s_margin:
-                    short_pnl = -s_margin
-                short_pnl -= s_notional * (TAKER_FEE + SLIPPAGE)
+                if short_pnl < -s_margin: short_pnl = -s_margin
+                short_pnl -= s_notional * TAKER_FEE  # 平仓手续费
+                short_pnl += s_notional * SLIPPAGE   # 做空平仓=买贵
                 self.equity += short_pnl  # 只加净PnL, margin从未离开账户
                 self.trades.append({
                     'open_time':str(self._short_leg['open_time']),'close_time':str(ts),
@@ -1042,7 +1040,8 @@ class BacktestEngineV2:
                 sn_val = self._spot_leg.get('notional', spot_notional) if self._spot_leg else spot_notional
                 sm_val = self._spot_leg.get('margin', spot_margin) if self._spot_leg else spot_margin
                 spot_pnl = sn_val * (spot_px - spot_ep) / spot_ep if spot_ep > 0 else 0
-                spot_pnl -= sn_val * (TAKER_FEE + SLIPPAGE)
+                spot_pnl -= sn_val * TAKER_FEE  # 平仓手续费
+                spot_pnl -= sn_val * SLIPPAGE   # 做多平仓=卖贱
                 self.equity += spot_pnl  # 只加净PnL
                 self.trades.append({
                     'open_time':str(self._spot_leg['open_time']),'close_time':str(ts),
@@ -1057,7 +1056,8 @@ class BacktestEngineV2:
                     sn = self._short_leg.get('notional', 0)
                     sm = self._short_leg.get('margin', 0)
                     short_pnl = sn * (se - px) / se if se > 0 else 0
-                    short_pnl -= sn * (TAKER_FEE + SLIPPAGE)
+                    short_pnl -= sn * TAKER_FEE
+                    short_pnl += sn * SLIPPAGE
                     self.equity += short_pnl
                     self._short_leg = None
                 self._hedge_state = "FLAT"  # 下一bar IDLE检测 → 自动re-hedge
