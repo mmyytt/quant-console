@@ -1403,9 +1403,16 @@ if submitted:
     c[3].metric("胜率", f"{metrics.get('win_rate',0):.1f}%")
     c[4].metric("盈亏比", f"{metrics.get('profit_factor',0):.2f}" if metrics.get('profit_factor') != float('inf') else "inf")
     c[5].metric("交易数", metrics.get('total_trades', 0))
-    yrs = metrics.get('years', 0)
-    days = int(yrs * 365.25)
-    st.caption(f"回测时长: {yrs:.1f}年 ({days}天) | 年化 = 总收益按此区间复利折算为365天标准收益率")
+    # 用真实时间戳算回测时长 (不依赖K线数)
+    ec = result.get('equity_curve', [])
+    if ec and len(ec) > 1:
+        real_start = pd.Timestamp(ec[0]['timestamp'])
+        real_end = pd.Timestamp(ec[-1]['timestamp'])
+        real_days = (real_end - real_start).days
+        real_yrs = round(real_days / 365.25, 1)
+    else:
+        real_yrs = metrics.get('years', 0); real_days = int(real_yrs * 365.25)
+    st.caption(f"回测时长: {real_yrs:.1f}年 ({real_days}天) | 年化 = 总收益按此区间复利折算为365天标准收益率")
     final_eq = result.get('final_equity', initial_capital)
     c[6].metric("最终权益", f"${final_eq:,.0f}")
 

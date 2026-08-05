@@ -1225,8 +1225,8 @@ class BacktestEngineV2:
             'equity_array': equity_arr,
             'portfolio_curve': self._portfolio_curve,
             'data_bars': len(index),
-            'data_start': str(index[0]),
-            'data_end': str(index[-1]),
+            'data_start': str(index[0]) if len(index) > 0 else '',
+            'data_end': str(index[-1]) if len(index) > 0 else '',
         }
 
 
