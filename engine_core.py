@@ -1075,23 +1075,39 @@ class BacktestEngineV2:
         fv = self.CONTRACT_FV.get(coin, 1.0)
         lev = self.leverage
 
-        margin = self.equity * alloc
-        notional = margin * lev  # 名义本金
-
-        # 滑点计入成交价 (做多=买贵, 做空=卖贱)
+        # 滑点计入成交价
         fill_price = price * (1 + SLIPPAGE) if side == 'LONG' else price * (1 - SLIPPAGE)
 
-        # 手续费 (按名义本金)
+        # === Fixed Risk 仓位计算 ===
+        sl_distance = fill_price * (self.sl_pct / lev)  # 止损价格距离
+        max_risk = self.equity * (alloc * 0.5)           # 风险金额 (alloc的50%为实际风险敞口)
+        position_units = max_risk / sl_distance if sl_distance > 0 else 0
+        position_value = position_units * fill_price     # 名义头寸
+        margin = position_value / lev                     # 所需保证金
+        if margin > self.equity * alloc:
+            margin = self.equity * alloc                  # 风控截断
+        notional = margin * lev                           # 实际名义本金
+
+        # 手续费
         fee = notional * TAKER_FEE
         self.equity -= fee
 
-        # TP/SL 基于真实成交价
+        # TP/SL
         if side == 'LONG':
             tp_price = fill_price * (1 + self.tp_pct / lev)
             sl_price = fill_price * (1 - self.sl_pct / lev)
         else:
             tp_price = fill_price * (1 - self.tp_pct / lev)
             sl_price = fill_price * (1 + self.sl_pct / lev)
+
+        # ATR止损覆盖
+        if hasattr(self, '_use_atr_sl') and self._use_atr_sl:
+            atr_val = self._atr_val if hasattr(self, '_atr_val') else fill_price * 0.01
+            atr_mult = getattr(self, '_atr_mult', 2.0)
+            if side == 'LONG':
+                sl_price = fill_price - atr_val * atr_mult
+            else:
+                sl_price = fill_price + atr_val * atr_mult
 
         pos = {
             'coin': coin, 'side': side, 'entry': fill_price,

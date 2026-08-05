@@ -1453,10 +1453,17 @@ if submitted:
     st.caption(f"做多: {len(long_trades)}笔 (胜率{long_wr:.0f}%) | 做空: {len(short_trades)}笔 (胜率{short_wr:.0f}%)")
 
     if oos_m:
-        c1, c2 = st.columns(2)
+        st.subheader("🔬 样本外验证 (OOS)")
+        oc1, oc2, oc3, oc4, oc5 = st.columns(5)
         decay = oos_m['total_return'] - metrics['total_return']
-        c1.metric("训练集", f"{metrics['total_return']:+.1f}%")
-        c2.metric("测试集", f"{oos_m['total_return']:+.1f}%", delta=f"{decay:+.1f}%", delta_color="inverse")
+        oc1.metric("训练集收益", f"{metrics['total_return']:+.1f}%")
+        oc2.metric("测试集收益", f"{oos_m['total_return']:+.1f}%",
+                   delta=f"{decay:+.1f}%", delta_color="inverse")
+        oc3.metric("训练胜率", f"{metrics.get('win_rate',0):.1f}%")
+        oc4.metric("测试胜率", f"{oos_m.get('win_rate',0):.1f}%")
+        oc5.metric("测试回撤", f"{oos_m.get('max_drawdown',0):.1f}%")
+        oos_status = "✅ 过拟合风险低" if abs(decay) < 15 else ("⚠️ 中等衰减" if abs(decay) < 30 else "❌ 严重过拟合")
+        st.caption(f"OOS评估: {oos_status} (训练→测试收益衰减 {decay:+.1f}%)")
 
     # === 权益曲线 ===
     st.subheader("💰 权益曲线")
