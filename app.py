@@ -1464,16 +1464,34 @@ if submitted:
 
     if oos_m:
         st.subheader("🔬 样本外验证 (OOS)")
-        oc1, oc2, oc3, oc4, oc5 = st.columns(5)
-        decay = oos_m['total_return'] - metrics['total_return']
-        oc1.metric("训练集收益", f"{metrics['total_return']:+.1f}%")
-        oc2.metric("测试集收益", f"{oos_m['total_return']:+.1f}%",
-                   delta=f"{decay:+.1f}%", delta_color="inverse")
-        oc3.metric("训练胜率", f"{metrics.get('win_rate',0):.1f}%")
-        oc4.metric("测试胜率", f"{oos_m.get('win_rate',0):.1f}%")
-        oc5.metric("测试回撤", f"{oos_m.get('max_drawdown',0):.1f}%")
-        oos_status = "✅ 过拟合风险低" if abs(decay) < 15 else ("⚠️ 中等衰减" if abs(decay) < 30 else "❌ 严重过拟合")
-        st.caption(f"OOS评估: {oos_status} (训练→测试收益衰减 {decay:+.1f}%)")
+        # 折算年化后再对比 (消除时长差异)
+        train_yrs = metrics.get('years', 1)
+        test_yrs = oos_m.get('years', 1)
+        train_ret = metrics['total_return'] / 100.0
+        test_ret = oos_m['total_return'] / 100.0
+        train_ann = ((1 + train_ret) ** (1 / max(train_yrs, 0.1)) - 1) * 100 if train_ret > -1 else -100
+        test_ann = ((1 + test_ret) ** (1 / max(test_yrs, 0.1)) - 1) * 100 if test_ret > -1 else -100
+        ann_decay = test_ann - train_ann
+
+        oc1, oc2, oc3, oc4, oc5, oc6 = st.columns(6)
+        oc1.metric("训练年化", f"{train_ann:+.1f}%")
+        oc2.metric("测试年化", f"{test_ann:+.1f}%",
+                   delta=f"{ann_decay:+.1f}%", delta_color="inverse")
+        oc3.metric("训练总收益", f"{metrics['total_return']:+.1f}%")
+        oc4.metric("测试总收益", f"{oos_m['total_return']:+.1f}%")
+        oc5.metric("训练胜率", f"{metrics.get('win_rate',0):.1f}%")
+        oc6.metric("测试胜率", f"{oos_m.get('win_rate',0):.1f}%")
+
+        # 判定逻辑: 测试亏钱或年化衰减>50%才算过拟合
+        if test_ret < 0:
+            oos_status = "❌ 严重过拟合 (测试集亏损)"
+        elif train_ann > 0 and test_ann < train_ann * 0.5:
+            oos_status = "⚠️ 中等衰减 (测试年化衰减超50%)"
+        elif train_ann > 0 and test_ann >= train_ann * 0.8:
+            oos_status = "✅ 样本外验证通过 (表现极其稳健)"
+        else:
+            oos_status = "⚡ 轻微衰减 (可接受范围)"
+        st.caption(f"OOS评估: {oos_status} | 训练{yrs:.1f}年 vs 测试{test_yrs:.1f}年 | 年化差{ann_decay:+.1f}%")
 
     # === 权益曲线 ===
     st.subheader("💰 权益曲线")
