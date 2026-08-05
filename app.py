@@ -1491,7 +1491,7 @@ if submitted:
             oos_status = "✅ 样本外验证通过 (表现极其稳健)"
         else:
             oos_status = "⚡ 轻微衰减 (可接受范围)"
-        st.caption(f"OOS评估: {oos_status} | 训练{yrs:.1f}年 vs 测试{test_yrs:.1f}年 | 年化差{ann_decay:+.1f}%")
+        st.caption(f"OOS评估: {oos_status} | 训练{train_yrs:.1f}年 vs 测试{test_yrs:.1f}年 | 年化差{ann_decay:+.1f}%")
 
     # === 权益曲线 ===
     st.subheader("💰 权益曲线")
