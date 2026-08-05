@@ -866,18 +866,26 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     # === 单向风控 (仅非对冲模式渲染) ===
     if not is_dual_leg:
         st.divider(); st.caption("🛡️ 单向风控")
+        pos_mode = st.radio("仓位模式", [
+            "固定资金比例 (Fixed Capital %)", "固定风险比例 (Fixed Risk %)"
+        ], index=0, horizontal=True, help="Fixed Capital=按牛/震/熊%分配资金 | Fixed Risk=按单笔风险%倒推仓位")
+        use_fixed_risk = "Risk" in pos_mode
+
         c1, c2 = st.columns(2)
         tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
         sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
+        # 仓位分配 (Fixed Risk模式下禁用)
         c1, c2, c3 = st.columns(3)
-        bull_a = c1.number_input("牛市%", 10, 100, 100, 5) / 100
-        range_a = c2.number_input("震荡%", 10, 100, 50, 5) / 100
-        bear_a = c3.number_input("熊市%", 0, 100, 30, 5) / 100
+        bull_a = c1.number_input("牛市%", 10, 100, 100, 5, disabled=use_fixed_risk) / 100
+        range_a = c2.number_input("震荡%", 10, 100, 50, 5, disabled=use_fixed_risk) / 100
+        bear_a = c3.number_input("熊市%", 0, 100, 30, 5, disabled=use_fixed_risk) / 100
         c1, c2 = st.columns(2)
         lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
         lock_days = c2.number_input("锁仓天数", 1, 30, 2)
         c1, c2 = st.columns(2)
-        risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5)
+        risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5,
+                                          disabled=not use_fixed_risk,
+                                          help="Fixed Risk模式专用: 每笔最大亏损占账户的%")
         use_atr_stop = c2.checkbox("ATR动态止损", False)
         atr_period_val, atr_mult_val = 14, 2.0
         if use_atr_stop:
@@ -1301,6 +1309,8 @@ if submitted:
         st.session_state.selected_indicators["_spot_sl"] = spot_sl if 'spot_sl' in dir() else 2.0
         st.session_state.selected_indicators["_short_sl"] = short_sl if 'short_sl' in dir() else 3.0
 
+        st.session_state.selected_indicators["_pos_mode"] = "fixed_risk" if use_fixed_risk else "fixed_capital"
+        st.session_state.selected_indicators["_risk_per_trade"] = risk_per_trade
         st.session_state.selected_indicators["_trade_mode"] = trade_mode
         st.session_state.selected_indicators["_regime_filter"] = regime_filter_enabled
 

@@ -656,6 +656,8 @@ class BacktestEngineV2:
             self._pyr_add_pct = sel.get('_pyr_add_pct', 0.5)
             self._pyr_max = sel.get('_pyr_max', 3)
             self._pyr_trail = sel.get('_pyr_trail', False)
+            self._pos_mode = sel.get('_pos_mode', 'fixed_capital')
+            self._risk_pct = sel.get('_risk_per_trade', 1.0) / 100.0
         except: pass
 
         # 1. 对每个币种计算信号 (对冲模式跳过, 不需要指标)
@@ -1078,15 +1080,31 @@ class BacktestEngineV2:
         # 滑点计入成交价
         fill_price = price * (1 + SLIPPAGE) if side == 'LONG' else price * (1 - SLIPPAGE)
 
-        # === Fixed Risk 仓位计算 ===
-        sl_distance = fill_price * (self.sl_pct / lev)  # 止损价格距离
-        max_risk = self.equity * (alloc * 0.5)           # 风险金额 (alloc的50%为实际风险敞口)
-        position_units = max_risk / sl_distance if sl_distance > 0 else 0
-        position_value = position_units * fill_price     # 名义头寸
-        margin = position_value / lev                     # 所需保证金
-        if margin > self.equity * alloc:
-            margin = self.equity * alloc                  # 风控截断
-        notional = margin * lev                           # 实际名义本金
+        # === 仓位计算: Fixed Capital vs Fixed Risk ===
+        use_fixed_risk = getattr(self, '_pos_mode', 'fixed_capital') == 'fixed_risk'
+        risk_pct = getattr(self, '_risk_pct', 0.01)
+
+        if use_fixed_risk:
+            sl_distance = fill_price * (self.sl_pct / lev)
+            max_risk_amount = self.equity * risk_pct
+            position_units = max_risk_amount / sl_distance if sl_distance > 0 else 0
+            position_value = position_units * fill_price
+            margin = position_value / lev
+            if margin > self.equity:
+                margin = self.equity
+            notional = margin * lev
+            if self.verbose:
+                print(f"[TRADE LOG] Fixed Risk: Equity=${self.equity:.0f} | "
+                      f"Risk({risk_pct*100:.1f}%)=${max_risk_amount:.0f} | "
+                      f"SL_dist=${sl_distance:.2f} | "
+                      f"Pos=${position_value:.0f} Margin=${margin:.0f} ({margin/self.equity*100:.0f}%)")
+        else:
+            # Fixed Capital
+            margin = self.equity * alloc
+            notional = margin * lev
+            if self.verbose:
+                print(f"[TRADE LOG] Fixed Capital: Equity=${self.equity:.0f} | "
+                      f"Alloc={alloc*100:.0f}% | Margin=${margin:.0f} | Notional=${notional:.0f}")
 
         # 手续费
         fee = notional * TAKER_FEE
