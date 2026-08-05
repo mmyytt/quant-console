@@ -1249,7 +1249,13 @@ if submitted:
         # 时间范围过滤
         dr = st.session_state.date_range
         if dr:
-            df = df.loc[dr[0]:dr[1]]
+            # 向前多取warmup_bars根用于指标预热
+            warmup_bars = max(200, int(len(df) * 0.05))
+            dr_start = pd.Timestamp(dr[0])
+            dr_end = pd.Timestamp(dr[1])
+            # 先取warmup前+目标区间, 再去warmup
+            warmup_start = dr_start - pd.Timedelta(hours=warmup_bars * {'5m':5/60,'15m':0.25,'1h':1,'4h':4,'1d':24}.get(timeframe,4))
+            df = df.loc[warmup_start:dr_end]
         if len(df) < 200:
             st.error(f"数据不足 ({len(df)}根), 请扩大时间范围"); st.stop()
 
