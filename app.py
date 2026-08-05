@@ -1009,6 +1009,72 @@ if c_refresh2.button("🔁 强制重刷", use_container_width=True,
             st.success("全部数据已重新下载!"); time.sleep(1); st.rerun()
         except Exception as e:
             st.error(f"下载失败: {e}")
+# ============================================================
+# 预设管理器
+# ============================================================
+PRESET_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "presets.json")
+
+def load_presets():
+    if os.path.exists(PRESET_FILE):
+        try:
+            with open(PRESET_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except: pass
+    return {}
+
+def save_presets(data):
+    with open(PRESET_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+presets = load_presets()
+st.sidebar.divider()
+with st.sidebar.expander("💾 策略预设管理", expanded=False):
+    preset_names = list(presets.keys())
+    if preset_names:
+        selected_preset = st.selectbox("已保存预设", [""] + preset_names, key="preset_sel")
+        c1, c2 = st.columns(2)
+        if c1.button("📥 加载", use_container_width=True, disabled=not selected_preset):
+            p = presets[selected_preset]
+            # 恢复参数到session_state
+            for k, v in p.get("params", {}).items():
+                if k == "indicators":
+                    st.session_state.selected_indicators = v
+                elif k in st.session_state:
+                    st.session_state[k] = v
+            st.success(f"已加载预设: {selected_preset}")
+            time.sleep(1); st.rerun()
+        if c2.button("🗑️ 删除", use_container_width=True, disabled=not selected_preset):
+            del presets[selected_preset]
+            save_presets(presets)
+            st.rerun()
+
+    preset_name = st.text_input("预设名称", placeholder="ETH-4H-高盈亏比突破V1", key="preset_name")
+    if st.button("💾 保存当前策略", use_container_width=True, disabled=not preset_name):
+        # 收集所有参数
+        bt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
+        saved_metrics = {}
+        if os.path.exists(bt_file):
+            try:
+                with open(bt_file) as f: saved_metrics = json.load(f)
+            except: pass
+        presets[preset_name] = {
+            "saved_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "params": {
+                "coin": coin, "timeframe": timeframe, "leverage": leverage,
+                "initial_capital": initial_capital,
+                "tp_pct": tp_pct, "sl_pct": sl_pct,
+                "bull_a": bull_a, "range_a": range_a, "bear_a": bear_a,
+                "indicators": st.session_state.selected_indicators,
+                "strategy_mode": strat_mode_key,
+                "pos_mode": "fixed_risk" if use_fixed_risk else "fixed_capital",
+                "risk_per_trade": risk_per_trade,
+                "hedge_ratio": hedge_ratio,
+            },
+            "metrics": saved_metrics,
+        }
+        save_presets(presets)
+        st.success(f"预设 '{preset_name}' 已保存!")
+
 cur_params = {"coin": coin, "tf": timeframe, "lev": leverage,
               "tp": tp_pct, "sl": sl_pct, "indicators": list(st.session_state.selected_indicators.keys())}
 st.sidebar.markdown(export_json(cur_params), unsafe_allow_html=True)
@@ -1492,6 +1558,18 @@ if submitted:
         else:
             oos_status = "⚡ 轻微衰减 (可接受范围)"
         st.caption(f"OOS评估: {oos_status} | 训练{train_yrs:.1f}年 vs 测试{test_yrs:.1f}年 | 年化差{ann_decay:+.1f}%")
+
+        # 智能实盘建议卡片
+        if oos_m:
+            test_wr = oos_m.get('win_rate', 0)
+            test_dd = oos_m.get('max_drawdown', 100)
+            test_ann_val = test_ann
+            if test_ann_val > 80 and test_dd < 25:
+                st.success("💡 【优秀策略】样本外表现极佳, 建议: 1.复核手续费/滑点; 2.可先10%小资金实盘演练。")
+            elif test_wr < 35:
+                st.warning("⚠️ 【低胜率高盈亏比】依赖大行情拉动, 实盘可能面临较长连亏期, 请严格遵守锁仓冷却风控。")
+            if test_dd > 50:
+                st.error("🚨 【高回撤警告】测试集最大回撤超50%, 实盘前务必降低杠杆或收紧止损。")
 
     # === 权益曲线 ===
     st.subheader("💰 权益曲线")
