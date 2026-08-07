@@ -112,7 +112,9 @@ class AuditEngine:
 
         # 按年份拆分检查收益一致性
         df_t = pd.DataFrame(closed)
-        df_t['year'] = pd.to_datetime(df_t['close_time']).dt.year
+        # 安全解析: 处理带毫秒的时间格式
+        close_times = df_t['close_time'].astype(str).str.replace(r'\.\d+$', '', regex=True)
+        df_t['year'] = pd.to_datetime(close_times, format='mixed').dt.year
         yr_pnl = {}
         for yr, grp in df_t.groupby('year'):
             yr_pnl[str(yr)] = grp['pnl'].sum() if 'pnl' in grp.columns else 0

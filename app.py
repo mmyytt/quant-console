@@ -1742,9 +1742,16 @@ if submitted:
                  "盈亏%": f"{t.get('pnl_pct',0):+.2f}%"} for t in closed[-15:]]
         st.dataframe(pd.DataFrame(rows[::-1]), use_container_width=True, height=300)
 
-    # === AI 量化审计分析 (新增) ===
+    # === AI 量化审计分析 ===
+    if "show_audit" not in st.session_state:
+        st.session_state.show_audit = False
+    if "audit_cache" not in st.session_state:
+        st.session_state.audit_cache = None
+
     st.divider()
-    if st.button("🤖 AI量化审计分析", use_container_width=True, type="primary"):
+    c_audit, c_back = st.columns([2, 1])
+    if c_audit.button("🤖 AI量化审计分析", use_container_width=True, type="primary"):
+        st.session_state.show_audit = True
         with st.spinner("审计引擎分析中..."):
             from audit_engine import AuditEngine, StrategyScorer, AIReportGenerator
             audit_data = AuditEngine.audit(result, metrics)
@@ -1796,8 +1803,16 @@ if submitted:
                             st.markdown(ai_result['report'])
                         else:
                             st.caption(f"AI报告跳过: {ai_result.get('error','')}")
-            else:
-                st.caption("💡 配置AI API Key后可自动生成AI研究报告")
+            # 缓存审计结果到session_state
+            st.session_state.audit_cache = {
+                'audit_data': audit_data,
+                'prog_scores': prog_scores,
+                'total_score': total_score,
+                'metrics': metrics,
+            }
+            st.rerun()  # 刷新以显示审计视图
+    else:
+        st.caption("💡 配置AI API Key后可自动生成AI研究报告")
 
     # === AI 策略诊断 (保留原有) ===
     with st.expander("🤖 AI 策略诊断与优化意见", expanded=False):
@@ -1830,7 +1845,45 @@ if submitted:
                     else:
                         st.error(result["error"])
 
-else:
+# === 审计报告持久视图 ===
+if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
+    ac = st.session_state.audit_cache
+    st.subheader("📊 AI量化审计报告")
+    if st.button("↩️ 返回回测看板", use_container_width=True):
+        st.session_state.show_audit = False
+        st.rerun()
+
+    sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+    total_score = ac['total_score']
+    sc1.metric("总得分", f"{total_score}/70",
+               delta="优秀" if total_score >= 55 else ("良好" if total_score >= 40 else "待优化"))
+    ps = ac['prog_scores']
+    sc2.metric("收益能力", f"{ps['return_score']}/20")
+    sc3.metric("风险控制", f"{ps['risk_score']}/20")
+    sc4.metric("风险收益比", f"{ps['reward_risk_score']}/15")
+    sc5.metric("稳定性+真实", f"{ps['stability_score']+ps['realism_score']}/15")
+
+    ad = ac['audit_data']
+    with st.expander("📊 详细审计数据", expanded=True):
+        st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
+                   f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
+        st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
+                   f"Sharpe{ad['risk']['sharpe_ratio']:.3f} | "
+                   f"Sortino{ad['risk']['sortino_ratio']:.3f} | "
+                   f"Calmar{ad['risk']['calmar_ratio']:.3f}")
+        st.caption(f"交易: {ad['trading']['total_trades']}笔 | "
+                   f"胜率{ad['trading']['win_rate']:.1f}% | "
+                   f"做多{ad['trading']['long_trades']}/做空{ad['trading']['short_trades']} | "
+                   f"强平{ad['trading']['liquidation_count']}次")
+        st.caption(f"稳定性: 过拟合风险={ad['stability']['overfitting_risk']}")
+        st.caption(f"真实性: {ad['realism']['grade']}级 ({ad['realism']['realism_score']}/{ad['realism']['max_score']}项摩擦成本)")
+        summary = ad['summary']
+        if summary['strengths']: st.success("优势: " + "; ".join(summary['strengths']))
+        if summary['weaknesses']: st.warning("风险: " + "; ".join(summary['weaknesses']))
+
+    st.stop()
+
+elif not submitted:
     st.info("👆 左侧配置策略 & 指标 → 点【运行策略回测】")
 
     # === 图表专属周期切换器 (独立于回测周期) ===
