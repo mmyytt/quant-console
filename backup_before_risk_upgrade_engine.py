@@ -809,22 +809,15 @@ class BacktestEngineV2:
                 elif side == 'SHORT' and pos['lowest_price'] < ep * (1 - self.trailing_pct * 2):
                     pos['trailing_activated'] = True
 
-            # 爆仓检测: 浮亏超过保证金 或 触及维持保证金率
+            # 爆仓检测: 浮亏超过保证金 → 强平
             if exit_price is None and ep > 0:
-                liq_px = pos.get('liq_price', 0)
-                mmr = pos.get('mmr', 0.005)
                 if side == 'LONG':
                     u_pnl_pct = (bl - ep) / ep * self.leverage
-                    margin_ratio = (margin + margin * u_pnl_pct) / margin if margin > 0 else 0
-                    if u_pnl_pct <= -1.0 or (liq_px > 0 and bl <= liq_px) or margin_ratio < mmr:
-                        exit_price = max(bl, liq_px) if liq_px > 0 else bl
-                        exit_reason = 'LIQUIDATED'
                 else:
                     u_pnl_pct = (ep - bh) / ep * self.leverage
-                    margin_ratio = (margin + margin * u_pnl_pct) / margin if margin > 0 else 0
-                    if u_pnl_pct <= -1.0 or (liq_px > 0 and bh >= liq_px) or margin_ratio < mmr:
-                        exit_price = min(bh, liq_px) if liq_px > 0 else bh
-                        exit_reason = 'LIQUIDATED'
+                if u_pnl_pct <= -1.0:
+                    exit_price = bl if side == 'LONG' else bh
+                    exit_reason = 'LIQUIDATED'
 
             if exit_price is not None:
                 self._close(pos, exit_price, exit_reason, ts)
@@ -1134,20 +1127,12 @@ class BacktestEngineV2:
             else:
                 sl_price = fill_price + atr_val * atr_mult
 
-        # 维持保证金率 + 强平价格 (OKX标准: 维持保证金率0.5%)
-        mmr = 0.005
-        if side == 'LONG':
-            liq_price = fill_price * (1 - 1.0 / lev + mmr)
-        else:
-            liq_price = fill_price * (1 + 1.0 / lev - mmr)
-
         pos = {
             'coin': coin, 'side': side, 'entry': fill_price,
             'margin': margin, 'notional': notional,
             'alloc': alloc, 'regime': regime,
             'resonance_score': resonance_score,
             'tp_price': tp_price, 'sl_price': sl_price,
-            'liq_price': liq_price, 'mmr': mmr,
             'open_time': ts, 'cost': fee,
             'highest_price': fill_price, 'lowest_price': fill_price,
             'trailing_activated': False,
@@ -1390,41 +1375,6 @@ class PerformanceAnalyzer:
         metrics['buy_hold_return'] = round(
             (equity_arr[-1] / max(equity_arr[0], 1) - 1) * 100, 2
         )
-        # ---- Sortino比率 (下行标准差) ----
-        if len(returns) > 1:
-            downside_returns = returns[returns < 0]
-            if len(downside_returns) > 1 and np.std(downside_returns) > 0:
-                sortino = np.mean(returns) / np.std(downside_returns) * np.sqrt(365 * max(bars_per_day, 1))
-                metrics['sortino_ratio'] = round(sortino, 3)
-            else:
-                metrics['sortino_ratio'] = 0.0
-
-            # ---- Calmar比率 (年化收益/最大回撤) ----
-            dd_val = metrics.get('max_drawdown', 1.0)
-            if dd_val > 0 and metrics.get('annual_return', 0) > -100:
-                metrics['calmar_ratio'] = round(metrics['annual_return'] / dd_val, 3)
-            else:
-                metrics['calmar_ratio'] = 0.0
-
-            # ---- 最大连续亏损 ----
-            pnl_sequence = [t.get('pnl', 0) for t in closed] if 'closed' in dir() else []
-            if not pnl_sequence and trades:
-                pnl_sequence = [t.get('pnl', 0) for t in trades if t.get('pnl') is not None]
-            max_consecutive_losses = 0; current_streak = 0
-            for pnl in pnl_sequence:
-                if pnl <= 0: current_streak += 1
-                else: current_streak = 0
-                max_consecutive_losses = max(max_consecutive_losses, current_streak)
-            metrics['max_consecutive_losses'] = max_consecutive_losses
-
-            # ---- Recovery Factor (总收益/最大回撤金额) ----
-            total_pnl = sum(pnl_sequence) if pnl_sequence else 0
-            max_dd_amount = metrics.get('max_drawdown', 0) / 100.0 * initial
-            if max_dd_amount > 0:
-                metrics['recovery_factor'] = round(abs(total_pnl) / max_dd_amount, 2)
-            else:
-                metrics['recovery_factor'] = 0.0
-
         # 最终NaN清理
         for k in list(metrics.keys()):
             v = metrics[k]
@@ -1714,124 +1664,6 @@ class PortfolioManager:
         self.state = "UNLOCKED"
         self.pyramid_count = 0
         self._unlock_price = None
-
-
-# ============================================================
-# Walk Forward 验证 + 审计报告
-# ============================================================
-def walk_forward_validation(strategy, coin: str, timeframe: str = '4h',
-                             train_years: tuple = (2017, 2022),
-                             val_year: int = 2023,
-                             test_years: tuple = (2024, 2026),
-                             engine_kwargs: dict = None) -> dict:
-    """
-    前向滚动验证: 训练→验证→测试 三段独立评估。
-
-    Returns:
-        {'train': metrics, 'val': metrics, 'test': metrics, 'robustness': score}
-    """
-    de = DataEngine()
-    df = de.get_multi_timeframe(coin).get(timeframe)
-    if df is None or len(df) < 500:
-        return {'error': '数据不足'}
-
-    kw = engine_kwargs or {}
-    results = {}
-
-    for label, (start_yr, end_yr) in [
-        ('train', train_years), ('val', (val_year, val_year)),
-        ('test', test_years)
-    ]:
-        mask = (df.index.year >= start_yr) & (df.index.year <= end_yr)
-        df_seg = df[mask].copy()
-        if len(df_seg) < 200: continue
-        engine = BacktestEngineV2(**kw)
-        result = engine.run({coin: df_seg}, strategy)
-        metrics = PerformanceAnalyzer.analyze(result)
-        results[label] = {
-            'total_return': metrics.get('total_return', -100),
-            'annual_return': metrics.get('annual_return', -100),
-            'max_drawdown': metrics.get('max_drawdown', 100),
-            'sharpe': metrics.get('sharpe_ratio', 0),
-            'sortino': metrics.get('sortino_ratio', 0),
-            'win_rate': metrics.get('win_rate', 0),
-            'trades': metrics.get('total_trades', 0),
-        }
-
-    # 鲁棒性评分: 验证集和测试集表现
-    if 'train' in results and 'test' in results:
-        train_ann = results['train']['annual_return']
-        test_ann = results['test']['annual_return']
-        if train_ann > 0 and test_ann > 0:
-            robustness = min(test_ann / max(train_ann, 1), 2.0) * 100
-        elif test_ann > 0:
-            robustness = 80
-        else:
-            robustness = max(0, 50 + test_ann)
-        results['robustness'] = round(robustness, 1)
-    else:
-        results['robustness'] = 0
-
-    return results
-
-
-def generate_audit_report(result: dict, metrics: dict, coin: str, timeframe: str) -> str:
-    """生成回测审计报告文本"""
-    m = metrics
-    closed = result.get('closed_trades', result.get('trades', []))
-    liq_count = sum(1 for t in closed if t.get('reason', '') == 'LIQUIDATED')
-    total_fees = sum(abs(t.get('pnl', 0)) * 0.0005 * 2 for t in closed if t.get('pnl'))
-    funding_cost_est = len(result.get('equity_curve', [])) / 2 * 0.0001 * 10000  # 粗略估算
-
-    lines = [
-        "=" * 50, "  BACKTEST AUDIT REPORT", "=" * 50,
-        f"  Strategy: {result.get('strategy', '?')}",
-        f"  Coin: {coin} | Timeframe: {timeframe}",
-        f"  Period: {result.get('data_start','?')} ~ {result.get('data_end','?')}",
-        f"  Leverage: {result.get('leverage','?')}x",
-        "",
-        f"  --- Returns ---",
-        f"  Total Return: {m.get('total_return',0):+.1f}%",
-        f"  Annual Return: {m.get('annual_return',0):+.1f}%",
-        f"  Sortino Ratio: {m.get('sortino_ratio',0):.3f}",
-        f"  Calmar Ratio: {m.get('calmar_ratio',0):.3f}",
-        f"  Recovery Factor: {m.get('recovery_factor',0):.2f}",
-        "",
-        f"  --- Risk ---",
-        f"  Max Drawdown: {m.get('max_drawdown',0):.1f}%",
-        f"  Sharpe Ratio: {m.get('sharpe_ratio',0):.3f}",
-        f"  Max Consecutive Losses: {m.get('max_consecutive_losses',0)}",
-        f"  Liquidation Count: {liq_count}",
-        "",
-        f"  --- Trading ---",
-        f"  Total Trades: {m.get('total_trades',0)}",
-        f"  Win Rate: {m.get('win_rate',0):.1f}%",
-        f"  Avg Win: ${m.get('avg_win',0):+.2f} | Avg Loss: ${m.get('avg_loss',0):+.2f}",
-        f"  Profit Factor: {m.get('profit_factor',0):.2f}",
-        "",
-        f"  --- Costs (Est.) ---",
-        f"  Trading Fees: ${total_fees:.0f}",
-        f"  Funding Cost: ${funding_cost_est:.0f}",
-        f"  Slippage Rate: {SLIPPAGE*100:.2f}%",
-        "",
-        f"  --- REALISM SCORE ---",
-    ]
-
-    # 真实性评分
-    score = 85  # 基础分
-    if m.get('sortino_ratio', 0) > 0: score += 3
-    if m.get('calmar_ratio', 0) > 0: score += 2
-    if liq_count > 0: score -= 5  # 有强平说明风控严格
-    if total_fees > 0: score += 5
-    if funding_cost_est > 0: score += 5
-
-    if score >= 90: grade = "A: 接近真实交易环境"
-    elif score >= 75: grade = "B: 存在轻微理想化(如固定滑点假设)"
-    else: grade = "C: 结果参考价值有限, 需加强摩擦成本模拟"
-
-    lines.append(f"  Grade: {grade} (Score: {score}/100)")
-    lines.append("=" * 50)
-    return "\n".join(lines)
 
 
 # ============================================================

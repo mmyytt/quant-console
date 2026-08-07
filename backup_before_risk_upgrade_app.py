@@ -1479,11 +1479,6 @@ if submitted:
     c[3].metric("胜率", f"{metrics.get('win_rate',0):.1f}%")
     c[4].metric("盈亏比", f"{metrics.get('profit_factor',0):.2f}" if metrics.get('profit_factor') != float('inf') else "inf")
     c[5].metric("交易数", metrics.get('total_trades', 0))
-    # 新增风险指标
-    st.caption(f"Sortino: {metrics.get('sortino_ratio',0):.3f} | "
-               f"Calmar: {metrics.get('calmar_ratio',0):.3f} | "
-               f"最大连亏: {metrics.get('max_consecutive_losses',0)}笔 | "
-               f"Recovery Factor: {metrics.get('recovery_factor',0):.2f}")
     # 用真实时间戳算回测时长 (不依赖K线数)
     ec = result.get('equity_curve', [])
     if ec and len(ec) > 1:
