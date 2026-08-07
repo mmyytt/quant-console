@@ -1742,7 +1742,64 @@ if submitted:
                  "盈亏%": f"{t.get('pnl_pct',0):+.2f}%"} for t in closed[-15:]]
         st.dataframe(pd.DataFrame(rows[::-1]), use_container_width=True, height=300)
 
-    # === AI 策略诊断 ===
+    # === AI 量化审计分析 (新增) ===
+    st.divider()
+    if st.button("🤖 AI量化审计分析", use_container_width=True, type="primary"):
+        with st.spinner("审计引擎分析中..."):
+            from audit_engine import AuditEngine, StrategyScorer, AIReportGenerator
+            audit_data = AuditEngine.audit(result, metrics)
+            prog_scores = StrategyScorer.score(audit_data)
+            total_score = prog_scores['total_program_score']
+
+            # 得分卡片
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            sc1.metric("总得分", f"{total_score}/70",
+                       delta="优秀" if total_score >= 55 else ("良好" if total_score >= 40 else "待优化"))
+            sc2.metric("收益能力", f"{prog_scores['return_score']}/20")
+            sc3.metric("风险控制", f"{prog_scores['risk_score']}/20")
+            sc4.metric("风险收益比", f"{prog_scores['reward_risk_score']}/15")
+            sc5.metric("稳定性+真实", f"{prog_scores['stability_score']+prog_scores['realism_score']}/15")
+
+            # 审计详情
+            with st.expander("📊 详细审计数据", expanded=True):
+                ad = audit_data
+                st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
+                           f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
+                st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
+                           f"Sharpe{ad['risk']['sharpe_ratio']:.3f} | "
+                           f"Sortino{ad['risk']['sortino_ratio']:.3f} | "
+                           f"Calmar{ad['risk']['calmar_ratio']:.3f}")
+                st.caption(f"交易: {ad['trading']['total_trades']}笔 | "
+                           f"胜率{ad['trading']['win_rate']:.1f}% | "
+                           f"做多{ad['trading']['long_trades']}/做空{ad['trading']['short_trades']} | "
+                           f"强平{ad['trading']['liquidation_count']}次")
+                st.caption(f"稳定性: 过拟合风险={ad['stability']['overfitting_risk']}")
+                st.caption(f"真实性: {ad['realism']['grade']}级 ({ad['realism']['realism_score']}/{ad['realism']['max_score']}项摩擦成本)")
+
+                # 优势/劣势
+                summary = ad['summary']
+                if summary['strengths']:
+                    st.success("优势: " + "; ".join(summary['strengths']))
+                if summary['weaknesses']:
+                    st.warning("风险: " + "; ".join(summary['weaknesses']))
+
+            # AI报告 (可选)
+            ai_k = os.environ.get("AI_API_KEY", "")
+            if ai_k:
+                with st.expander("🧠 AI 研究报告", expanded=False):
+                    with st.spinner("AI分析中..."):
+                        ai_result = AIReportGenerator.build_report(
+                            ai_k, audit_data, metrics,
+                            "DeepSeek-V3 (推荐)"
+                        )
+                        if ai_result.get('success'):
+                            st.markdown(ai_result['report'])
+                        else:
+                            st.caption(f"AI报告跳过: {ai_result.get('error','')}")
+            else:
+                st.caption("💡 配置AI API Key后可自动生成AI研究报告")
+
+    # === AI 策略诊断 (保留原有) ===
     with st.expander("🤖 AI 策略诊断与优化意见", expanded=False):
         if st.button("🧠 生成 AI 诊断报告", use_container_width=True):
             ai_k = os.environ.get("AI_API_KEY", "")
