@@ -1577,21 +1577,44 @@ if "鲁棒性" in st.session_state.active_tab:
         total_all = sum(len(SWEEP_DIMENSIONS[d]['values']) for d in selected_dims)
         global_counter = [0]
 
+        # DEBUG: 显示当前 run_sweep 函数签名
+        import inspect as _inspect
+        with st.expander("🔧 调试信息", expanded=False):
+            st.code(f"run_sweep 签名: {_inspect.signature(RobustnessLab.run_sweep)}\n"
+                    f"DynamicStrategy 类型: {type(DynamicStrategy)}\n"
+                    f"Git commit: {_git_hash}", language=None)
+
         for di, dim in enumerate(selected_dims):
             dim_def = SWEEP_DIMENSIONS[dim]
             st.caption(f"正在测试: **{dim_def['label']}** ({di+1}/{len(selected_dims)})")
 
-            def make_progress(dim_name):
+            def make_progress(dim_label):
                 def cb(cur, total, label):
                     global_counter[0] += 1
                     progress_bar.progress(min(global_counter[0] / total_all, 1.0))
-                    status_text.caption(f"🔬 {dim_def['label']}: {label} ({cur}/{total})")
+                    status_text.caption(f"🔬 {dim_label}: {label} ({cur}/{total})")
                 return cb
 
-            sweeps = RobustnessLab.run_sweep(base_config, dim,
-                                                   progress_callback=make_progress(dim),
-                                                   strategy_class=DynamicStrategy)
-            all_results[dim] = sweeps
+            try:
+                sweeps = RobustnessLab.run_sweep(base_config, dim,
+                                                       progress_callback=make_progress(dim_def['label']),
+                                                       strategy_class=DynamicStrategy)
+                all_results[dim] = sweeps
+            except TypeError as te:
+                st.error(f"❌ TypeError 调用 run_sweep 失败!")
+                st.code(f"维度: {dim}\n"
+                        f"错误: {te}\n"
+                        f"run_sweep 签名: {_inspect.signature(RobustnessLab.run_sweep)}\n"
+                        f"检查: strategy_class 参数是否存在? "
+                        f"{'strategy_class' in _inspect.signature(RobustnessLab.run_sweep).parameters}")
+                import traceback as _tb
+                st.code(_tb.format_exc())
+                all_results[dim] = [{'label': 'ERROR', 'error': str(te), 'metrics': None}]
+            except Exception as e2:
+                st.error(f"❌ 异常调用 run_sweep: {type(e2).__name__}: {e2}")
+                import traceback as _tb
+                st.code(_tb.format_exc())
+                all_results[dim] = [{'label': 'ERROR', 'error': str(e2), 'metrics': None}]
 
         progress_bar.progress(1.0)
         status_text.caption("✅ 扫描完成！")
@@ -1627,7 +1650,14 @@ if "鲁棒性" in st.session_state.active_tab:
                 mat = RobustnessLab.format_matrix(dim, sweeps)
                 st.dataframe(mat.set_index('参数'), use_container_width=True)
 
-                # 迷你折线图: 收益随参数变化
+                # 如果存在错误，展示详细traceback
+                errors_in_dim = [s for s in sweeps if s.get('error')]
+                if errors_in_dim:
+                    for ei, es in enumerate(errors_in_dim):
+                        with st.expander(f"🐛 错误详情: {es['label']}", expanded=False):
+                            st.code(es.get('traceback', es['error']))
+
+                # 迷你折线图: 收益随参数变化（跳过错误项）
                 returns = [s['total_return'] for s in sweeps if not s.get('error')]
                 labels = [s['label'] for s in sweeps if not s.get('error')]
                 if len(returns) >= 2:
