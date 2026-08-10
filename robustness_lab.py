@@ -72,7 +72,7 @@ class RobustnessLab:
 
     @staticmethod
     def run_sweep(base_config: Dict, dimension: str,
-                  progress_callback=None) -> List[Dict]:
+                  progress_callback=None, strategy_class=None) -> List[Dict]:
         """
         对单个维度的一组参数值，逐个运行完整回测。
 
@@ -87,6 +87,7 @@ class RobustnessLab:
             }
             dimension: 'leverage'|'ema'|'atr_stop'|'fibonacci'|'volume'
             progress_callback: callable(current, total, label) 或 None
+            strategy_class: DynamicStrategy 类引用，用于避免 Streamlit 环境下的自导入问题
 
         Returns:
             [{label, params, metrics, result_summary}, ...]
@@ -102,7 +103,7 @@ class RobustnessLab:
 
             try:
                 cfg = RobustnessLab._build_config(base_config, dimension, val)
-                sweep_result = RobustnessLab._run_single(cfg)
+                sweep_result = RobustnessLab._run_single(cfg, strategy_class=strategy_class)
                 sweep_result['label'] = label
                 sweep_result['param_value'] = val
                 results.append(sweep_result)
@@ -173,17 +174,52 @@ class RobustnessLab:
         return cfg
 
     @staticmethod
-    def _run_single(cfg: Dict) -> Dict:
-        """运行单次回测，返回指标摘要"""
-        from app import DynamicStrategy  # 延迟导入避免循环依赖
+    def _run_single(cfg: Dict, strategy_class=None) -> Dict:
+        """运行单次回测，返回指标摘要
 
+        Args:
+            cfg: 回测配置字典
+            strategy_class: DynamicStrategy 类引用。在 Streamlit 环境(从app.py调用)
+                           必须显式传入，避免 `from app import DynamicStrategy` 触发
+                           自导入导致 ScriptRunContext 丢失。外部脚本可不传，自动导入。
+        """
+        # ── 日志: 引擎参数 ──
         ek = cfg['engine_kwargs']
+        sel = cfg['selected_indicators']
+
+        # ── 获取 DynamicStrategy 类 ──
+        if strategy_class is not None:
+            DynamicStrategyCls = strategy_class
+        else:
+            try:
+                import sys
+                # 如果 app 已在 sys.modules 中（Streamlit 环境），直接引用避免重导入
+                if 'app' in sys.modules:
+                    DynamicStrategyCls = sys.modules['app'].DynamicStrategy
+                else:
+                    from app import DynamicStrategy as DynamicStrategyCls
+            except Exception as import_err:
+                raise RuntimeError(
+                    f"[鲁棒性测试] 无法导入 DynamicStrategy。"
+                    f"请从 app.py 调用时传入 strategy_class 参数。"
+                    f"原始错误: {import_err}"
+                )
+
+        # ── 日志: 关键测试参数 ──
+        indicator_summary = {}
+        for name, icfg in sel.items():
+            if isinstance(icfg, dict) and icfg.get('enabled') and 'params' in icfg:
+                indicator_summary[name] = icfg['params']
+
+        # ── 创建引擎和策略 ──
         engine = BacktestEngineV2(**ek)
-        strategy = DynamicStrategy(
-            selected=cfg['selected_indicators'],
+        strategy = DynamicStrategyCls(
+            selected=sel,
             use_and=cfg['use_and'],
             mf_params=cfg['mf_params'],
         )
+
+        # ── 运行回测 ──
         result = engine.run({cfg['coin']: cfg['df']}, strategy)
         metrics = PerformanceAnalyzer.analyze(result)
 
@@ -282,9 +318,16 @@ class RobustnessLab:
         rows = []
         for s in sweep_results:
             if s.get('error'):
+                # 显示真实错误原因（截断到60字符）
+                err_msg = s['error'][:60] + ('...' if len(s['error']) > 60 else '')
                 rows.append({
-                    '参数': s['label'], '总收益%': 'ERROR', '年化收益%': 'ERROR',
-                    '最大回撤%': 'ERROR', '夏普': 'ERROR', '胜率%': 'ERROR', '交易次数': 'ERROR',
+                    '参数': s['label'],
+                    '总收益%': f'ERR: {err_msg}',
+                    '年化收益%': '-',
+                    '最大回撤%': '-',
+                    '夏普': '-',
+                    '胜率%': '-',
+                    '交易次数': '-',
                 })
                 continue
             rows.append({
@@ -336,7 +379,8 @@ class RobustnessLab:
 
 def run_full_sweep(base_config: Dict,
                    dimensions: List[str] = None,
-                   progress_callback=None) -> Dict:
+                   progress_callback=None,
+                   strategy_class=None) -> Dict:
     """
     全维度参数扫描入口。
 
@@ -361,7 +405,9 @@ def run_full_sweep(base_config: Dict,
                 progress_callback(dim, di + 1, len(dimensions),
                                   {'current': cur, 'total': total, 'label': label})
 
-        sweeps = RobustnessLab.run_sweep(base_config, dim, progress_callback=dim_progress)
+        sweeps = RobustnessLab.run_sweep(base_config, dim,
+                                          progress_callback=dim_progress,
+                                          strategy_class=strategy_class)
         all_results[dim] = sweeps
 
     stability = RobustnessLab.stability_score(all_results)

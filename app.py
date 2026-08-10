@@ -1588,7 +1588,9 @@ if "鲁棒性" in st.session_state.active_tab:
                     status_text.caption(f"🔬 {dim_def['label']}: {label} ({cur}/{total})")
                 return cb
 
-            sweeps = RobustnessLab.run_sweep(base_config, dim, progress_callback=make_progress(dim))
+            sweeps = RobustnessLab.run_sweep(base_config, dim,
+                                                   progress_callback=make_progress(dim),
+                                                   strategy_class=DynamicStrategy)
             all_results[dim] = sweeps
 
         progress_bar.progress(1.0)
