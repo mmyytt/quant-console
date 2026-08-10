@@ -1395,7 +1395,10 @@ if "AI" in st.session_state.active_tab:
         # 构建实时上下文
         try:
             df_ctx = load_cached_15min(coin)
-            df_ctx.index = pd.to_datetime(df_ctx.index).tz_localize(None)
+            if not isinstance(df_ctx.index, pd.DatetimeIndex):
+                df_ctx.index = pd.to_datetime(df_ctx.index)
+            if hasattr(df_ctx.index, 'tz') and df_ctx.index.tz is not None:
+                df_ctx.index = df_ctx.index.tz_localize(None)
             px = float(df_ctx['close'].iloc[-1])
             ind_ctx = {}
             for name, cfg in st.session_state.selected_indicators.items():
@@ -1527,12 +1530,22 @@ if "鲁棒性" in st.session_state.active_tab:
             de = DataEngine()
             dfs = de.get_multi_timeframe(last_coin)
             df_raw = dfs.get(last_tf, dfs['4h'])
+            # ── 日期索引标准化 (防御代码) ──
             if not isinstance(df_raw.index, pd.DatetimeIndex):
                 df_raw.index = pd.to_datetime(df_raw.index)
-            # 应用日期过滤
-            if 'date_range' in st.session_state:
-                dr = st.session_state.date_range
-                df_raw = df_raw[(df_raw.index >= pd.Timestamp(dr[0])) & (df_raw.index <= pd.Timestamp(dr[1]))]
+            # 去除时区信息 (确保与 pd.Timestamp 比较兼容)
+            if hasattr(df_raw.index, 'tz') and df_raw.index.tz is not None:
+                df_raw.index = df_raw.index.tz_localize(None)
+            df_raw = df_raw.sort_index()
+            # ── 应用日期过滤 ──
+            dr = st.session_state.get('date_range')
+            if dr and dr[0] and dr[1]:
+                try:
+                    start_date = pd.Timestamp(dr[0])
+                    end_date = pd.Timestamp(dr[1])
+                    df_raw = df_raw.loc[start_date:end_date]
+                except Exception as e:
+                    st.warning(f"日期过滤失败: {e}，使用全部数据")
             if df_raw.empty:
                 st.error("数据加载为空，请检查日期范围。")
                 st.stop()
@@ -1749,19 +1762,27 @@ if submitted:
         de = DataEngine()
         all_tf = de.get_multi_timeframe(coin)
         df = all_tf.get(timeframe, all_tf['4h'])
+        # ── 日期索引标准化 (防御代码) ──
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        if hasattr(df.index, 'tz') and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        df = df.sort_index()
         # 数据范围校验
         st.caption(f"已加载 {timeframe} 数据: {len(df):,}根 | {df.index[0]} ~ {df.index[-1]}")
 
         # 时间范围过滤
         dr = st.session_state.date_range
-        if dr:
-            # 向前多取warmup_bars根用于指标预热
-            warmup_bars = max(200, int(len(df) * 0.05))
-            dr_start = pd.Timestamp(dr[0])
-            dr_end = pd.Timestamp(dr[1])
-            # 先取warmup前+目标区间, 再去warmup
-            warmup_start = dr_start - pd.Timedelta(hours=warmup_bars * {'5m':5/60,'15m':0.25,'1h':1,'4h':4,'1d':24}.get(timeframe,4))
-            df = df.loc[warmup_start:dr_end]
+        if dr and dr[0] and dr[1]:
+            try:
+                # 向前多取warmup_bars根用于指标预热
+                warmup_bars = max(200, int(len(df) * 0.05))
+                dr_start = pd.Timestamp(dr[0])
+                dr_end = pd.Timestamp(dr[1])
+                warmup_start = dr_start - pd.Timedelta(hours=warmup_bars * {'5m':5/60,'15m':0.25,'1h':1,'4h':4,'1d':24}.get(timeframe,4))
+                df = df.loc[warmup_start:dr_end]
+            except Exception as e:
+                st.warning(f"日期过滤失败: {e}，使用全部数据")
         if len(df) < 200:
             st.error(f"数据不足 ({len(df)}根), 请扩大时间范围"); st.stop()
 
@@ -2513,6 +2534,8 @@ if submitted:
                 df_wf = all_tf_wf.get(timeframe, all_tf_wf['4h'])
                 if not isinstance(df_wf.index, pd.DatetimeIndex):
                     df_wf.index = pd.to_datetime(df_wf.index)
+                if hasattr(df_wf.index, 'tz') and df_wf.index.tz is not None:
+                    df_wf.index = df_wf.index.tz_localize(None)
                 data_start_yr = df_wf.index.min().year
                 data_end_yr = df_wf.index.max().year
                 # 确保至少有4年数据做滚动窗口
@@ -2849,10 +2872,16 @@ elif not submitted:
     try:
         # 缓存加载 + 缓存重采样
         df_15m = load_cached_15min(coin)
-        df_15m.index = pd.to_datetime(df_15m.index).tz_localize(None)
-        dr = st.session_state.date_range
-        if dr:
-            df_15m = df_15m.loc[dr[0]:dr[1]]
+        if not isinstance(df_15m.index, pd.DatetimeIndex):
+            df_15m.index = pd.to_datetime(df_15m.index)
+        if hasattr(df_15m.index, 'tz') and df_15m.index.tz is not None:
+            df_15m.index = df_15m.index.tz_localize(None)
+        dr = st.session_state.get('date_range')
+        if dr and dr[0] and dr[1]:
+            try:
+                df_15m = df_15m.loc[pd.Timestamp(dr[0]):pd.Timestamp(dr[1])]
+            except Exception:
+                pass  # 日期过滤失败则使用全部数据
 
         chart_period = st.session_state.chart_period
         df_pv = resample_cached(df_15m, chart_period)
