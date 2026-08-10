@@ -1715,6 +1715,186 @@ if "鲁棒性" in st.session_state.active_tab:
         else:
             st.info("👆 选择测试维度后，点击上方按钮开始鲁棒性分析。")
 
+    # ── 参数组合优化 (独立于单维度扫描) ──
+    if "鲁棒性" in st.session_state.active_tab:
+        from robustness_lab import PARAM_COMBO_GRID
+
+        st.divider()
+        st.subheader("🧬 参数组合优化")
+        st.caption(
+            "单参数最优组合后收益可能下降，说明参数存在**交互影响**。"
+            "本模块对 EMA、Fibonacci、成交量、杠杆进行多参数组合网格扫描，"
+            "通过 IS/OOS 双段验证寻找长期可复制的稳定参数区域。"
+        )
+
+        has_backtest_for_combo = ("last_result" in st.session_state and
+                                   "last_engine_kwargs" in st.session_state and
+                                   "last_coin" in st.session_state)
+
+        if not has_backtest_for_combo:
+            st.warning("⚠️ 请先在回测看板运行一次回测。")
+        else:
+            combo_c1, combo_c2, combo_c3 = st.columns(3)
+            with combo_c1:
+                oos_ratio = st.slider("OOS 数据比例", 0.1, 0.5, 0.3, 0.05,
+                                      help="最后N%的数据作为样本外验证集")
+            with combo_c2:
+                min_trades = st.number_input("最少交易次数", 3, 20, 5,
+                                             help="低于此交易次数的组合将被跳过")
+            with combo_c3:
+                total_combos_preview = 1
+                for d in PARAM_COMBO_GRID:
+                    total_combos_preview *= len(PARAM_COMBO_GRID[d]['values'])
+                st.metric("组合总数", total_combos_preview,
+                          delta=f"约{total_combos_preview * 2 * 4}~{total_combos_preview * 2 * 6}秒")
+
+            run_combo = st.button("🧬 开始组合优化扫描", use_container_width=True, type="primary",
+                                  key="run_combo_btn")
+
+            if run_combo:
+                # 加载数据
+                with st.spinner("加载数据..."):
+                    de2 = DataEngine()
+                    dfs2 = de2.get_multi_timeframe(st.session_state.last_coin)
+                    tf2 = st.session_state.last_timeframe
+                    df_raw2 = dfs2.get(tf2, dfs2['4h'])
+                    if not isinstance(df_raw2.index, pd.DatetimeIndex):
+                        df_raw2.index = pd.to_datetime(df_raw2.index)
+                    if hasattr(df_raw2.index, 'tz') and df_raw2.index.tz is not None:
+                        df_raw2.index = df_raw2.index.tz_localize(None)
+                    df_raw2 = df_raw2.sort_index()
+                    dr2 = st.session_state.get('date_range')
+                    if dr2 and dr2[0] and dr2[1]:
+                        try:
+                            df_raw2 = df_raw2.loc[pd.Timestamp(dr2[0]):pd.Timestamp(dr2[1])]
+                        except Exception:
+                            pass
+
+                last_ek2 = st.session_state.last_engine_kwargs
+                last_sel2 = st.session_state.selected_indicators
+
+                base_config2 = {
+                    'engine_kwargs': dict(last_ek2),
+                    'selected_indicators': copy.deepcopy(last_sel2),
+                    'use_and': st.session_state.get('use_and', True) if 'use_and' in st.session_state else True,
+                    'mf_params': {
+                        'enabled': last_sel2.get('_regime_filter', True),
+                        'ema_w': st.session_state.get('ema_w', 0.40),
+                        'adx_w': st.session_state.get('adx_w', 0.35),
+                        'adx_th': st.session_state.get('adx_th', 25),
+                        'bull_th': st.session_state.get('bull_th', 0.30),
+                    },
+                    'coin': st.session_state.last_coin,
+                    'df': df_raw2,
+                }
+
+                combo_progress = st.progress(0)
+                combo_status = st.empty()
+
+                def combo_progress_cb(cur, total, label):
+                    combo_progress.progress(min(cur / total, 1.0))
+                    combo_status.caption(f"🔬 {cur}/{total}: {label}")
+
+                try:
+                    combo_result = RobustnessLab.combo_optimize(
+                        base_config2,
+                        param_grid=PARAM_COMBO_GRID,
+                        oos_ratio=oos_ratio,
+                        min_trades=min_trades,
+                        progress_callback=combo_progress_cb,
+                        strategy_class=DynamicStrategy,
+                    )
+
+                    combo_progress.progress(1.0)
+                    combo_status.caption("✅ 组合优化完成！")
+
+                    st.markdown("---")
+                    st.subheader("📊 组合优化结果")
+
+                    top10 = combo_result.get('top10', [])
+                    all_combo = combo_result.get('combinations', [])
+
+                    if top10:
+                        # 统计
+                        tc1, tc2, tc3, tc4 = st.columns(4)
+                        with tc1:
+                            st.metric("扫描组合", combo_result.get('total_combos', '?'))
+                        with tc2:
+                            st.metric("有效组合", len(all_combo))
+                        with tc3:
+                            rec_count = len([t for t in top10 if 'recommended' in t.get('flags', [])])
+                            st.metric("⭐推荐实盘", rec_count)
+                        with tc4:
+                            stable_count = len([t for t in top10 if 'stable' in t.get('flags', [])])
+                            st.metric("🟢稳定区域", stable_count)
+
+                        # Top 10 表格
+                        st.markdown("### 🏆 Top 10 稳定组合")
+                        table_df = RobustnessLab.combo_format_table(all_combo, top_n=10)
+                        st.dataframe(table_df.set_index('排名'), use_container_width=True,
+                                     column_config={
+                                         '标记': st.column_config.TextColumn('标记', width='small'),
+                                         '总分': st.column_config.ProgressColumn('总分', min_value=0, max_value=100, format='%.0f'),
+                                     })
+
+                        # 评分维度说明
+                        with st.expander("📐 评分规则说明", expanded=False):
+                            st.markdown("""
+                            | 维度 | 权重 | 说明 |
+                            |------|------|------|
+                            | 收益能力 | 40% | IS收益 + OOS收益 标准化 |
+                            | 风险控制 | 30% | 最大回撤(低) + Sharpe(高) + Calmar(高) |
+                            | 稳定性 | 20% | IS/OOS收益一致性 + 胜率稳定性 |
+                            | 交易活跃度 | 10% | 交易次数适中(避免过拟合) |
+                            """)
+
+                        # 标记图例
+                        with st.expander("🏷️ 标记说明", expanded=False):
+                            st.markdown("""
+                            - ⭐ **推荐实盘**: 综合评分≥70 + 稳定区域 + OOS为正
+                            - 🟢 **稳定区域**: IS和OOS均为正且差异<30%
+                            - 🟠 **过拟合嫌疑**: IS收益 > OOS收益 × 2
+                            - 🔴 **严重过拟合**: IS为正但OOS为负
+                            """)
+
+                        # 收益对比图
+                        with st.expander("📈 IS vs OOS 收益对比 (Top10)", expanded=True):
+                            if top10:
+                                chart_is = [t.get('is_return', 0) for t in top10]
+                                chart_oos = [t.get('oos_return', 0) for t in top10]
+                                chart_labels = [t['label'][:30] for t in top10]
+                                chart_df = pd.DataFrame({
+                                    'IS收益%': chart_is,
+                                    'OOS收益%': chart_oos,
+                                }, index=chart_labels)
+                                st.bar_chart(chart_df, use_container_width=True, height=300)
+
+                        # 完整报告
+                        with st.expander("📝 完整组合优化报告", expanded=False):
+                            report = RobustnessLab.combo_generate_report(combo_result)
+                            st.markdown(report)
+
+                    else:
+                        st.warning("⚠️ 没有找到有效的参数组合。请检查: 1) 数据是否足够 2) 交易次数阈值是否过高")
+
+                    # 缓存
+                    st.session_state.combo_result = combo_result
+
+                except Exception as combo_err:
+                    st.error(f"❌ 组合优化异常: {type(combo_err).__name__}: {combo_err}")
+                    import traceback as _tb2
+                    st.code(_tb2.format_exc())
+
+            # 显示缓存结果
+            elif 'combo_result' in st.session_state and st.session_state.combo_result:
+                cr = st.session_state.combo_result
+                top10_cached = cr.get('top10', [])
+                if top10_cached:
+                    st.info("📋 显示上次组合优化结果（缓存在会话中）")
+                    table_df2 = RobustnessLab.combo_format_table(cr.get('combinations', []), top_n=10)
+                    st.dataframe(table_df2.set_index('排名'), use_container_width=True)
+                    st.caption("💡 点击上方「开始组合优化扫描」可重新运行")
+
     st.stop()
 
 
