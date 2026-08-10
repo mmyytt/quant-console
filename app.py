@@ -1622,26 +1622,33 @@ if "鲁棒性" in st.session_state.active_tab:
         # 稳定性评分
         stability = RobustnessLab.stability_score(all_results)
 
+        # DEBUG: 输出 stability 结构
+        with st.expander("🔧 stability 结构调试", expanded=False):
+            st.write(f"stability.keys() = {list(stability.keys())}")
+            st.write(f"overall = {stability.get('overall', 'MISSING')}")
+            st.write(f"dim_scores keys = {list(stability.get('dim_scores', {}).keys())}")
+
         # ── 结果展示 ──
         st.markdown("---")
         st.subheader("📊 结果分析")
 
-        # 综合评分卡片
-        overall = stability['overall']
+        # 综合评分卡片 — 安全访问
+        overall = stability.get('overall', 'unknown')
+        stability_summary = stability.get('summary', '')
         if overall == 'robust':
-            st.success(f"✅ **综合评级: 策略鲁棒** — {stability['summary']}")
+            st.success(f"✅ **综合评级: 策略鲁棒** — {stability_summary}")
         elif overall in ('overfit_risk', 'overfit'):
-            st.error(f"⚠️ **综合评级: 过拟合风险** — {stability['summary']}")
+            st.error(f"⚠️ **综合评级: 过拟合风险** — {stability_summary}")
         elif overall == 'sensitive':
-            st.warning(f"⚡ **综合评级: 参数敏感** — {stability['summary']}")
+            st.warning(f"⚡ **综合评级: 参数敏感** — {stability_summary}")
         else:
-            st.info(f"🔶 **综合评级: 中等敏感** — {stability['summary']}")
+            st.info(f"🔶 **综合评级: 中等敏感** — {stability_summary}")
 
         # 每维度结果
         for dim in selected_dims:
             dim_def = SWEEP_DIMENSIONS[dim]
             sweeps = all_results[dim]
-            ds = stability['dim_scores'].get(dim, {})
+            ds = (stability.get('dim_scores') or {}).get(dim, {}) if isinstance(stability.get('dim_scores'), dict) else {}
 
             with st.expander(f"📐 {dim_def['label']} — {ds.get('verdict','?')} | "
                             f"最优={ds.get('best','?')}({ds.get('best_return',0):+.1f}%) | "
@@ -1691,22 +1698,23 @@ if "鲁棒性" in st.session_state.active_tab:
         if 'lab_results' in st.session_state:
             st.info("📋 显示上次测试结果（缓存在内存中，刷新页面会丢失）")
             lr = st.session_state.lab_results
-            all_results = lr['all_results']
-            stability = lr['stability']
+            all_results = lr.get('all_results', {})
+            stability = lr.get('stability', {})
 
-            overall = stability['overall']
+            overall = stability.get('overall', 'unknown')
+            stability_summary = stability.get('summary', '')
             if overall == 'robust':
-                st.success(f"✅ **综合评级: 策略鲁棒** — {stability['summary']}")
+                st.success(f"✅ **综合评级: 策略鲁棒** — {stability_summary}")
             elif overall in ('overfit_risk', 'overfit'):
-                st.error(f"⚠️ **综合评级: 过拟合风险** — {stability['summary']}")
+                st.error(f"⚠️ **综合评级: 过拟合风险** — {stability_summary}")
             else:
-                st.warning(f"⚡/🔶 **综合评级: 敏感** — {stability['summary']}")
+                st.warning(f"⚡/🔶 **综合评级: 敏感** — {stability_summary}")
 
             for dim in all_results.keys():
-                dim_def = SWEEP_DIMENSIONS[dim]
-                sweeps = all_results[dim]
-                ds = stability['dim_scores'].get(dim, {})
-                with st.expander(f"📐 {dim_def['label']} — {ds.get('verdict','?')}", expanded=False):
+                dim_def = SWEEP_DIMENSIONS.get(dim, {})
+                sweeps = all_results.get(dim, [])
+                ds = stability.get('dim_scores', {}).get(dim, {}) if isinstance(stability.get('dim_scores'), dict) else {}
+                with st.expander(f"📐 {dim_def.get('label', dim)} — {ds.get('verdict','?')}", expanded=False):
                     mat = RobustnessLab.format_matrix(dim, sweeps)
                     st.dataframe(mat.set_index('参数'), use_container_width=True)
 

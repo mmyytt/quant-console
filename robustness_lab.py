@@ -278,18 +278,37 @@ class RobustnessLab:
             all_results: {dimension_name: [{label, metrics, ...}, ...]}
 
         Returns:
-            {dim_scores: {dim: {cv, best, worst, range_pct, verdict}}, overall: str, summary: str}
+            {dim_scores: {dim: {cv, best, worst, range_pct, verdict}},
+             overall: str, summary: str}
+            — overall 字段始终存在，不会缺失。
         """
+        # 防御: 空或非字典输入
+        if not isinstance(all_results, dict) or not all_results:
+            return {
+                'dim_scores': {},
+                'overall': 'insufficient_data',
+                'summary': '无有效回测数据，无法生成稳定性评估。请先运行回测。',
+            }
+
         dim_scores = {}
         for dim, sweeps in all_results.items():
-            returns = [s.get('total_return', 0) for s in sweeps if s.get('metrics')]
+            if not isinstance(sweeps, list):
+                dim_scores[dim] = {'verdict': '数据异常', 'cv': 0, 'range_pct': 0}
+                continue
+
+            returns = [s.get('total_return', 0) for s in sweeps
+                      if isinstance(s, dict) and s.get('metrics')]
             if len(returns) < 2:
                 dim_scores[dim] = {'verdict': '数据不足', 'cv': 0, 'range_pct': 0}
                 continue
 
-            mean_r = statistics.mean(returns)
-            std_r = statistics.stdev(returns) if len(returns) > 1 else 0
-            cv = abs(std_r / mean_r) if abs(mean_r) > 0.01 else abs(std_r / 1.0)
+            try:
+                mean_r = statistics.mean(returns)
+                std_r = statistics.stdev(returns) if len(returns) > 1 else 0
+                cv = abs(std_r / mean_r) if abs(mean_r) > 0.01 else abs(std_r / 1.0)
+            except Exception:
+                dim_scores[dim] = {'verdict': '计算异常', 'cv': 0, 'range_pct': 0}
+                continue
 
             best_idx = returns.index(max(returns))
             worst_idx = returns.index(min(returns))
@@ -307,25 +326,30 @@ class RobustnessLab:
             dim_scores[dim] = {
                 'cv': round(cv, 3),
                 'range_pct': round(range_pct, 1),
-                'best': sweeps[best_idx]['label'] if best_idx < len(sweeps) else '?',
-                'worst': sweeps[worst_idx]['label'] if worst_idx < len(sweeps) else '?',
+                'best': sweeps[best_idx].get('label', '?') if best_idx < len(sweeps) else '?',
+                'worst': sweeps[worst_idx].get('label', '?') if worst_idx < len(sweeps) else '?',
                 'best_return': round(returns[best_idx], 2),
                 'worst_return': round(returns[worst_idx], 2),
                 'verdict': verdict,
                 'mean_return': round(mean_r, 2),
             }
 
-        # 综合判断
-        verdicts = [s['verdict'] for s in dim_scores.values()]
-        if all(v == 'robust' for v in verdicts):
+        # 综合判断 — overall 字段始终存在
+        verdicts = [s.get('verdict', '未知') for s in dim_scores.values()]
+        if not verdicts:
+            overall = 'insufficient_data'
+            summary = '所有维度数据不足，无法生成综合评级。'
+        elif all(v == 'robust' for v in verdicts):
             overall = 'robust'
             summary = '策略对参数变化不敏感，多个参数区域均有效，具有良好鲁棒性。'
         elif any(v == 'overfit' for v in verdicts):
-            overfit_dims = [SWEEP_DIMENSIONS[d]['label'] for d, s in dim_scores.items() if s['verdict'] == 'overfit']
+            overfit_dims = [SWEEP_DIMENSIONS.get(d, {}).get('label', d)
+                           for d, s in dim_scores.items() if s.get('verdict') == 'overfit']
             overall = 'overfit_risk'
             summary = f'参数小幅变化导致收益大幅变化，可能过拟合。敏感维度: {", ".join(overfit_dims)}。建议简化策略或增大样本量。'
         elif any(v == 'sensitive' for v in verdicts):
-            sensitive_dims = [SWEEP_DIMENSIONS[d]['label'] for d, s in dim_scores.items() if s['verdict'] == 'sensitive']
+            sensitive_dims = [SWEEP_DIMENSIONS.get(d, {}).get('label', d)
+                             for d, s in dim_scores.items() if s.get('verdict') == 'sensitive']
             overall = 'sensitive'
             summary = f'策略对某些参数较敏感。敏感维度: {", ".join(sensitive_dims)}。建议在敏感维度上做更多验证。'
         else:
@@ -373,26 +397,93 @@ class RobustnessLab:
 
     @staticmethod
     def generate_report(all_results: Dict, stability: Dict) -> str:
-        """生成自然语言鲁棒性报告"""
+        """生成自然语言鲁棒性报告
+
+        全面防御：任一维度失败不影响其他维度报告生成。
+        """
         lines = []
         lines.append(f'## 策略鲁棒性评估报告')
         lines.append(f'')
-        lines.append(f'**综合评级**: {RobustnessLab._verdict_emoji(stability["overall"])} {stability["summary"]}')
+
+        # ── 安全读取 stability 字段 ──
+        if not isinstance(stability, dict):
+            lines.append(f'**综合评级**: [ERROR] stability 对象非字典类型: {type(stability)}')
+            lines.append(f'')
+            lines.append(f'---')
+            lines.append(f'*报告生成异常 — stability 结构错误*')
+            return '\n'.join(lines)
+
+        overall = stability.get('overall', 'unknown')
+        summary = stability.get('summary', '无摘要信息')
+        lines.append(f'**综合评级**: {RobustnessLab._verdict_emoji(overall)} {summary}')
         lines.append(f'')
 
+        # ── 安全遍历各维度 ──
+        if not isinstance(all_results, dict):
+            lines.append(f'**维度结果**: [ERROR] all_results 非字典类型')
+            return '\n'.join(lines)
+
         for dim, sweeps in all_results.items():
-            dim_def = SWEEP_DIMENSIONS[dim]
-            ds = stability['dim_scores'].get(dim, {})
-            lines.append(f'### {dim_def["label"]}')
-            lines.append(f'- 稳定性: {RobustnessLab._verdict_emoji(ds.get("verdict",""))} '
-                         f'CV={ds.get("cv",0):.3f}, 收益波动范围={ds.get("range_pct",0):.1f}%')
-            lines.append(f'- 最优: {ds.get("best","?")} (收益{ds.get("best_return",0):+.1f}%)')
-            lines.append(f'- 最劣: {ds.get("worst","?")} (收益{ds.get("worst_return",0):+.1f}%)')
+            # 维度定义安全查找
+            dim_def = SWEEP_DIMENSIONS.get(dim)
+            if not dim_def:
+                lines.append(f'### {dim} (未知维度)')
+            else:
+                lines.append(f'### {dim_def["label"]}')
+
+            # 维度评分安全查找
+            dim_scores = stability.get('dim_scores', {})
+            if not isinstance(dim_scores, dict):
+                lines.append(f'- 稳定性: 数据异常 (dim_scores 非字典)')
+                lines.append(f'')
+                continue
+
+            ds = dim_scores.get(dim, {})
+            if not isinstance(ds, dict):
+                ds = {}
+
+            verdict = ds.get('verdict', '未知')
+            cv = ds.get('cv', 0)
+            range_pct = ds.get('range_pct', 0)
+            best = ds.get('best', '?')
+            best_return = ds.get('best_return', 0)
+            worst = ds.get('worst', '?')
+            worst_return = ds.get('worst_return', 0)
+
+            lines.append(f'- 稳定性: {RobustnessLab._verdict_emoji(verdict)} '
+                         f'CV={cv:.3f}, 收益波动范围={range_pct:.1f}%')
+            lines.append(f'- 最优: {best} (收益{best_return:+.1f}%)')
+            lines.append(f'- 最劣: {worst} (收益{worst_return:+.1f}%)')
+
+            # 错误详情
+            errors_in_dim = [s for s in sweeps if isinstance(s, dict) and s.get('error')]
+            if errors_in_dim:
+                err_labels = [s.get('label', '?') for s in errors_in_dim]
+                lines.append(f'- ⚠️ 该维度 {len(errors_in_dim)} 组测试失败: {", ".join(err_labels[:3])}')
+
             lines.append(f'')
 
         lines.append(f'---')
         lines.append(f'*报告由 QuantCode 鲁棒性实验室自动生成*')
         return '\n'.join(lines)
+
+    @staticmethod
+    def _verdict_emoji(verdict: str) -> str:
+        """将 verdict 字段转为可读标记"""
+        if not verdict or not isinstance(verdict, str):
+            return '[?] 未知'
+        v = verdict.lower()
+        if v == 'robust':
+            return '[ROBUST] 鲁棒'
+        elif v in ('overfit_risk', 'overfit'):
+            return '[OVERFIT] 过拟合风险'
+        elif v == 'sensitive':
+            return '[SENSITIVE] 敏感'
+        elif v == 'moderate':
+            return '[MODERATE] 中等敏感'
+        elif '不足' in verdict:
+            return '[INSUFFICIENT] 数据不足'
+        return f'[{verdict}]'
 
     # ================================================================
     # 参数组合优化 (Combo Optimization)
