@@ -555,8 +555,8 @@ class BacktestEngineV2:
     def __init__(self,
                  initial_capital: float = 10000.0,
                  leverage: int = 3,
-                 tp_pct: float = 10.0,         # 保证金止盈%
-                 sl_pct: float = 5.0,          # 保证金止损%
+                 tp_pct: float = 10.0,         # 止盈%（保证金收益率 或 价格百分比，取决于tp_mode）
+                 sl_pct: float = 5.0,          # 止损%（保证金亏损率 或 价格百分比，取决于sl_mode）
                  max_positions: int = 1,
                  bull_alloc: float = 1.0,
                  range_alloc: float = 0.5,
@@ -575,6 +575,12 @@ class BacktestEngineV2:
                  spot_sl: float = 2.0,          # 现货止损%
                  short_sl: float = 3.0,         # 空单止损%
                  verbose: bool = True,
+                 tp_mode: str = 'margin_pct',   # P0新增: 'margin_pct'(保证金%) 或 'price_pct'(价格%)
+                 sl_mode: str = 'margin_pct',   # P0新增: 'margin_pct'(保证金%) 或 'price_pct'(价格%)
+                 max_notional_pct: float = 5.0, # P0新增: 最大名义仓位 = equity × 这个倍数
+                 use_atr_sl: bool = False,       # 需求4: ATR入场止损开关
+                 atr_period: int = 14,           # 需求4: ATR计算周期
+                 atr_mult: float = 2.0,          # 需求4: ATR止损倍数
                  ):
         self.initial_capital = initial_capital
         self.leverage = leverage
@@ -618,6 +624,18 @@ class BacktestEngineV2:
         self._short_tp = spot_tp / 100.0   # 空单止盈
         self._short_sl = short_sl / 100.0  # 空单止损
 
+        # P0新增: TP/SL模式 + 风控保护
+        self.tp_mode = tp_mode              # 'margin_pct'(保证金%) 或 'price_pct'(价格%)
+        self.sl_mode = sl_mode              # 'margin_pct'(保证金%) 或 'price_pct'(价格%)
+        self.max_notional_pct = max_notional_pct  # 最大名义仓位 = equity × 倍数
+        # 需求4: ATR入场止损参数
+        self._use_atr_sl = use_atr_sl
+        self._atr_period = atr_period
+        self._atr_mult = atr_mult
+        # 杠杆上限保护 (交易所最高125x)
+        if self.leverage > 125:
+            raise ValueError(f"杠杆 {self.leverage}x 超过交易所上限 125x")
+
         # 内部状态 (每次 run 时重置)
         self.equity = initial_capital
         self.positions: List[Dict] = []
@@ -658,7 +676,24 @@ class BacktestEngineV2:
             self._pyr_trail = sel.get('_pyr_trail', False)
             self._pos_mode = sel.get('_pos_mode', 'fixed_capital')
             self._risk_pct = sel.get('_risk_per_trade', 1.0) / 100.0
-        except: pass
+            # 闭环重构: 从UI读取单笔建仓比例% + 宏观系数, 覆盖__init__默认值
+            self._init_alloc_pct = sel.get('_init_alloc_pct', 30)
+            # 用户自主控制: UI存原始百分比(如100=100%), 引擎除以100转为乘数
+            self.bull_alloc = float(sel.get('_bull_alloc', 100.0)) / 100.0
+            self.range_alloc = float(sel.get('_range_alloc', 50.0)) / 100.0
+            self.bear_alloc = float(sel.get('_bear_alloc', 30.0)) / 100.0
+            # P0新增: 从策略配置加载TP/SL模式
+            self.tp_mode = sel.get('_tp_mode', 'margin_pct')
+            self.sl_mode = sel.get('_sl_mode', 'margin_pct')
+            # 需求4修复: ATR参数透传 (之前hasattr永远为False!)
+            self._use_atr_sl = sel.get('_use_atr_sl', False)
+            self._atr_period = sel.get('_atr_period', 14)
+            self._atr_mult = sel.get('_atr_mult', 2.0)
+        except Exception as e:
+            # 参数读取失败不应静默吞掉 — 打印警告后用默认值继续
+            import traceback
+            print(f"[WARN] 策略参数读取异常: {e}")
+            traceback.print_exc()
 
         # 1. 对每个币种计算信号 (对冲模式跳过, 不需要指标)
         coins = list(dfs.keys())
@@ -668,6 +703,16 @@ class BacktestEngineV2:
             if self.strategy_mode != "hedging":  # 解锁模式仍需指标(EMA/RSI检测)
                 df = strategy.generate_signals(df)
             dfs_with_sigs[coin] = df
+
+        # 1.5. P0新增: 预计算 ATR(14) — 全序列计算, shift(1)防未来函数, 用于入场时止损定价
+        for coin in coins:
+            df = dfs_with_sigs[coin]
+            tr = pd.concat([
+                df['high'] - df['low'],
+                abs(df['high'] - df['close'].shift(1)),
+                abs(df['low'] - df['close'].shift(1))
+            ], axis=1).max(axis=1)
+            df['_atr_14'] = tr.ewm(span=14, adjust=False).mean().shift(1)
 
         # 2. 多币种对齐: 用主币时间轴 + ffill填充缺失
         max_ema = 200
@@ -693,6 +738,8 @@ class BacktestEngineV2:
         common_index = primary_index
 
         # 3. 逐根遍历
+        # 需求4: 回测前输出风险配置报告
+        self._print_risk_report()
         for i, ts in enumerate(common_index):
             self._bar_idx = i
             paused = i < self.lock_until
@@ -838,7 +885,7 @@ class BacktestEngineV2:
                 else:
                     margin_pnl = (ep - exit_price) / ep * self.leverage
 
-                if margin_pnl <= -self.sl_pct:  # 触发止损
+                if margin_pnl < 0:  # 闭环重构: 任何亏损都计入连亏计数
                     self.losestreak += 1
                     if self.losestreak >= self.lock_streak:
                         self.lock_until = bar_idx + self.lock_bars
@@ -899,22 +946,20 @@ class BacktestEngineV2:
             if regime == 'bear' or best['side'] == 'SHORT':
                 return
 
-        # 动态仓位
-        if regime == 'bull':
-            alloc = self.bull_alloc
-        elif regime == 'bear':
-            alloc = self.bear_alloc
-        else:
-            alloc = self.range_alloc
+        # 闭环重构: alloc = 单笔建仓比例% (来自UI), 宏观系数由_open()内部根据regime查表
+        alloc = self._init_alloc_pct / 100.0
 
         if alloc <= 0:
             return
 
-        # 经典模式首仓比例 (不受加仓开关影响)
-        if self.strategy_mode == "classic" and hasattr(self, '_pyr_init_pct'):
-            alloc = self._pyr_init_pct / 100.0
+        # P0修复: 删除_pyr_init_pct对regime_alloc的覆盖
+        # regime_alloc 直接由市场状态决定，不受首仓比例覆盖
+        # P0新增: 传递ATR值和df行数据给_open()用于入场时ATR止损定价
+        coin_df = dfs[best['coin']]
+        entry_row = coin_df.loc[ts]
+        atr_val = entry_row.get('_atr_14', 0) if hasattr(entry_row, 'get') else 0
         self._open(best['coin'], best['side'], best['price'], alloc, ts, regime,
-                   best.get('resonance_score', 0))
+                   best.get('resonance_score', 0), atr_value=atr_val, df_row=entry_row)
         self._pyramid_count += 1
         self._last_entry_price = best['price']
 
@@ -939,7 +984,11 @@ class BacktestEngineV2:
             if should_add:
                 add_margin = self.equity * self._pyr_add_pct
                 add_notional = add_margin * lev
-                self._open(coin, side, px, self._pyr_add_pct, ts, regime, 0)
+                # P0新增: 传递ATR值 + 累计已有名义仓位给_open() (累计上限保护)
+                pyr_atr = row.get('_atr_14', 0) if hasattr(row, 'get') else 0
+                self._open(coin, side, px, self._pyr_add_pct, ts, regime, 0,
+                           atr_value=pyr_atr, df_row=row,
+                           existing_notional=total_notional)
                 self._pyramid_count += 1
 
                 # 加权均价: Σ(notional_i * entry_i) / Σ(notional_i)
@@ -948,8 +997,13 @@ class BacktestEngineV2:
                 for p in same_side + self.positions[-1:]:  # 包括刚开的
                     if p['side'] == side and p['coin'] == coin:
                         p['entry'] = new_avg
-                        p['tp_price'] = new_avg * (1 + self.tp_pct / lev) if side == 'LONG' else \
-                                        new_avg * (1 - self.tp_pct / lev)
+                        # P0: TP/SL 重算也尊重 tp_mode
+                        if self.tp_mode == 'price_pct':
+                            p['tp_price'] = new_avg * (1 + self.tp_pct) if side == 'LONG' else \
+                                            new_avg * (1 - self.tp_pct)
+                        else:
+                            p['tp_price'] = new_avg * (1 + self.tp_pct / lev) if side == 'LONG' else \
+                                            new_avg * (1 - self.tp_pct / lev)
                 # 保本止损: 均价即新的止损线
                 if self._pyr_trail:
                     for p in same_side + self.positions[-1:]:
@@ -1073,9 +1127,16 @@ class BacktestEngineV2:
     # 内部: 开仓 / 平仓
     # ================================================================
     def _open(self, coin: str, side: str, price: float, alloc: float, ts,
-              regime: str = 'range', resonance_score: int = 0):
+              regime: str = 'range', resonance_score: int = 0,
+              atr_value: float = 0, df_row=None, existing_notional: float = 0):
         """
         开仓 (合约模式)。
+
+        P0修复内容:
+        - Fixed Risk 引入 regime_multiplier (市场状态影响风险预算)
+        - TP/SL 支持 margin_pct(保证金%) 和 price_pct(价格%) 两种模式
+        - ATR 使用每bar预计算值 (非静态_atr_val), 入场时设定止损, 持仓期间不再更新
+        - 最大名义仓位保护
         """
         # 负权益拦截
         if self.equity <= 0:
@@ -1087,52 +1148,148 @@ class BacktestEngineV2:
         # 滑点计入成交价
         fill_price = price * (1 + SLIPPAGE) if side == 'LONG' else price * (1 - SLIPPAGE)
 
-        # === 仓位计算: Fixed Capital vs Fixed Risk ===
+        # === 仓位计算 (Fixed Capital / Fixed Risk / Dynamic Stop) ===
         use_fixed_risk = getattr(self, '_pos_mode', 'fixed_capital') == 'fixed_risk'
+        use_dynamic_stop = getattr(self, '_pos_mode', 'fixed_capital') == 'dynamic_stop'
         risk_pct = getattr(self, '_risk_pct', 0.01)
+        init_alloc = alloc  # 来自_try_rotate_entry: 单笔建仓比例% / 100
 
-        if use_fixed_risk:
-            sl_distance = fill_price * (self.sl_pct / lev)
-            max_risk_amount = self.equity * risk_pct
-            position_units = max_risk_amount / sl_distance if sl_distance > 0 else 0
-            position_value = position_units * fill_price
-            margin = position_value / lev
-            if margin > self.equity:
-                margin = self.equity
-            notional = margin * lev
-            if self.verbose:
-                print(f"[TRADE LOG] Fixed Risk: Equity=${self.equity:.0f} | "
-                      f"Risk({risk_pct*100:.1f}%)=${max_risk_amount:.0f} | "
-                      f"SL_dist=${sl_distance:.2f} | "
-                      f"Pos=${position_value:.0f} Margin=${margin:.0f} ({margin/self.equity*100:.0f}%)")
+        # Step 1: 获取 regime_multiplier (牛/震/熊宏观系数)
+        if regime == 'bull':
+            regime_mult = self.bull_alloc
+        elif regime == 'bear':
+            regime_mult = self.bear_alloc
         else:
-            # Fixed Capital
-            margin = self.equity * alloc
-            notional = margin * lev
+            regime_mult = self.range_alloc
+
+        # 用户自主权: 如果该市场状态乘数设为0, 直接拦截不开仓
+        if regime_mult <= 0:
             if self.verbose:
-                print(f"[TRADE LOG] Fixed Capital: Equity=${self.equity:.0f} | "
-                      f"Alloc={alloc*100:.0f}% | Margin=${margin:.0f} | Notional=${notional:.0f}")
+                print(f"[BLOCKED] {regime}市场乘数={regime_mult:.0%}, 用户配置跳过开仓")
+            return
+
+        # Step 2: SL 价格 (dynamic_stop模式跳过, 仓位确定后再倒推)
+        if not use_dynamic_stop:
+            if self.sl_mode == 'price_pct':
+                if side == 'LONG':
+                    sl_price = fill_price * (1 - self.sl_pct)
+                else:
+                    sl_price = fill_price * (1 + self.sl_pct)
+            else:
+                if side == 'LONG':
+                    sl_price = fill_price * (1 - self.sl_pct / lev)
+                else:
+                    sl_price = fill_price * (1 + self.sl_pct / lev)
+
+            # Step 2b: ATR入场止损覆盖 (入场时一次性定价)
+            if hasattr(self, '_use_atr_sl') and self._use_atr_sl:
+                atr_val = atr_value if (atr_value and atr_value > 0) else fill_price * 0.01
+                atr_mult = getattr(self, '_atr_mult', 2.0)
+                if side == 'LONG':
+                    sl_price = fill_price - atr_val * atr_mult
+                else:
+                    sl_price = fill_price + atr_val * atr_mult
+                if self.verbose:
+                    print(f"[ATR SL] Entry ATR(14)={atr_val:.2f} | SL_mult={atr_mult} | "
+                          f"SL_price={sl_price:.2f} ({abs(sl_price-fill_price)/fill_price*100:.2f}%)")
+
+            sl_distance = abs(fill_price - sl_price)
+
+        # Step 3: 仓位计算
+        if use_fixed_risk:
+            # === Fixed Risk: risk_budget = equity × risk_pct × regime_mult × init_alloc ===
+            risk_budget = self.equity * risk_pct * regime_mult * init_alloc
+            position_units = risk_budget / max(sl_distance, 1e-6)
+            notional = position_units * fill_price
+            margin = notional / lev
+
+            if self.verbose:
+                # 需求4: Fixed Risk 实时解释模块 — 每笔开仓展示完整计算链
+                stop_source = "ATR动态" if (hasattr(self, '_use_atr_sl') and self._use_atr_sl) else "固定SL"
+                sl_pct_display = (sl_distance / fill_price * 100)
+                print(f"\n  {'='*56}")
+                print(f"  [Fixed Risk Calc] 仓位计算详解")
+                print(f"  {'='*56}")
+                print(f"  账户权益:        ${self.equity:>12,.2f}")
+                print(f"  风险占比:        {risk_pct*100:>12.1f}%")
+                print(f"  市场乘数:        {regime_mult*100:>12.0f}% ({regime})")
+                print(f"  建仓比例:        {init_alloc*100:>12.0f}%")
+                print(f"  {'-'*38}")
+                print(f"  风险预算:        ${risk_budget:>12,.2f}  (=权益x风险%x乘数x建仓%)")
+                print(f"  {'-'*38}")
+                print(f"  止损来源:        {stop_source:>12s}")
+                print(f"  止损距离:        ${sl_distance:>12,.2f} /ETH  ({sl_pct_display:.2f}%价格)")
+                print(f"  {'-'*38}")
+                print(f"  开仓数量:        {position_units:>12.4f} ETH  (=风险预算/止损距离)")
+                print(f"  名义仓位:        ${notional:>12,.2f}  (=数量x价格)")
+                print(f"  占用保证金:      ${margin:>12,.2f}  (=名义仓位/杠杆)")
+                print(f"  保证金占比:      {margin/self.equity*100:>12.1f}% 权益")
+                print(f"  {'-'*38}")
+                print(f"  止损触发亏损:    ${position_units*sl_distance:>12,.2f}  (≈风险预算)")
+                print(f"  {'='*56}\n")
+                print(f"[TRADE LOG] Fixed Risk: Equity=${self.equity:.0f} | "
+                      f"Regime={regime}(x{regime_mult:.0%}) | InitAlloc={init_alloc:.0%} | "
+                      f"RiskBudget=${risk_budget:.2f} | SL_dist=${sl_distance:.2f} | "
+                      f"Units={position_units:.4f} | Notional=${notional:.0f} | "
+                      f"Margin=${margin:.0f} ({margin/self.equity*100:.0f}%)")
+        else:
+            # === Fixed Capital: margin = equity × regime_mult × init_alloc ===
+            margin = self.equity * regime_mult * init_alloc
+            notional = margin * lev
+
+            if self.verbose:
+                mode_label = "Dynamic Stop" if use_dynamic_stop else "Fixed Capital"
+                print(f"[TRADE LOG] {mode_label}: Equity=${self.equity:.0f} | "
+                      f"Regime={regime}(x{regime_mult:.0%}) | InitAlloc={init_alloc:.0%} | "
+                      f"Margin=${margin:.0f} | Notional=${notional:.0f}")
+
+        # Step 3.5: Dynamic Stop — 根据名义价值倒推止损线
+        if use_dynamic_stop:
+            risk_budget_usd = self.equity * risk_pct * regime_mult * init_alloc
+            dyn_sl_pct = risk_budget_usd / max(notional, 1e-6)
+            # 钳制在合理范围: 0.1% ~ 20% 价格波动
+            dyn_sl_pct = max(0.001, min(0.20, dyn_sl_pct))
+            if side == 'LONG':
+                sl_price = fill_price * (1 - dyn_sl_pct)
+            else:
+                sl_price = fill_price * (1 + dyn_sl_pct)
+            sl_distance = abs(fill_price - sl_price)
+            if self.verbose:
+                print(f"[DYNAMIC STOP] RiskBudget=${risk_budget_usd:.2f} | "
+                      f"Notional=${notional:.0f} | DynSL%={dyn_sl_pct*100:.2f}% | "
+                      f"SL_price=${sl_price:.2f}")
+
+        # Step 4: 硬风控校验
+        # 4a: 保证金不足保护
+        if margin > self.equity:
+            margin = self.equity
+            notional = margin * lev
+
+        # 4b: 累计名义仓位上限 (已有持仓 + 本次新增)
+        max_notional = self.equity * self.max_notional_pct
+        total_notional = existing_notional + notional
+        if total_notional > max_notional:
+            notional = max(0, max_notional - existing_notional)
+            margin = notional / lev
+            if self.verbose:
+                print(f"[RISK CAP] 累计名义{total_notional:.0f}超上限{max_notional:.0f}, "
+                      f"缩减至本次新增={notional:.0f}")
+
+        # Step 5: TP 价格计算 (不参与仓位公式, 仅用于止盈触发)
+        if self.tp_mode == 'price_pct':
+            if side == 'LONG':
+                tp_price = fill_price * (1 + self.tp_pct)
+            else:
+                tp_price = fill_price * (1 - self.tp_pct)
+        else:
+            if side == 'LONG':
+                tp_price = fill_price * (1 + self.tp_pct / lev)
+            else:
+                tp_price = fill_price * (1 - self.tp_pct / lev)
 
         # 手续费
         fee = notional * TAKER_FEE
         self.equity -= fee
-
-        # TP/SL
-        if side == 'LONG':
-            tp_price = fill_price * (1 + self.tp_pct / lev)
-            sl_price = fill_price * (1 - self.sl_pct / lev)
-        else:
-            tp_price = fill_price * (1 - self.tp_pct / lev)
-            sl_price = fill_price * (1 + self.sl_pct / lev)
-
-        # ATR止损覆盖
-        if hasattr(self, '_use_atr_sl') and self._use_atr_sl:
-            atr_val = self._atr_val if hasattr(self, '_atr_val') else fill_price * 0.01
-            atr_mult = getattr(self, '_atr_mult', 2.0)
-            if side == 'LONG':
-                sl_price = fill_price - atr_val * atr_mult
-            else:
-                sl_price = fill_price + atr_val * atr_mult
 
         # 维持保证金率 + 强平价格 (OKX标准: 维持保证金率0.5%)
         mmr = 0.005
@@ -1237,6 +1394,74 @@ class BacktestEngineV2:
     def _count_positions_before(self, bar_idx):
         """数一下指定 bar 之前的持仓数 (用于检测 just_closed)"""
         return len(self.positions)
+
+    def _print_risk_report(self):
+        """需求4: 回测前输出风险配置报告，明确各参数生效状态与覆盖关系"""
+        pos_mode = getattr(self, '_pos_mode', 'fixed_capital')
+        use_fixed_risk = pos_mode == 'fixed_risk'
+        use_dynamic_stop = pos_mode == 'dynamic_stop'
+        use_atr = getattr(self, '_use_atr_sl', False)
+        atr_mult = getattr(self, '_atr_mult', 2.0)
+        atr_period = getattr(self, '_atr_period', 14)
+        risk_pct = getattr(self, '_risk_pct', 0.01)
+        init_alloc = getattr(self, '_init_alloc_pct', 30)
+
+        # 确定有效止损方式
+        if use_dynamic_stop:
+            active_stop = f"Dynamic Stop (风险预算={risk_pct*100:.1f}% → 倒推SL%)"
+            ignored = "固定SL + ATR(均被覆盖)"
+        elif use_atr:
+            active_stop = f"ATR({atr_period}) × {atr_mult}"
+            sl_mode = getattr(self, 'sl_mode', 'margin_pct')
+            ignored = f"固定SL {self.sl_pct*100:.1f}% ({sl_mode})"
+        else:
+            sl_mode = getattr(self, 'sl_mode', 'margin_pct')
+            active_stop = f"固定SL {self.sl_pct*100:.1f}% ({sl_mode})"
+            ignored = "无"
+
+        # 确定仓位模式标签
+        if use_dynamic_stop:
+            mode_label = "Dynamic Stop (仓位=Fixed Capital吃满 + 止损动态收紧)"
+        elif use_fixed_risk:
+            mode_label = "Fixed Risk (风险预算 → 倒推仓位)"
+        else:
+            mode_label = "Fixed Capital (保证金比例 → 仓位)"
+
+        # 计算有效风险敞口
+        regime_info = (
+            f"牛={self.bull_alloc*100:.0f}% / "
+            f"震={self.range_alloc*100:.0f}% / "
+            f"熊={self.bear_alloc*100:.0f}%"
+        )
+        if use_fixed_risk:
+            effective_risk = (
+                f"单笔风险预算 = 权益 × {risk_pct*100:.1f}% × 市场乘数 × {init_alloc}%"
+            )
+        elif use_dynamic_stop:
+            effective_risk = (
+                f"仓位 = 权益 × 市场乘数 × {init_alloc}% (Fixed Capital), "
+                f"SL = {risk_pct*100:.1f}%风险预算 / notional"
+            )
+        else:
+            effective_risk = (
+                f"保证金 = 权益 × 市场乘数 × {init_alloc}%"
+            )
+
+        print()
+        print("=" * 64)
+        print("  [Risk Report] 风险配置报告 (Risk Configuration Report)")
+        print("=" * 64)
+        print(f"  Position Mode:      {mode_label}")
+        print(f"  Active Stop:        {active_stop}")
+        print(f"  Ignored Params:     {ignored}")
+        print(f"  Risk Formula:       {effective_risk}")
+        print(f"  Regime Multipliers: {regime_info}")
+        print(f"  Leverage:           {self.leverage}x")
+        print(f"  Max Notional:       {self.max_notional_pct}× 权益")
+        print(f"  Lock:               {self.lock_streak}笔连亏 → 锁{self.lock_bars}根K线")
+        print(f"  Initial Equity:     ${self.initial_capital:,.0f}")
+        print("=" * 64)
+        print()
 
     def _calc_total_equity(self, dfs, ts) -> float:
         """按已确认价格估算总权益 (含对冲腿浮动盈亏)"""
@@ -1432,6 +1657,441 @@ class PerformanceAnalyzer:
                 metrics[k] = 0.0
 
         return metrics
+
+    # ================================================================
+    # 收益质量审计 (2026-08-11 新增)
+    # 所有数据来自真实 trade history, 禁止根据收益曲线估算
+    # ================================================================
+
+    @staticmethod
+    def _get_closed_trades(result: Dict):
+        """提取已平仓交易 (统一过滤逻辑)"""
+        trades = result.get('trades', [])
+        return [t for t in trades if t.get('reason', '') in
+                ('TP', 'SL', 'EOD', 'TRAIL', 'LIQUIDATED',
+                 'SPOT_TP', 'SPOT_SL', 'PORTFOLIO_STOP') or
+                str(t.get('reason', '')).startswith('UNLOCK_')]
+
+    @staticmethod
+    def _parse_dt(ts_str):
+        """安全解析时间字符串"""
+        try:
+            return pd.to_datetime(ts_str)
+        except:
+            return None
+
+    @staticmethod
+    def quality_audit(result: Dict, metrics: Dict) -> Dict:
+        """
+        收益质量审计 — 所有数据来自真实 trade history。
+
+        Returns dict with keys:
+          - annual_table: list of {year, return_pct, max_dd, trades, win_rate, pf}
+          - contribution: {top1_pct, top5_pct, top10_pct, level, warning}
+          - extreme_removal: [{removed, new_return, new_annual, new_maxdd}, ...]
+          - risk_contrib: {max_loss, max_consec_losses, max_consec_period, top5_loss_pct}
+          - trade_stats: {avg_win, avg_loss, max_win, max_loss, avg_hold_h, max_hold_h}
+        """
+        trades = result.get('trades', [])
+        closed = PerformanceAnalyzer._get_closed_trades(result)
+        initial = result['initial_capital']
+        equity_arr = result.get('equity_array')
+
+        audit = {}
+
+        # ── 1. 年度表现明细表 ──
+        annual_rows = []
+        if closed:
+            df = pd.DataFrame(closed)
+            df['year'] = pd.to_datetime(df['close_time']).dt.year
+            for year, grp in df.groupby('year'):
+                yr_pnl = grp['pnl'].sum()
+                yr_return = yr_pnl / initial * 100
+                yr_wins = (grp['pnl'] > 0).sum()
+                yr_trades = len(grp)
+                yr_wr = yr_wins / yr_trades * 100 if yr_trades > 0 else 0
+                yr_wins_pnl = grp[grp['pnl'] > 0]['pnl']
+                yr_loss_pnl = grp[grp['pnl'] <= 0]['pnl']
+                avg_w = yr_wins_pnl.mean() if len(yr_wins_pnl) > 0 else 0
+                avg_l = abs(yr_loss_pnl.mean()) if len(yr_loss_pnl) > 0 else 0
+                pf = abs(avg_w / avg_l) if avg_l != 0 else (float('inf') if avg_w > 0 else 0)
+
+                # 年度最大回撤 (从权益曲线截取该年区间)
+                yr_dates = pd.to_datetime(grp['close_time'])
+                yr_start = yr_dates.min(); yr_end = yr_dates.max()
+                yr_dd = 0.0
+                if equity_arr is not None and len(equity_arr) > 1:
+                    try:
+                        eq_df = pd.DataFrame({
+                            'ts': pd.to_datetime([e['timestamp'] for e in result.get('equity_curve', [])]),
+                            'eq': equity_arr
+                        })
+                        yr_eq = eq_df[(eq_df['ts'] >= yr_start) & (eq_df['ts'] <= yr_end)]
+                        if len(yr_eq) > 1:
+                            peak = np.maximum.accumulate(yr_eq['eq'].values)
+                            dd = (peak - yr_eq['eq'].values) / peak
+                            yr_dd = float(np.max(dd) * 100) if len(dd) > 0 else 0.0
+                    except:
+                        yr_dd = 0.0
+
+                annual_rows.append({
+                    'year': int(year), 'return_pct': round(yr_return, 2),
+                    'max_dd': round(yr_dd, 2), 'trades': yr_trades,
+                    'win_rate': round(yr_wr, 1), 'profit_factor': round(pf, 2) if pf != float('inf') else 999.0,
+                })
+        audit['annual_table'] = sorted(annual_rows, key=lambda x: x['year'])
+
+        # ── 2. 交易贡献分析 ──
+        contribution = {}
+        if closed:
+            sorted_by_pnl = sorted(closed, key=lambda t: t['pnl'], reverse=True)
+            total_profit = sum(t['pnl'] for t in closed if t['pnl'] > 0)
+            for n, label in [(1, 'top1'), (5, 'top5'), (10, 'top10')]:
+                top_n = sorted_by_pnl[:n]
+                top_n_profit = sum(t['pnl'] for t in top_n if t['pnl'] > 0)
+                pct = (top_n_profit / total_profit * 100) if total_profit > 0 else 0
+                contribution[f'{label}_amount'] = round(top_n_profit, 2)
+                contribution[f'{label}_pct'] = round(pct, 2)
+
+            # 集中度风险评级 (用top5)
+            top5_pct = contribution.get('top5_pct', 0)
+            if top5_pct < 30:
+                contribution['level'] = '收益分散'; contribution['warning'] = 'green'
+            elif top5_pct < 50:
+                contribution['level'] = '中等集中'; contribution['warning'] = 'yellow'
+            else:
+                contribution['level'] = '高度依赖少数交易'; contribution['warning'] = 'red'
+        else:
+            for n in ['top1', 'top5', 'top10']:
+                contribution[f'{n}_amount'] = 0; contribution[f'{n}_pct'] = 0
+            contribution['level'] = '无交易数据'; contribution['warning'] = 'grey'
+        audit['contribution'] = contribution
+
+        # ── 3. 极端收益剔除测试 ──
+        removal_tests = []
+        if closed and equity_arr is not None and len(equity_arr) > 1:
+            sorted_by_pnl = sorted(closed, key=lambda t: t['pnl'], reverse=True)
+            final_eq = equity_arr[-1]
+            years = metrics.get('years', 1)
+
+            # 构建权益曲线时间轴
+            eq_curve = result.get('equity_curve', [])
+            eq_ts_list = []
+            try:
+                eq_ts_list = [pd.to_datetime(e['timestamp']) for e in eq_curve]
+            except:
+                eq_ts_list = list(range(len(equity_arr)))
+
+            for n, label in [(1, '剔除最大1笔盈利'), (5, '剔除最大5笔盈利'), (10, '剔除最大10笔盈利')]:
+                removed_trades = sorted_by_pnl[:min(n, len(sorted_by_pnl))]
+                removed_pnl = sum(t['pnl'] for t in removed_trades)
+                new_final = final_eq - removed_pnl
+                new_ret = (new_final - initial) / initial * 100
+                new_annual = ((max(new_final, 0.01) / initial) ** (1 / max(years, 0.01)) - 1) * 100
+
+                # 构建调整后的权益曲线: 在每笔被剔除交易的平仓时间点扣减其PnL
+                # idx -> 累计扣减金额
+                adjustments = {}  # {equity_curve_index: cumulative_deduction}
+                for t in removed_trades:
+                    try:
+                        close_dt = pd.to_datetime(t['close_time'])
+                        pnl = t['pnl']
+                        # 找到权益曲线中 >= close_time 的第一个时间点
+                        for j, ets in enumerate(eq_ts_list):
+                            if isinstance(ets, (int, float)):
+                                if j >= close_dt:
+                                    adjustments[j] = adjustments.get(j, 0) + pnl
+                                    break
+                            elif ets >= close_dt:
+                                adjustments[j] = adjustments.get(j, 0) + pnl
+                                break
+                    except:
+                        pass
+
+                # 应用调整: 从每个调整点开始，后续所有权益点都减去累计扣减
+                adjusted_eq = equity_arr.copy().astype(float)
+                cumulative_deduction = 0.0
+                sorted_adjustments = sorted(adjustments.items())
+                adj_idx = 0
+                for i in range(len(adjusted_eq)):
+                    while adj_idx < len(sorted_adjustments) and sorted_adjustments[adj_idx][0] <= i:
+                        cumulative_deduction += sorted_adjustments[adj_idx][1]
+                        adj_idx += 1
+                    adjusted_eq[i] = max(adjusted_eq[i] - cumulative_deduction, 0.01)
+
+                # 基于调整后的曲线重新计算最大回撤
+                try:
+                    peak2 = np.maximum.accumulate(adjusted_eq)
+                    dd2 = (peak2 - adjusted_eq) / peak2
+                    new_maxdd = round(float(np.max(dd2) * 100), 2) if len(dd2) > 0 else 0.0
+                except:
+                    new_maxdd = 0.0
+
+                removal_tests.append({
+                    'label': label, 'removed_amount': round(removed_pnl, 2),
+                    'new_return': round(new_ret, 2), 'new_annual': round(new_annual, 2),
+                    'new_maxdd': new_maxdd,
+                })
+        audit['extreme_removal'] = removal_tests
+
+        # ── 4. 风险贡献分析 ──
+        risk = {}
+        if closed:
+            # 最大单笔亏损
+            losses = [t for t in closed if t['pnl'] < 0]
+            risk['max_single_loss'] = round(min(t['pnl'] for t in losses), 2) if losses else 0
+            # 最大连续亏损 (使用metrics中已计算的)
+            risk['max_consecutive_losses'] = metrics.get('max_consecutive_losses', 0)
+            # 最大连续亏损周期 (时间段)
+            pnl_seq = [(t['pnl'], t.get('close_time', '')) for t in closed]
+            max_streak = 0; cur_streak = 0
+            streak_start = None; max_streak_start = None; max_streak_end = None
+            for i, (pnl, ct) in enumerate(pnl_seq):
+                if pnl <= 0:
+                    if cur_streak == 0: streak_start = ct
+                    cur_streak += 1
+                    if cur_streak > max_streak:
+                        max_streak = cur_streak
+                        max_streak_start = streak_start
+                        max_streak_end = ct
+                else:
+                    cur_streak = 0; streak_start = None
+            risk['max_consecutive_period'] = f"{str(max_streak_start)[:10]} ~ {str(max_streak_end)[:10]}" if max_streak_start else 'N/A'
+            # 最大5笔亏损占比
+            sorted_losses = sorted(losses, key=lambda t: t['pnl'])
+            top5_loss = sum(t['pnl'] for t in sorted_losses[:5])
+            total_loss = sum(t['pnl'] for t in losses)
+            risk['top5_loss_amount'] = round(abs(top5_loss), 2)
+            risk['top5_loss_pct'] = round(abs(top5_loss / total_loss * 100), 2) if total_loss != 0 else 0
+        else:
+            risk['max_single_loss'] = 0; risk['max_consecutive_losses'] = 0
+            risk['max_consecutive_period'] = 'N/A'
+            risk['top5_loss_amount'] = 0; risk['top5_loss_pct'] = 0
+        audit['risk_contrib'] = risk
+
+        # ── 5. 交易统计 ──
+        stats = {}
+        if closed:
+            wins = [t for t in closed if t['pnl'] > 0]
+            losses = [t for t in closed if t['pnl'] < 0]
+            stats['avg_win'] = round(np.mean([t['pnl'] for t in wins]), 2) if wins else 0
+            stats['avg_loss'] = round(np.mean([t['pnl'] for t in losses]), 2) if losses else 0
+            stats['max_win'] = round(max(t['pnl'] for t in wins), 2) if wins else 0
+            stats['max_loss'] = round(min(t['pnl'] for t in losses), 2) if losses else 0
+
+            # 持仓时间 (小时)
+            hold_hours = []
+            for t in closed:
+                ot = PerformanceAnalyzer._parse_dt(t.get('open_time', ''))
+                ct = PerformanceAnalyzer._parse_dt(t.get('close_time', ''))
+                if ot and ct:
+                    hold_hours.append((ct - ot).total_seconds() / 3600)
+            stats['avg_hold_hours'] = round(np.mean(hold_hours), 1) if hold_hours else 0
+            stats['max_hold_hours'] = round(max(hold_hours), 1) if hold_hours else 0
+        else:
+            stats = {'avg_win': 0, 'avg_loss': 0, 'max_win': 0, 'max_loss': 0,
+                     'avg_hold_hours': 0, 'max_hold_hours': 0}
+        audit['trade_stats'] = stats
+
+        return audit
+
+    # ================================================================
+    # 增强审计方法 (2026-08-11)
+    # ================================================================
+
+    @staticmethod
+    def trading_frequency(result: Dict) -> Dict:
+        """交易频率分析 — 从真实交易时间计算"""
+        closed = PerformanceAnalyzer._get_closed_trades(result)
+        if not closed:
+            return {'total_trades': 0, 'avg_per_year': 0, 'avg_per_month': 0, 'level': '无交易'}
+
+        df = pd.DataFrame(closed)
+        df['close_dt'] = pd.to_datetime(df['close_time'])
+        start = df['close_dt'].min()
+        end = df['close_dt'].max()
+        total_years = max((end - start).days / 365.25, 0.1)
+        total_months = max((end - start).days / 30.44, 0.1)
+        n = len(closed)
+
+        avg_yr = n / total_years
+        avg_mo = n / total_months
+
+        if avg_yr < 6: level = '极低频策略'
+        elif avg_yr < 24: level = '低频策略'
+        elif avg_yr < 100: level = '中频策略'
+        else: level = '高频策略'
+
+        return {
+            'total_trades': n,
+            'period': f"{str(start)[:10]} ~ {str(end)[:10]}",
+            'total_years': round(total_years, 1),
+            'avg_per_year': round(avg_yr, 1),
+            'avg_per_month': round(avg_mo, 1),
+            'level': level,
+        }
+
+    @staticmethod
+    def market_attribution(result: Dict) -> Dict:
+        """市场状态归因分析 — 按牛/震/熊拆分收益"""
+        closed = PerformanceAnalyzer._get_closed_trades(result)
+        if not closed:
+            return {'bull_pnl': 0, 'range_pnl': 0, 'bear_pnl': 0, 'bull_trades': 0, 'range_trades': 0, 'bear_trades': 0,
+                    'conclusion': '无交易数据'}
+
+        bull_pnl = sum(t['pnl'] for t in closed if t.get('regime') == 'bull')
+        range_pnl = sum(t['pnl'] for t in closed if t.get('regime') == 'range')
+        bear_pnl = sum(t['pnl'] for t in closed if t.get('regime') == 'bear')
+        bull_n = len([t for t in closed if t.get('regime') == 'bull'])
+        range_n = len([t for t in closed if t.get('regime') == 'range'])
+        bear_n = len([t for t in closed if t.get('regime') == 'bear'])
+        total_pnl = bull_pnl + range_pnl + bear_pnl
+
+        # 各市场贡献占比
+        total_abs = abs(bull_pnl) + abs(range_pnl) + abs(bear_pnl)
+        bull_pct = bull_pnl / total_abs * 100 if total_abs > 0 else 0
+        range_pct = range_pnl / total_abs * 100 if total_abs > 0 else 0
+        bear_pct = bear_pnl / total_abs * 100 if total_abs > 0 else 0
+
+        # 结论
+        if bull_pct > 60 and bear_pct < 20:
+            conclusion = '策略主要依赖牛市趋势行情，熊市贡献有限'
+        elif bull_pct > 40 and range_pct > 30:
+            conclusion = '收益来源较均衡，牛市和震荡市均有贡献'
+        elif bear_pct > 50:
+            conclusion = '策略在熊市中表现突出（可能依赖做空或对冲）'
+        else:
+            conclusion = '收益来源多元，各市场状态均有表现'
+
+        # 各市场胜率
+        bull_wr = len([t for t in closed if t.get('regime') == 'bull' and t['pnl'] > 0]) / max(bull_n, 1) * 100
+        range_wr = len([t for t in closed if t.get('regime') == 'range' and t['pnl'] > 0]) / max(range_n, 1) * 100
+        bear_wr = len([t for t in closed if t.get('regime') == 'bear' and t['pnl'] > 0]) / max(bear_n, 1) * 100
+
+        return {
+            'bull_pnl': round(bull_pnl, 2), 'range_pnl': round(range_pnl, 2), 'bear_pnl': round(bear_pnl, 2),
+            'bull_trades': bull_n, 'range_trades': range_n, 'bear_trades': bear_n,
+            'bull_pct': round(bull_pct, 1), 'range_pct': round(range_pct, 1), 'bear_pct': round(bear_pct, 1),
+            'bull_wr': round(bull_wr, 1), 'range_wr': round(range_wr, 1), 'bear_wr': round(bear_wr, 1),
+            'conclusion': conclusion,
+        }
+
+    @staticmethod
+    def generate_strategy_summary(result: Dict, metrics: Dict, audit: Dict) -> str:
+        """自动生成策略评价报告"""
+        freq = PerformanceAnalyzer.trading_frequency(result)
+        attr = PerformanceAnalyzer.market_attribution(result)
+        contrib = audit.get('contribution', {})
+        removal = audit.get('extreme_removal', [])
+
+        lines = []
+        lines.append(f"策略类型：{result.get('strategy', 'Unknown')} — {freq.get('level', '未知')}")
+
+        # 收益特征
+        total_ret = metrics.get('total_return', 0)
+        max_dd = metrics.get('max_drawdown', 0)
+        sharpe = metrics.get('sharpe_ratio', 0)
+        lines.append(f"收益特征：总收益{total_ret:+.1f}%，最大回撤{max_dd:.1f}%，夏普{sharpe:.2f}")
+
+        # 频率特征
+        lines.append(f"交易频率：{freq.get('avg_per_year',0):.1f}笔/年，{freq.get('avg_per_month',0):.1f}笔/月 — {freq.get('level','')}")
+
+        # 收益来源
+        lines.append(f"收益来源：牛市{attr.get('bull_pct',0):.0f}%（{attr.get('bull_trades',0)}笔，胜率{attr.get('bull_wr',0):.0f}%），"
+                     f"震荡{attr.get('range_pct',0):.0f}%（{attr.get('range_trades',0)}笔，胜率{attr.get('range_wr',0):.0f}%），"
+                     f"熊市{attr.get('bear_pct',0):.0f}%（{attr.get('bear_trades',0)}笔，胜率{attr.get('bear_wr',0):.0f}%）")
+        lines.append(f"收益来源判断：{attr.get('conclusion', '')}")
+
+        # 集中度
+        top5_pct = contrib.get('top5_pct', 0)
+        level = contrib.get('level', '未知')
+        lines.append(f"收益集中度：前5笔占{top5_pct:.0f}% — {level}")
+
+        # 极端依赖
+        if removal:
+            r10 = removal[-1] if len(removal) >= 3 else removal[0]
+            orig_ret = total_ret
+            new_ret = r10.get('new_return', 0)
+            decay = abs(new_ret - orig_ret)
+            if decay > abs(orig_ret) * 0.5:
+                lines.append(f"极端行情依赖：删除10笔最大盈利后收益从{orig_ret:+.1f}%降至{new_ret:+.1f}%，策略高度依赖少数交易")
+            else:
+                lines.append(f"极端行情依赖：删除10笔最大盈利后收益变化{decay:.1f}%，策略收益来源较稳定")
+
+        # 风险
+        risk = audit.get('risk_contrib', {})
+        lines.append(f"风险特征：最大单笔亏损${risk.get('max_single_loss',0):+.0f}，最大连续亏损{risk.get('max_consecutive_losses',0)}笔")
+
+        # 综合建议
+        suggestions = []
+        if attr.get('bull_pct', 0) > 70:
+            suggestions.append("关注熊市过滤有效性，考虑降低熊市风险暴露")
+        if top5_pct > 40:
+            suggestions.append("收益集中度高，建议分散入场时机或降低单笔风险")
+        if freq.get('avg_per_year', 0) < 6:
+            suggestions.append("交易频率极低，样本量不足可能导致统计偏差")
+        if max_dd > 30:
+            suggestions.append("最大回撤偏高，建议收紧止损或降低杠杆")
+        if sharpe < 0.5:
+            suggestions.append("风险调整后收益偏低，考虑优化入场信号质量")
+        if not suggestions:
+            suggestions.append("当前策略表现均衡，持续监控市场状态变化即可")
+
+        lines.append(f"优化建议：{'；'.join(suggestions)}")
+
+        return '\n'.join(lines)
+
+    @staticmethod
+    def param_audit_report(result: Dict, metrics: Dict) -> Dict:
+        """后台参数一致性审计 — 验证所有UI参数真正影响回测"""
+        trades = result.get('trades', [])
+        closed = PerformanceAnalyzer._get_closed_trades(result)
+
+        report = {
+            'total_params': 0,
+            'ui_params': [],
+            'engine_params': [],
+            'used_params': [],
+            'overridden_params': [],
+            'anomalies': [],
+        }
+
+        # 从result推断实际使用的参数
+        if closed:
+            # 检查是否有不同regime的交易 -> 验证市场系数生效
+            regimes = set(t.get('regime', '?') for t in closed)
+            report['engine_params'].append(f'市场系数生效: {regimes}')
+
+            # 检查保证金是否变化 -> 验证alloc参数生效
+            margins = [t.get('margin', 0) for t in closed if t.get('margin')]
+            if len(set(round(m, 2) for m in margins)) > 1:
+                report['engine_params'].append('仓位大小有变化 -> alloc参数生效')
+            else:
+                report['anomalies'].append('所有仓位大小相同 -> alloc参数可能未生效')
+
+            # 检查exit_reason -> 验证TP/SL生效
+            reasons = set(t.get('reason', '?') for t in closed)
+            if 'SL' in str(reasons) or 'TP' in str(reasons):
+                report['engine_params'].append(f'TP/SL触发: {reasons}')
+            if 'LIQUIDATED' in str(reasons):
+                report['engine_params'].append('爆仓检测生效')
+
+        # UI参数清单
+        report['ui_params'] = [
+            '_pos_mode', '_risk_per_trade', '_init_alloc_pct',
+            '_bull_alloc', '_range_alloc', '_bear_alloc',
+            '_tp_mode', '_sl_mode', '_use_atr_sl', '_atr_period', '_atr_mult',
+        ]
+        report['total_params'] = len(report['ui_params'])
+        report['used_params'] = report['engine_params']
+
+        # 覆盖参数
+        if closed:
+            atr_trades = [t for t in closed if 'ATR' in str(t.get('reason', ''))]
+            if not atr_trades and any('ATR' in str(r) for r in reasons):
+                report['overridden_params'].append('ATR动态止损覆盖固定SL')
+
+        return report
 
     @staticmethod
     def print_report(result: Dict, metrics: Dict):
@@ -1843,13 +2503,16 @@ def run_backtest(
     timeframe: str = '4h',
     initial_capital: float = 10000.0,
     leverage: int = 3,
-    tp_pct: float = 10.0,          # 保证金止盈%
-    sl_pct: float = 5.0,           # 保证金止损%
+    tp_pct: float = 10.0,           # 止盈%（保证金收益率 或 价格百分比，取决于tp_mode）
+    sl_pct: float = 5.0,            # 止损%（保证金亏损率 或 价格百分比，取决于sl_mode）
     bull_alloc: float = 1.0,
     range_alloc: float = 0.5,
     bear_alloc: float = 0.3,
     bear_ratio_limit: float = 0.5,
     verbose: bool = False,
+    tp_mode: str = 'margin_pct',     # P0: 'margin_pct' | 'price_pct'
+    sl_mode: str = 'margin_pct',     # P0: 'margin_pct' | 'price_pct'
+    max_notional_pct: float = 5.0,   # P0: 最大名义仓位 = equity × 倍数
 ) -> Tuple[Dict, Dict]:
     """
     一键运行回测 (使用 BacktestEngineV2 + 合约模式)。
@@ -1860,13 +2523,16 @@ def run_backtest(
         timeframe: 时间框架
         initial_capital: 初始资金
         leverage: 杠杆倍数
-        tp_pct: 止盈 (保证金%)
-        sl_pct: 止损 (保证金%)
+        tp_pct: 止盈%（保证金收益率 或 价格百分比）
+        sl_pct: 止损%（保证金亏损率 或 价格百分比）
         bull_alloc: 牛市仓位比例
         range_alloc: 震荡仓位比例
         bear_alloc: 熊市仓位比例
         bear_ratio_limit: 空头比例上限 (超则空仓)
         verbose: 打印交易日志
+        tp_mode: 'margin_pct'(保证金%止盈) | 'price_pct'(价格%止盈)
+        sl_mode: 'margin_pct'(保证金%止损) | 'price_pct'(价格%止损)
+        max_notional_pct: 最大名义仓位(equity的倍数)
 
     Example:
         >>> s = MACrossStrategy()
@@ -1898,6 +2564,9 @@ def run_backtest(
         bear_ratio_limit=bear_ratio_limit,
         trailing_pct=0.0,
         verbose=verbose,
+        tp_mode=tp_mode,
+        sl_mode=sl_mode,
+        max_notional_pct=max_notional_pct,
     )
     result = engine.run(dfs, strategy)
     metrics = PerformanceAnalyzer.analyze(result)

@@ -4,7 +4,7 @@
 启动: streamlit run app.py
 """
 import streamlit as st
-import pandas as pd, numpy as np, os, sys, time, json, base64
+import pandas as pd, numpy as np, os, sys, time, json, base64, copy
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -779,8 +779,8 @@ strat_mode_key = "classic"
 hedge_ratio = 0.5; unlock_pct = 5.0; max_pyramid = 3
 pyramid_first = 0.3; pyramid_step_pct = 1.5; trailing_pct = 0.0
 spot_tp = 5.0; spot_sl = 2.0; short_sl = 3.0; funding_threshold = 0.01
-tp_pct = 10.0; sl_pct = 5.0; bull_a = 1.0; range_a = 0.5; bear_a = 0.3
-lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
+tp_pct = 10.0; sl_pct = 5.0; bull_a = 100.0; range_a = 50.0; bear_a = 30.0
+lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0; pyr_init_pct = 30
 use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
 oos_enabled = False; oos_ratio = 70
 use_weighted = False; weighted_threshold = 2
@@ -866,35 +866,168 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     # === 单向风控 (仅非对冲模式渲染) ===
     if not is_dual_leg:
         st.divider(); st.caption("🛡️ 单向风控")
+
+        # ── 仓位模式 ──
+        st.caption("① 仓位模式 — 决定仓位如何计算")
         pos_mode = st.radio("仓位模式", [
-            "固定资金比例 (Fixed Capital %)", "固定风险比例 (Fixed Risk %)"
-        ], index=0, horizontal=True, help="Fixed Capital=按牛/震/熊%分配资金 | Fixed Risk=按单笔风险%倒推仓位")
+            "固定资金比例 (Fixed Capital)", "固定风险比例 (Fixed Risk)"
+        ], index=0, horizontal=True)
         use_fixed_risk = "Risk" in pos_mode
 
+        if use_fixed_risk:
+            st.info(
+                "**固定风险比例 (Fixed Risk)**\n\n"
+                "根据**最大允许亏损金额**和**止损距离**自动计算仓位。\n\n"
+                "公式：`风险金额 ÷ 止损距离 = 实际仓位`\n\n"
+                "特点：\n"
+                "- 波动越大 → 止损越宽 → 仓位越小\n"
+                "- 波动越小 → 止损越窄 → 仓位越大\n"
+                "- ATR开启后，仓位自动跟随市场波动调整"
+            )
+        else:
+            st.info(
+                "**固定资金比例 (Fixed Capital)**\n\n"
+                "根据**账户资金比例**直接决定仓位。\n\n"
+                "公式：`账户资金 × 市场系数 × 建仓比例`\n\n"
+                "特点：\n"
+                "- 止损不会改变仓位大小\n"
+                "- 止损只决定**退出价格**"
+            )
+
+        # ── 单笔建仓比例 (动态语义) ──
+        st.caption("② 单笔建仓比例 — 仓位计算的\"总阀门\"")
+        if use_fixed_risk:
+            alloc_label = "风险预算比例%"
+            alloc_help = (
+                "控制**风险预算的使用比例**。\n\n"
+                "100% = 使用完整风险预算（如允许亏$500就全用）\n"
+                "50% = 只用一半风险预算（如允许亏$500实际只亏$250）\n\n"
+                "⚠️ 这不是投入资金比例！实际保证金由风险预算÷止损距离自动算出。"
+            )
+        else:
+            alloc_label = "初始资金投入比例%"
+            alloc_help = (
+                "控制**投入保证金的比例**。\n\n"
+                "100% = 全部可用资金参与仓位计算\n"
+                "50% = 只用一半资金\n\n"
+                "实际投入 = 权益 × 市场系数 × 此比例"
+            )
+        pyr_init_pct = st.slider(alloc_label, 10, 100, 30, 5, help=alloc_help)
+        if use_fixed_risk:
+            st.caption(
+                "示例：权益10,000U × 风险1% × 牛市100% × 100% = 最大亏损约100U。"
+                "当前比例决定允许亏损的上限。"
+            )
+        else:
+            st.caption(
+                "示例：权益10,000U × 牛市100% × 30% = 保证金约3,000U"
+            )
+
+        # ── 止盈/止损模式 ──
+        st.caption("③ 止盈/止损模式")
         c1, c2 = st.columns(2)
-        tp_pct = c1.slider("止盈%", 2.0, 50.0, 10.0, 0.5)
-        sl_pct = c2.slider("止损%", 1.0, 30.0, 5.0, 0.5)
-        # 仓位分配 (Fixed Risk模式下禁用)
+        tp_mode = c1.radio("止盈模式", ["保证金收益率 (Margin%)", "价格百分比 (Price%)"],
+                           index=0, horizontal=True,
+                           help="保证金%: 杠杆收益达到X%止盈 | 价格%: 价格上涨X%止盈（与杠杆无关）")
+        sl_mode = c2.radio("止损模式", ["保证金亏损率 (Margin%)", "价格百分比 (Price%)"],
+                           index=0, horizontal=True,
+                           help="保证金%: 保证金亏损X%止损 | 价格%: 价格下跌X%止损（与杠杆无关）")
+        c1, c2 = st.columns(2)
+        use_margin_tp = "Margin" in tp_mode
+        tp_label = "保证金止盈%" if use_margin_tp else "价格止盈%"
+        tp_pct = c1.slider(tp_label, 2.0, 50.0, 10.0, 0.5,
+            help=f"{'杠杆收益达此%止盈' if use_margin_tp else '价格上涨此%止盈（与杠杆无关）'}")
+        use_margin_sl = "Margin" in sl_mode
+        sl_label = "保证金止损%" if use_margin_sl else "价格止损%"
+        sl_pct = c2.slider(sl_label, 1.0, 30.0, 5.0, 0.5,
+            help=f"{'保证金亏损此%止损' if use_margin_sl else '价格下跌此%止损（与杠杆无关）'}")
+
+        # ── 市场系数 (动态标签) ──
+        coeff_label = "风险预算系数" if use_fixed_risk else "市场仓位系数"
+        st.caption(f"④ {coeff_label} — 根据牛/震/熊市场状态缩放{'风险预算' if use_fixed_risk else '仓位'}")
         c1, c2, c3 = st.columns(3)
-        bull_a = c1.number_input("牛市%", 10, 100, 100, 5, disabled=use_fixed_risk) / 100
-        range_a = c2.number_input("震荡%", 10, 100, 50, 5, disabled=use_fixed_risk) / 100
-        bear_a = c3.number_input("熊市%", 0, 100, 30, 5, disabled=use_fixed_risk) / 100
+        bull_label = "🐂 牛市" + ("预算%" if use_fixed_risk else "仓位%")
+        bull_help = (
+            f"牛市时{'风险预算' if use_fixed_risk else '仓位'}比例。\n"
+            f"100%={'全额预算' if use_fixed_risk else '正常仓位'} | 0%=牛市不开仓 | 200%=双倍"
+        )
+        bull_a = c1.number_input(bull_label, 0, 200, 100, 5, help=bull_help)
+        range_label = "↔️ 震荡" + ("预算%" if use_fixed_risk else "仓位%")
+        range_help = (
+            f"震荡市{'风险预算' if use_fixed_risk else '仓位'}比例。\n"
+            f"100%={'全额' if use_fixed_risk else '正常仓位'} | 0%=震荡不开仓"
+        )
+        range_a = c2.number_input(range_label, 0, 200, 50, 5, help=range_help)
+        bear_label = "🐻 熊市" + ("预算%" if use_fixed_risk else "仓位%")
+        bear_help = (
+            f"熊市{'风险预算' if use_fixed_risk else '仓位'}比例。\n"
+            f"0%=完全避开熊市 | 默认30%"
+        )
+        bear_a = c3.number_input(bear_label, 0, 200, 30, 5, help=bear_help)
+
+        # ── 连亏锁仓 ──
         c1, c2 = st.columns(2)
-        lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3)
-        lock_days = c2.number_input("锁仓天数", 1, 30, 2)
+        lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3,
+            help="连续亏损N笔后暂停开仓")
+        lock_days = c2.number_input("锁仓天数", 1, 30, 2,
+            help="暂停开仓的天数")
+
+        # ── 风险参数 ──
+        st.caption("⑤ 风险参数")
         c1, c2 = st.columns(2)
-        risk_per_trade = c1.number_input("单笔风险占比%", 0.5, 5.0, 1.0, 0.5,
-                                          disabled=not use_fixed_risk,
-                                          help="Fixed Risk模式专用: 每笔最大亏损占账户的%")
-        use_atr_stop = c2.checkbox("ATR动态止损", False)
+        if use_fixed_risk:
+            risk_per_trade = c1.number_input("单笔风险占比%", 0.1, 30.0, 1.0, 0.5,
+                help=(
+                    "每笔交易**最大亏损**占账户权益的百分比。\n\n"
+                    "这是Fixed Risk模式的核心参数：系统根据此值倒推仓位。\n\n"
+                    f"例：权益{initial_capital:,.0f}U × 1% = 每笔最多亏{initial_capital*0.01:,.0f}U\n"
+                    "止损越宽 → 仓位越小；止损越窄 → 仓位越大"
+                ))
+            # 收敛警告
+            if abs(risk_per_trade - sl_pct) < 0.05:
+                st.warning(
+                    f"⚠️ 单笔风险占比({risk_per_trade}%) ≈ 止损({sl_pct}%) → "
+                    f"Fixed Risk 与 Fixed Capital 仓位数学收敛，模式切换无效果。\n\n"
+                    f"建议将风险%设得比止损%小（如 {max(0.1, sl_pct*0.4):.1f}%），才能体现风控差异。"
+                )
+        else:
+            risk_per_trade = 1.0
+            c1.metric("单笔风险占比%", "N/A",
+                help="仅在固定风险(Fixed Risk)模式下生效。Fixed Capital模式由建仓比例控制仓位。")
+
+        # ── ATR 动态止损 (含覆盖状态) ──
+        use_atr_stop = c2.checkbox("ATR入场止损", False,
+            help=(
+                "启用后，系统用ATR波动率自动计算止损距离，固定止损%不再生效。\n\n"
+                "ATR大(高波动) → 止损宽 → 仓位小（Fixed Risk）\n"
+                "ATR小(低波动) → 止损窄 → 仓位大（Fixed Risk）"
+            ))
         atr_period_val, atr_mult_val = 14, 2.0
         if use_atr_stop:
             c1, c2 = st.columns(2)
-            atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1)
-            atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5)
+            atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1,
+                help="计算ATR的K线根数。14=约2周(4H)")
+            atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5,
+                help="止损距离 = ATR × 此倍数。2.0=两倍波动范围")
+
+            # ATR覆盖状态提示
+            sl_mode_label = "保证金亏损率" if "Margin" in sl_mode else "价格百分比"
+            effective_sl_display = f"{sl_pct}%（{sl_mode_label}）"
+            st.warning(
+                f"⚠️ **止损模式已切换为 ATR 动态止损**\n\n"
+                f"固定止损 {effective_sl_display} → **状态：已覆盖**\n\n"
+                f"当前实际止损：**ATR({atr_period_val}) × {atr_mult_val}倍**\n\n"
+                f"ATR根据市场波动自动调整止损距离，"
+                f"{'并用于Fixed Risk仓位计算。' if use_fixed_risk else '但不影响Fixed Capital仓位大小。'}"
+                f"{'\\n\\n市场波动大 → ATR止损变宽 → 仓位自动缩小；波动小 → 止损变窄 → 仓位自动放大。' if use_fixed_risk else ''}"
+            )
+        else:
+            # ATR关闭时显示当前有效止损
+            sl_mode_label2 = "保证金亏损率" if "Margin" in sl_mode else "价格百分比"
+            st.caption(f"当前有效止损：固定止损 {sl_pct}%（{sl_mode_label2}）")
     else:
         tp_pct = 10.0; sl_pct = 5.0
-        bull_a = 1.0; range_a = 0.5; bear_a = 0.3
+        bull_a = 100.0; range_a = 50.0; bear_a = 30.0
         lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
         use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
 
@@ -1109,10 +1242,24 @@ def resample_cached(df_15m, period: str):
 # ============================================================
 st.title("📊 马总量化控制台")
 
+# ── 版本标识 (2026-08-11 新增) ──
+_QUANTCODE_VERSION = "v3.2"
+_QUANTCODE_BUILD = "2026-08-11"
+try:
+    import subprocess
+    _git_hash = subprocess.check_output(
+        ["git", "rev-parse", "--short", "HEAD"],
+        cwd=os.path.dirname(os.path.abspath(__file__)),
+        text=True, stderr=subprocess.DEVNULL
+    ).strip()
+except Exception:
+    _git_hash = "unknown"
+st.caption(f"QuantCode {_QUANTCODE_VERSION} | Commit: `{_git_hash}` | Build: {_QUANTCODE_BUILD}")
+
 # Tab 导航
-tab_names = ["📈 回测看板", "🤖 翔哥 AI 对话舱"]
+tab_names = ["📈 回测看板", "🤖 翔哥 AI 对话舱", "🔬 鲁棒性实验室"]
 if "active_tab" not in st.session_state: st.session_state.active_tab = "回测看板"
-tc1, tc2 = st.columns([1, 1])
+tc1, tc2, tc3 = st.columns([1, 1, 1])
 with tc1:
     if st.button("📈 回测看板", use_container_width=True,
                  type="primary" if "回测" in st.session_state.active_tab else "secondary"):
@@ -1121,6 +1268,10 @@ with tc2:
     if st.button("🤖 翔哥 AI 对话舱", use_container_width=True,
                  type="primary" if "AI" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "AI 对话舱"; st.rerun()
+with tc3:
+    if st.button("🔬 鲁棒性实验室", use_container_width=True,
+                 type="primary" if "鲁棒性" in st.session_state.active_tab else "secondary"):
+        st.session_state.active_tab = "鲁棒性实验室"; st.rerun()
 
 st.divider()
 
@@ -1287,6 +1438,240 @@ if "AI" in st.session_state.active_tab:
     st.stop()
 
 
+# ============================================================
+# Tab 3: 策略鲁棒性分析实验室 (2026-08-11 新增)
+# ============================================================
+if "鲁棒性" in st.session_state.active_tab:
+    from robustness_lab import RobustnessLab, SWEEP_DIMENSIONS
+
+    st.title("🔬 策略鲁棒性分析实验室")
+    st.caption("一键参数敏感性测试 — 所有测试调用真实 engine 回测流程，保证 UI参数→engine参数链路一致。")
+
+    # ── 前置条件检查 ──
+    has_backtest = ("last_result" in st.session_state and
+                    "last_engine_kwargs" in st.session_state and
+                    "last_coin" in st.session_state)
+
+    if not has_backtest:
+        st.warning("⚠️ 尚未运行回测。请先在【回测看板】中运行一次回测，再进入本实验室。")
+        st.info("操作步骤: 切换到【📈 回测看板】→ 配置参数 → 点击【确认参数并运行回测】→ 回到本页")
+        st.stop()
+
+    # ── 基准参数摘要 ──
+    last_ek = st.session_state.last_engine_kwargs
+    last_sel = st.session_state.selected_indicators
+    last_coin = st.session_state.last_coin
+    last_tf = st.session_state.last_timeframe
+    last_metrics = st.session_state.last_metrics
+
+    with st.expander("📋 基准策略参数", expanded=False):
+        bc1, bc2, bc3, bc4 = st.columns(4)
+        with bc1:
+            st.metric("币种", last_coin)
+            st.metric("周期", last_tf)
+        with bc2:
+            st.metric("杠杆", f"{last_ek.get('leverage', '?')}x")
+            st.metric("初始资金", f"${last_ek.get('initial_capital', '?'):,.0f}")
+        with bc3:
+            st.metric("TP/SL", f"{last_ek.get('tp_pct','?')}%/{last_ek.get('sl_pct','?')}%")
+            st.metric("ATR止损", "开启" if last_ek.get('use_atr_sl') else "关闭")
+        with bc4:
+            st.metric("总收益", f"{last_metrics.get('total_return', 0):+.2f}%")
+            st.metric("夏普", f"{last_metrics.get('sharpe_ratio', 0):.3f}")
+
+    # ── 活跃指标摘要 ──
+    active_inds = [n for n, c in last_sel.items() if isinstance(c, dict) and c.get('enabled')]
+    st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:8]) + ("..." if len(active_inds) > 8 else ""))
+
+    st.divider()
+
+    # ── 维度选择 ──
+    st.subheader("📐 测试维度选择")
+    st.caption("选择需要扫描的参数维度。每维度独立测试，保持其他参数为基准值。全选共约 21 次回测。")
+
+    dim_options = list(SWEEP_DIMENSIONS.keys())
+    dim_labels = {k: v['label'] for k, v in SWEEP_DIMENSIONS.items()}
+    dim_labels_with_count = {
+        k: f"{v['label']} ({len(v['values'])}组)" for k, v in SWEEP_DIMENSIONS.items()
+    }
+
+    dc1, dc2, dc3, dc4, dc5 = st.columns(5)
+    selected_dims = []
+    with dc1:
+        if st.checkbox(dim_labels_with_count['leverage'], True, key="dim_leverage"): selected_dims.append('leverage')
+    with dc2:
+        if st.checkbox(dim_labels_with_count['ema'], True, key="dim_ema"): selected_dims.append('ema')
+    with dc3:
+        if st.checkbox(dim_labels_with_count['atr_stop'], True, key="dim_atr"): selected_dims.append('atr_stop')
+    with dc4:
+        if st.checkbox(dim_labels_with_count['fibonacci'], True, key="dim_fib"): selected_dims.append('fibonacci')
+    with dc5:
+        if st.checkbox(dim_labels_with_count['volume'], True, key="dim_vol"): selected_dims.append('volume')
+
+    total_runs = sum(len(SWEEP_DIMENSIONS[d]['values']) for d in selected_dims)
+    st.caption(f"预计运行 **{total_runs}** 次完整回测，约需 **{total_runs * 3}~{total_runs * 5}** 秒")
+
+    # ── 运行按钮 ──
+    st.divider()
+    run_col1, run_col2 = st.columns([2, 1])
+    with run_col1:
+        run_lab = st.button("🔬 开始鲁棒性测试", use_container_width=True, type="primary",
+                            disabled=len(selected_dims) == 0)
+    with run_col2:
+        st.caption("💡 测试期间请勿切换页面")
+
+    if run_lab:
+        # 构造 base_config
+        # 重新加载数据
+        with st.spinner("加载数据..."):
+            de = DataEngine()
+            dfs = de.get_multi_timeframe(last_coin)
+            df_raw = dfs.get(last_tf, dfs['4h'])
+            if not isinstance(df_raw.index, pd.DatetimeIndex):
+                df_raw.index = pd.to_datetime(df_raw.index)
+            # 应用日期过滤
+            if 'date_range' in st.session_state:
+                dr = st.session_state.date_range
+                df_raw = df_raw[(df_raw.index >= pd.Timestamp(dr[0])) & (df_raw.index <= pd.Timestamp(dr[1]))]
+            if df_raw.empty:
+                st.error("数据加载为空，请检查日期范围。")
+                st.stop()
+
+        # 构造 mf_params
+        mf_enabled = last_sel.get('_regime_filter', True)
+        v_ema_w = st.session_state.get('ema_w', 0.40)
+        v_adx_w = st.session_state.get('adx_w', 0.35)
+        v_adx_th = st.session_state.get('adx_th', 25)
+        v_bull_th = st.session_state.get('bull_th', 0.30)
+
+        base_config = {
+            'engine_kwargs': dict(last_ek),
+            'selected_indicators': copy.deepcopy(last_sel),
+            'use_and': st.session_state.get('use_and', True) if 'use_and' in st.session_state else True,
+            'mf_params': {'enabled': mf_enabled, 'ema_w': v_ema_w, 'adx_w': v_adx_w,
+                          'adx_th': v_adx_th, 'bull_th': v_bull_th},
+            'coin': last_coin,
+            'df': df_raw,
+        }
+
+        # 运行扫描
+        all_results = {}
+        st.markdown("---")
+        st.subheader("🔄 扫描进度")
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        total_all = sum(len(SWEEP_DIMENSIONS[d]['values']) for d in selected_dims)
+        global_counter = [0]
+
+        for di, dim in enumerate(selected_dims):
+            dim_def = SWEEP_DIMENSIONS[dim]
+            st.caption(f"正在测试: **{dim_def['label']}** ({di+1}/{len(selected_dims)})")
+
+            def make_progress(dim_name):
+                def cb(cur, total, label):
+                    global_counter[0] += 1
+                    progress_bar.progress(min(global_counter[0] / total_all, 1.0))
+                    status_text.caption(f"🔬 {dim_def['label']}: {label} ({cur}/{total})")
+                return cb
+
+            sweeps = RobustnessLab.run_sweep(base_config, dim, progress_callback=make_progress(dim))
+            all_results[dim] = sweeps
+
+        progress_bar.progress(1.0)
+        status_text.caption("✅ 扫描完成！")
+
+        # 稳定性评分
+        stability = RobustnessLab.stability_score(all_results)
+
+        # ── 结果展示 ──
+        st.markdown("---")
+        st.subheader("📊 结果分析")
+
+        # 综合评分卡片
+        overall = stability['overall']
+        if overall == 'robust':
+            st.success(f"✅ **综合评级: 策略鲁棒** — {stability['summary']}")
+        elif overall in ('overfit_risk', 'overfit'):
+            st.error(f"⚠️ **综合评级: 过拟合风险** — {stability['summary']}")
+        elif overall == 'sensitive':
+            st.warning(f"⚡ **综合评级: 参数敏感** — {stability['summary']}")
+        else:
+            st.info(f"🔶 **综合评级: 中等敏感** — {stability['summary']}")
+
+        # 每维度结果
+        for dim in selected_dims:
+            dim_def = SWEEP_DIMENSIONS[dim]
+            sweeps = all_results[dim]
+            ds = stability['dim_scores'].get(dim, {})
+
+            with st.expander(f"📐 {dim_def['label']} — {ds.get('verdict','?')} | "
+                            f"最优={ds.get('best','?')}({ds.get('best_return',0):+.1f}%) | "
+                            f"CV={ds.get('cv',0):.3f}", expanded=True):
+                # 参数收益矩阵
+                mat = RobustnessLab.format_matrix(dim, sweeps)
+                st.dataframe(mat.set_index('参数'), use_container_width=True)
+
+                # 迷你折线图: 收益随参数变化
+                returns = [s['total_return'] for s in sweeps if not s.get('error')]
+                labels = [s['label'] for s in sweeps if not s.get('error')]
+                if len(returns) >= 2:
+                    chart_data = pd.DataFrame({'收益%': returns}, index=labels)
+                    st.line_chart(chart_data, use_container_width=True, height=200)
+
+                # 稳定性指标
+                dsc1, dsc2, dsc3 = st.columns(3)
+                with dsc1:
+                    st.metric("变异系数(CV)", f"{ds.get('cv', 0):.3f}",
+                             delta="越小越稳定" if ds.get('cv', 0) < 0.3 else "敏感")
+                with dsc2:
+                    st.metric("收益波动范围", f"{ds.get('range_pct', 0):.1f}%")
+                with dsc3:
+                    verdict = ds.get('verdict', '?')
+                    v_map = {'robust': '✅ 鲁棒', 'overfit': '⚠️ 过拟合风险',
+                             'sensitive': '⚡ 敏感', 'moderate': '🔶 中等'}
+                    st.metric("评级", v_map.get(verdict, verdict))
+
+        # 完整报告
+        with st.expander("📝 完整鲁棒性报告", expanded=False):
+            report = RobustnessLab.generate_report(all_results, stability)
+            st.markdown(report)
+
+        st.success("🎉 鲁棒性测试完成！可通过上方折叠面板查看各维度详细结果。")
+
+        # 缓存结果
+        st.session_state.lab_results = {'all_results': all_results, 'stability': stability}
+    else:
+        # 未运行: 检查是否有缓存结果
+        if 'lab_results' in st.session_state:
+            st.info("📋 显示上次测试结果（缓存在内存中，刷新页面会丢失）")
+            lr = st.session_state.lab_results
+            all_results = lr['all_results']
+            stability = lr['stability']
+
+            overall = stability['overall']
+            if overall == 'robust':
+                st.success(f"✅ **综合评级: 策略鲁棒** — {stability['summary']}")
+            elif overall in ('overfit_risk', 'overfit'):
+                st.error(f"⚠️ **综合评级: 过拟合风险** — {stability['summary']}")
+            else:
+                st.warning(f"⚡/🔶 **综合评级: 敏感** — {stability['summary']}")
+
+            for dim in all_results.keys():
+                dim_def = SWEEP_DIMENSIONS[dim]
+                sweeps = all_results[dim]
+                ds = stability['dim_scores'].get(dim, {})
+                with st.expander(f"📐 {dim_def['label']} — {ds.get('verdict','?')}", expanded=False):
+                    mat = RobustnessLab.format_matrix(dim, sweeps)
+                    st.dataframe(mat.set_index('参数'), use_container_width=True)
+
+            with st.expander("📝 完整报告", expanded=False):
+                st.markdown(RobustnessLab.generate_report(all_results, stability))
+        else:
+            st.info("👆 选择测试维度后，点击上方按钮开始鲁棒性分析。")
+
+    st.stop()
+
 
 # ============================================================
 # Tab 1: 回测看板
@@ -1303,6 +1688,53 @@ else:
 
 st.divider()
 if submitted:
+    # ── 需求六: 实时风险摘要卡 ──
+    if not is_dual_leg:
+        with st.expander("📋 当前策略风险配置", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            # 列1: 仓位模式 + 止损方式
+            with c1:
+                st.caption("仓位模式")
+                if use_fixed_risk:
+                    st.markdown("**Fixed Risk**\n*风险预算 → 倒推仓位*")
+                else:
+                    st.markdown("**Fixed Capital**\n*资金比例 → 仓位*")
+
+                st.caption("杠杆")
+                st.markdown(f"**{leverage}x**")
+
+                st.caption("单笔风险")
+                if use_fixed_risk:
+                    max_loss = initial_capital * risk_per_trade / 100
+                    st.markdown(f"**{risk_per_trade}%** (约{max_loss:,.0f}U)")
+                else:
+                    st.markdown("**N/A**")
+
+            # 列2: 有效止损 + 覆盖关系
+            with c2:
+                st.caption("有效止损")
+                if use_atr_stop:
+                    st.markdown(f"**ATR({atr_period_val}) × {atr_mult_val}**")
+                    st.caption(f"固定止损 {sl_pct}% → ~~已覆盖~~")
+                else:
+                    sl_mode_label3 = "保证金" if "Margin" in sl_mode else "价格"
+                    st.markdown(f"**固定止损 {sl_pct}%** ({sl_mode_label3})")
+                    st.caption("无覆盖")
+
+                st.caption("建仓比例")
+                st.markdown(f"**{pyr_init_pct}%**")
+
+            # 列3: 市场调整 + 仓位计算方式
+            with c3:
+                st.caption("市场调整系数")
+                st.markdown(f"牛 **{bull_a}%** / 震 **{range_a}%** / 熊 **{bear_a}%**")
+
+                st.caption("仓位计算方式")
+                if use_fixed_risk:
+                    st.markdown("**系统自动计算**\n(风险预算 / 止损距离)")
+                else:
+                    st.markdown("**固定公式**\n(权益 × 系数 × 建仓%)")
+
     # 强制刷新最新行情数据
     with st.spinner("检查最新行情数据..."):
         try:
@@ -1358,6 +1790,8 @@ if submitted:
         st.session_state.selected_indicators["_pyramid_step"] = pyramid_step_pct
         st.session_state.selected_indicators["_enable_pyramiding"] = enable_pyramiding if 'enable_pyramiding' in dir() else False
         st.session_state.selected_indicators["_pyr_init_pct"] = pyr_init_pct if 'pyr_init_pct' in dir() else 30
+        # 闭环重构: 单笔建仓比例% 参与仓位公式
+        st.session_state.selected_indicators["_init_alloc_pct"] = pyr_init_pct if 'pyr_init_pct' in dir() else 30
         st.session_state.selected_indicators["_pyr_trigger_pct"] = pyr_trigger_pct if 'pyr_trigger_pct' in dir() else 2.0
         st.session_state.selected_indicators["_pyr_add_pct"] = pyr_add_pct if 'pyr_add_pct' in dir() else 0.5
         st.session_state.selected_indicators["_pyr_max"] = pyr_max if 'pyr_max' in dir() else 3
@@ -1377,6 +1811,17 @@ if submitted:
 
         st.session_state.selected_indicators["_pos_mode"] = "fixed_risk" if use_fixed_risk else "fixed_capital"
         st.session_state.selected_indicators["_risk_per_trade"] = risk_per_trade
+        # 闭环重构: 牛/震/熊宏观系数从UI覆盖引擎默认值
+        st.session_state.selected_indicators["_bull_alloc"] = bull_a if 'bull_a' in dir() else 1.0
+        st.session_state.selected_indicators["_range_alloc"] = range_a if 'range_a' in dir() else 0.5
+        st.session_state.selected_indicators["_bear_alloc"] = bear_a if 'bear_a' in dir() else 0.3
+        # P0: TP/SL 模式
+        st.session_state.selected_indicators["_tp_mode"] = "margin_pct" if "Margin" in tp_mode else "price_pct"
+        st.session_state.selected_indicators["_sl_mode"] = "margin_pct" if "Margin" in sl_mode else "price_pct"
+        # 需求4修复: ATR参数透传 (之前断链!)
+        st.session_state.selected_indicators["_use_atr_sl"] = use_atr_stop if 'use_atr_stop' in dir() else False
+        st.session_state.selected_indicators["_atr_period"] = atr_period_val if 'atr_period_val' in dir() else 14
+        st.session_state.selected_indicators["_atr_mult"] = atr_mult_val if 'atr_mult_val' in dir() else 2.0
         st.session_state.selected_indicators["_trade_mode"] = trade_mode
         st.session_state.selected_indicators["_regime_filter"] = regime_filter_enabled
 
@@ -1401,16 +1846,31 @@ if submitted:
         _short_sl_val = short_sl if 'short_sl' in dir() else sl_pct
         strat_kwargs = dict(
             initial_capital=initial_capital, leverage=leverage, tp_pct=tp_pct, sl_pct=sl_pct,
-            max_positions=1, bull_alloc=bull_a, range_alloc=range_a, bear_alloc=bear_a,
+            max_positions=1, bull_alloc=bull_a/100.0, range_alloc=range_a/100.0, bear_alloc=bear_a/100.0,
             lock_streak=int(lock_streak_val), lock_bars=lock_bars, cooldown_bars=2, verbose=False,
             trailing_pct=trailing_pct, strategy_mode=strat_mode_key,
             hedge_ratio=hedge_ratio, max_pyramid=max_pyramid,
             pyramid_step=pyramid_step_pct / 100.0, unlock_pct=unlock_pct / 100.0,
             spot_tp=_spot_tp_val, spot_sl=_spot_sl_val, short_sl=_short_sl_val,
+            # P0新增: TP/SL模式 + 风控保护
+            tp_mode=('margin_pct' if 'Margin' in tp_mode else 'price_pct'),
+            sl_mode=('margin_pct' if 'Margin' in sl_mode else 'price_pct'),
+            max_notional_pct=5.0,
+            # 需求4修复: ATR参数构造函数透传
+            use_atr_sl=use_atr_stop if 'use_atr_stop' in dir() else False,
+            atr_period=atr_period_val if 'atr_period_val' in dir() else 14,
+            atr_mult=atr_mult_val if 'atr_mult_val' in dir() else 2.0,
         )
         engine = BacktestEngineV2(**strat_kwargs)
         result = engine.run({coin: df_train}, strategy)
         metrics = PerformanceAnalyzer.analyze(result)
+
+        # 保存到 session_state 供鲁棒性实验室等模块使用
+        st.session_state.last_result = result
+        st.session_state.last_metrics = metrics
+        st.session_state.last_engine_kwargs = dict(strat_kwargs)
+        st.session_state.last_coin = coin
+        st.session_state.last_timeframe = timeframe
 
     # OOS
     oos_m = None
@@ -1733,6 +2193,227 @@ if submitted:
                        f"胜率{len(yr_wins)/max(len(yr_closed),1)*100:.0f}% | "
                        f"累计{yr_pnl:+.1f}%")
 
+    # ================================================================
+    # 收益质量审计模块 (2026-08-11 新增)
+    # 所有数据来自真实 trade history
+    # ================================================================
+    if closed:
+        st.divider()
+        audit = PerformanceAnalyzer.quality_audit(result, metrics)
+
+        # 折叠: 默认展开核心指标
+        with st.expander("📊 收益质量审计 (Earnings Quality Audit)", expanded=False):
+            st.caption("所有数据来自真实交易记录，非收益曲线估算。用于判断策略收益稳定性。")
+
+            # ── Tab1: 年度表现明细表 ──
+            annual = audit.get('annual_table', [])
+            if annual:
+                st.markdown("##### 年度表现明细表")
+                yr_df = pd.DataFrame(annual)
+                yr_df.columns = ['年份', '收益率%', '最大回撤%', '交易次数', '胜率%', '盈亏比']
+                st.dataframe(yr_df.set_index('年份'), use_container_width=True)
+
+            # ── Tab2: 交易贡献分析 ──
+            contrib = audit.get('contribution', {})
+            st.markdown("##### 交易贡献分析")
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("最大1笔盈利", f"${contrib.get('top1_amount', 0):+,.0f}",
+                         delta=f"占总盈利{contrib.get('top1_pct', 0):.1f}%")
+            with c2:
+                st.metric("最大5笔盈利", f"${contrib.get('top5_amount', 0):+,.0f}",
+                         delta=f"占总盈利{contrib.get('top5_pct', 0):.1f}%")
+            with c3:
+                st.metric("最大10笔盈利", f"${contrib.get('top10_amount', 0):+,.0f}",
+                         delta=f"占总盈利{contrib.get('top10_pct', 0):.1f}%")
+
+            # 集中度风险提示
+            level = contrib.get('level', '未知')
+            warn = contrib.get('warning', 'grey')
+            if warn == 'green':
+                st.success(f"✅ 收益集中度: {level} — 策略收益来源多元化，不依赖少数极端行情")
+            elif warn == 'yellow':
+                st.warning(f"⚠️ 收益集中度: {level} — 前5笔盈利占比{contrib.get('top5_pct',0):.0f}%，需关注尾部风险")
+            elif warn == 'red':
+                st.error(f"🔴 收益集中度: {level} — 前5笔盈利占比{contrib.get('top5_pct',0):.0f}%，策略高度依赖少数极端行情！")
+            else:
+                st.caption(f"收益集中度: {level}")
+
+            # ── Tab3: 极端收益剔除测试 ──
+            removal = audit.get('extreme_removal', [])
+            if removal:
+                st.markdown("##### 极端收益剔除测试")
+                st.caption("模拟删除最大N笔盈利后，重新计算核心指标。数值越稳定越好。")
+                rem_rows = []
+                for r in removal:
+                    rem_rows.append({
+                        '操作': r['label'],
+                        '删除金额': f"${r['removed_amount']:+,.0f}",
+                        '剩余总收益': f"{r['new_return']:+.2f}%",
+                        '剩余年化': f"{r['new_annual']:+.2f}%",
+                        '剩余最大回撤': f"{r['new_maxdd']:.2f}%",
+                    })
+                st.dataframe(pd.DataFrame(rem_rows), use_container_width=True, hide_index=True)
+
+            # ── Tab4: 风险贡献分析 ──
+            risk = audit.get('risk_contrib', {})
+            st.markdown("##### 风险贡献分析")
+            rc1, rc2, rc3, rc4 = st.columns(4)
+            with rc1:
+                st.metric("最大单笔亏损", f"${risk.get('max_single_loss', 0):+,.0f}")
+            with rc2:
+                st.metric("最大连续亏损次数", f"{risk.get('max_consecutive_losses', 0)}笔")
+            with rc3:
+                period = risk.get('max_consecutive_period', 'N/A')
+                st.metric("最大连续亏损周期", period[:10] if period != 'N/A' else 'N/A')
+            with rc4:
+                st.metric("最大5笔亏损占比", f"{risk.get('top5_loss_pct', 0):.1f}%",
+                         delta=f"金额${risk.get('top5_loss_amount', 0):+,.0f}")
+
+            # ── Tab5: 交易统计 ──
+            tstats = audit.get('trade_stats', {})
+            st.markdown("##### 交易统计详情")
+            tc1, tc2, tc3, tc4 = st.columns(4)
+            with tc1:
+                st.metric("平均盈利", f"${tstats.get('avg_win', 0):+,.0f}")
+                st.metric("最大盈利", f"${tstats.get('max_win', 0):+,.0f}")
+            with tc2:
+                st.metric("平均亏损", f"${tstats.get('avg_loss', 0):+,.0f}")
+                st.metric("最大亏损", f"${tstats.get('max_loss', 0):+,.0f}")
+            with tc3:
+                avg_h = tstats.get('avg_hold_hours', 0)
+                max_h = tstats.get('max_hold_hours', 0)
+                if avg_h >= 24:
+                    st.metric("平均持仓", f"{avg_h/24:.1f}天")
+                else:
+                    st.metric("平均持仓", f"{avg_h:.0f}小时")
+                if max_h >= 24:
+                    st.metric("最长持仓", f"{max_h/24:.1f}天")
+                else:
+                    st.metric("最长持仓", f"{max_h:.0f}小时")
+            with tc4:
+                st.metric("总盈利笔数", f"{(pd.DataFrame(closed)['pnl'] > 0).sum() if closed else 0}")
+                st.metric("总亏损笔数", f"{(pd.DataFrame(closed)['pnl'] <= 0).sum() if closed else 0}")
+
+    # ================================================================
+    # 交易频率分析 (2026-08-11 新增)
+    # ================================================================
+    if closed:
+        st.divider()
+        st.subheader("⏱️ 交易频率分析")
+        freq = PerformanceAnalyzer.trading_frequency(result)
+        fc1, fc2, fc3, fc4 = st.columns(4)
+        with fc1:
+            st.metric("总交易次数", f"{freq['total_trades']}笔")
+        with fc2:
+            st.metric("年均交易", f"{freq['avg_per_year']:.1f}笔/年")
+        with fc3:
+            st.metric("月均交易", f"{freq['avg_per_month']:.1f}笔/月")
+        with fc4:
+            level = freq['level']
+            if '低频' in level: delta = "样本量不足风险"
+            elif '高频' in level: delta = "交易成本敏感"
+            else: delta = "频率适中"
+            st.metric("策略频率分类", level, delta=delta)
+        st.caption(f"统计周期: {freq['period']}（{freq['total_years']}年）")
+
+    # ================================================================
+    # 市场状态归因分析 (2026-08-11 新增)
+    # ================================================================
+    if closed:
+        st.divider()
+        st.subheader("🌤️ 市场状态归因")
+        attr = PerformanceAnalyzer.market_attribution(result)
+
+        # 三列: 牛市/震荡/熊市
+        ac1, ac2, ac3 = st.columns(3)
+        with ac1:
+            st.markdown("##### 🐂 牛市")
+            st.metric("累计盈亏", f"${attr['bull_pnl']:+,.0f}",
+                     delta=f"占比{attr['bull_pct']:.0f}%")
+            st.metric("交易次数", f"{attr['bull_trades']}笔")
+            st.metric("胜率", f"{attr['bull_wr']:.0f}%")
+        with ac2:
+            st.markdown("##### 😐 震荡市")
+            st.metric("累计盈亏", f"${attr['range_pnl']:+,.0f}",
+                     delta=f"占比{attr['range_pct']:.0f}%")
+            st.metric("交易次数", f"{attr['range_trades']}笔")
+            st.metric("胜率", f"{attr['range_wr']:.0f}%")
+        with ac3:
+            st.markdown("##### 🐻 熊市")
+            st.metric("累计盈亏", f"${attr['bear_pnl']:+,.0f}",
+                     delta=f"占比{attr['bear_pct']:.0f}%")
+            st.metric("交易次数", f"{attr['bear_trades']}笔")
+            st.metric("胜率", f"{attr['bear_wr']:.0f}%")
+
+        # 归因结论
+        st.info(f"📝 归因结论: {attr['conclusion']}")
+
+    # ================================================================
+    # 策略评价报告 (2026-08-11 新增 — 自动生成)
+    # ================================================================
+    if closed:
+        st.divider()
+        st.subheader("📝 策略评价报告")
+        summary = PerformanceAnalyzer.generate_strategy_summary(result, metrics, audit)
+        with st.expander("🤖 自动生成策略评价", expanded=True):
+            for line in summary.split('\n'):
+                if line.startswith('策略类型'):
+                    st.markdown(f"**{line}**")
+                elif line.startswith('收益特征'):
+                    st.markdown(f"📈 {line}")
+                elif line.startswith('交易频率'):
+                    st.markdown(f"⏱️ {line}")
+                elif line.startswith('收益来源'):
+                    st.markdown(f"📊 {line}")
+                elif line.startswith('收益来源判断'):
+                    st.caption(f"   {line}")
+                elif line.startswith('收益集中度'):
+                    st.markdown(f"🎯 {line}")
+                elif line.startswith('极端行情依赖'):
+                    st.markdown(f"⚠️ {line}")
+                elif line.startswith('风险特征'):
+                    st.markdown(f"🛡️ {line}")
+                elif line.startswith('优化建议'):
+                    st.warning(f"💡 {line}")
+                else:
+                    st.text(line)
+
+    # ================================================================
+    # 参数一致性审计 (2026-08-11 新增)
+    # ================================================================
+    if closed:
+        st.divider()
+        st.subheader("🔍 参数一致性审计")
+        p_report = PerformanceAnalyzer.param_audit_report(result, metrics)
+
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            st.metric("UI参数总数", f"{p_report['total_params']}个",
+                     delta="全部检查")
+            st.caption("参数清单: " + ", ".join(p_report['ui_params']))
+        with pc2:
+            confirmed = len(p_report['engine_params'])
+            anomalies = len(p_report['anomalies'])
+            if anomalies == 0:
+                st.metric("引擎参数确认", f"{confirmed}项生效",
+                         delta="✅ 无异常")
+            else:
+                st.metric("引擎参数确认", f"{confirmed}项生效",
+                         delta=f"⚠️ {anomalies}项异常")
+
+        # 引擎参数详情
+        if p_report['engine_params']:
+            with st.expander("📋 引擎参数详情", expanded=False):
+                for ep in p_report['engine_params']:
+                    st.caption(f"✓ {ep}")
+
+        # 异常报告
+        if p_report['anomalies']:
+            st.error("⚠️ 参数异常警告:")
+            for a in p_report['anomalies']:
+                st.warning(f"• {a}")
+
     # 交易记录
     if closed:
         st.subheader("📋 最近交易")
@@ -1747,11 +2428,17 @@ if submitted:
         st.session_state.show_audit = False
     if "audit_cache" not in st.session_state:
         st.session_state.audit_cache = None
+    if "wf_cache" not in st.session_state:
+        st.session_state.wf_cache = None
 
     st.divider()
-    c_audit, c_back = st.columns([2, 1])
+    st.caption("🔍 策略审计与泛化能力验证")
+    c_audit, c_wf = st.columns(2)
+
+    # --- 按钮1: 基础审计 (不含Walk Forward) ---
     if c_audit.button("🤖 AI量化审计分析", use_container_width=True, type="primary"):
         st.session_state.show_audit = True
+        st.session_state.wf_cache = None  # 清除旧WF数据
         with st.spinner("审计引擎分析中..."):
             from audit_engine import AuditEngine, StrategyScorer, AIReportGenerator
             audit_data = AuditEngine.audit(result, metrics)
@@ -1810,9 +2497,195 @@ if submitted:
                 'total_score': total_score,
                 'metrics': metrics,
             }
-            st.rerun()  # 刷新以显示审计视图
-    else:
-        st.caption("💡 配置AI API Key后可自动生成AI研究报告")
+            st.rerun()
+
+    # --- 按钮2: Walk Forward 滚动样本外测试 ---
+    if c_wf.button("📈 滚动样本外测试\n(Walk Forward)", use_container_width=True):
+        st.session_state.show_audit = True
+        with st.spinner("🔄 Walk Forward 滚动窗口测试运行中... (预计1-3分钟)"):
+            from walk_forward import WalkForwardAnalyzer
+            from audit_engine import AuditEngine, StrategyScorer, AIReportGenerator
+
+            # 自动检测数据年份范围
+            try:
+                de_wf = DataEngine()
+                all_tf_wf = de_wf.get_multi_timeframe(coin)
+                df_wf = all_tf_wf.get(timeframe, all_tf_wf['4h'])
+                if not isinstance(df_wf.index, pd.DatetimeIndex):
+                    df_wf.index = pd.to_datetime(df_wf.index)
+                data_start_yr = df_wf.index.min().year
+                data_end_yr = df_wf.index.max().year
+                # 确保至少有4年数据做滚动窗口
+                if data_end_yr - data_start_yr < 3:
+                    st.warning(f"数据范围 {data_start_yr}-{data_end_yr} 不足, 至少需要4年")
+                    st.stop()
+                wf_start = max(data_start_yr, 2017)
+                wf_end = min(data_end_yr, 2026)
+            except Exception as e:
+                st.error(f"数据加载失败: {e}"); st.stop()
+
+            st.caption(f"📅 Walk Forward 窗口: {wf_start}-{wf_end} | "
+                       f"每窗口训练3年 + 测试1年")
+
+            # 构造 engine_kwargs (复用当前回测参数)
+            lock_bars = int(lock_days * 6) if timeframe == '4h' else int(lock_days * 24)
+            _spot_tp_val = spot_tp if 'spot_tp' in dir() else tp_pct
+            _spot_sl_val = spot_sl if 'spot_sl' in dir() else sl_pct
+            _short_sl_val = short_sl if 'short_sl' in dir() else sl_pct
+            wf_engine_kwargs = dict(
+                initial_capital=initial_capital, leverage=leverage,
+                tp_pct=tp_pct, sl_pct=sl_pct,
+                max_positions=1, bull_alloc=bull_a/100.0, range_alloc=range_a/100.0, bear_alloc=bear_a/100.0,
+                lock_streak=int(lock_streak_val), lock_bars=lock_bars, cooldown_bars=2, verbose=False,
+                trailing_pct=trailing_pct, strategy_mode=strat_mode_key,
+                hedge_ratio=hedge_ratio, max_pyramid=max_pyramid,
+                pyramid_step=pyramid_step_pct / 100.0, unlock_pct=unlock_pct / 100.0,
+                spot_tp=_spot_tp_val, spot_sl=_spot_sl_val, short_sl=_short_sl_val,
+                # P0新增
+                tp_mode=('margin_pct' if 'Margin' in tp_mode else 'price_pct'),
+                sl_mode=('margin_pct' if 'Margin' in sl_mode else 'price_pct'),
+                max_notional_pct=5.0,
+            )
+
+            # 运行 Walk Forward
+            wf_result = WalkForwardAnalyzer.analyze(
+                coin=coin, timeframe=timeframe,
+                start_year=wf_start, end_year=wf_end,
+                strategy_config=st.session_state.selected_indicators,
+                engine_kwargs=wf_engine_kwargs,
+                mf_params={"enabled": mf_enabled, "ema_w": ema_w, "adx_w": adx_w,
+                           "adx_th": adx_th, "bull_th": bull_th},
+                use_and=use_and,
+                strategy_class=DynamicStrategy,
+                train_years=3, test_years=1,
+            )
+
+            if wf_result.get("error"):
+                st.warning(f"Walk Forward 运行异常: {wf_result['error']}")
+
+            # 执行含 WF 数据的审计
+            audit_data = AuditEngine.audit(result, metrics, wf_result)
+            prog_scores = StrategyScorer.score(audit_data)
+            total_score = prog_scores['total_program_score']
+
+            # 得分卡片
+            sc1, sc2, sc3, sc4, sc5 = st.columns(5)
+            sc1.metric("总得分", f"{total_score}/70",
+                       delta="优秀" if total_score >= 55 else ("良好" if total_score >= 40 else "待优化"))
+            sc2.metric("收益能力", f"{prog_scores['return_score']}/20")
+            sc3.metric("风险控制", f"{prog_scores['risk_score']}/20")
+            sc4.metric("风险收益比", f"{prog_scores['reward_risk_score']}/15")
+            sc5.metric("稳定性+真实", f"{prog_scores['stability_score']+prog_scores['realism_score']}/15")
+
+            # === 🆕 Walk Forward 详细结果 ===
+            with st.expander("📈 Walk Forward 滚动窗口详情", expanded=True):
+                wf_score = wf_result.get("score", {})
+                adx = wf_result.get("adx_analysis", {})
+
+                # Walk Forward 综合评分卡片
+                wc1, wc2, wc3, wc4 = st.columns(4)
+                wc1.metric("WF 综合评分", f"{wf_score.get('walk_forward_score', 0)}/100",
+                           delta=wf_score.get("overfitting_risk", "?"))
+                wc2.metric("样本外平均年化", f"{wf_score.get('avg_oos_return', 0):+.1f}%")
+                wc3.metric("盈利窗口", f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}")
+                wc4.metric("趋势依赖度", adx.get("trend_dependency", "?"))
+
+                # 窗口明细表
+                windows = wf_result.get("windows", [])
+                if windows:
+                    wf_rows = []
+                    for w in windows:
+                        if w.get("error"):
+                            wf_rows.append({
+                                "窗口": w.get("window", "?"),
+                                "训练期": w.get("train_range", ""),
+                                "测试期": w.get("test_range", ""),
+                                "训练年化": "-",
+                                "测试年化": "-",
+                                "测试胜率": "-",
+                                "状态": f"❌ {w['error']}",
+                            })
+                            continue
+                        train = w.get("train") or {}
+                        test = w.get("test") or {}
+                        test_ret = test.get("annual_return", 0)
+                        wf_rows.append({
+                            "窗口": w.get("window", "?"),
+                            "训练期": w.get("train_range", ""),
+                            "测试期": w.get("test_range", ""),
+                            "训练年化": f"{train.get('annual_return', 0):+.1f}%",
+                            "测试年化": f"{test_ret:+.1f}%",
+                            "测试胜率": f"{test.get('win_rate', 0):.1f}%",
+                            "测试回撤": f"{test.get('max_drawdown', 0):.1f}%",
+                            "状态": "✅ 盈利" if test_ret > 0 else "⚠️ 亏损",
+                        })
+                    st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
+
+                # ADX 趋势分析
+                st.divider()
+                st.caption("📊 ADX 趋势强度分析")
+                adx_c1, adx_c2, adx_c3 = st.columns(3)
+                adx_c1.metric("盈利交易平均ADX", f"{adx.get('avg_adx_winning', 0):.1f}",
+                              delta=f"{adx.get('winning_trade_count', 0)}笔")
+                adx_c2.metric("亏损交易平均ADX", f"{adx.get('avg_adx_losing', 0):.1f}",
+                              delta=f"{adx.get('losing_trade_count', 0)}笔")
+                adx_ratio = adx.get('adx_ratio', 1.0)
+                adx_c3.metric("ADX 比值 (盈/亏)", f"{adx_ratio:.2f}",
+                              delta="趋势依赖" if adx_ratio > 1.3 else "均衡")
+                st.caption(adx.get("dependency_detail", ""))
+
+            # 审计详情 (含WF数据)
+            with st.expander("📊 详细审计数据", expanded=False):
+                ad = audit_data
+                st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
+                           f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
+                st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
+                           f"Sharpe{ad['risk']['sharpe_ratio']:.3f} | "
+                           f"Sortino{ad['risk']['sortino_ratio']:.3f} | "
+                           f"Calmar{ad['risk']['calmar_ratio']:.3f}")
+                st.caption(f"交易: {ad['trading']['total_trades']}笔 | "
+                           f"胜率{ad['trading']['win_rate']:.1f}%")
+                # WF 稳定性
+                st.caption(f"Walk Forward: {ad['stability']['walk_forward_robustness']}/"
+                           f"{ad['stability'].get('walk_forward_max', 100)}分 | "
+                           f"过拟合={ad['stability']['overfitting_risk']} | "
+                           f"趋势依赖={ad['stability'].get('trend_dependency', '未分析')}")
+                summary = ad['summary']
+                if summary['strengths']:
+                    st.success("优势: " + "; ".join(summary['strengths']))
+                if summary['weaknesses']:
+                    st.warning("风险: " + "; ".join(summary['weaknesses']))
+
+            # AI报告 (含WF数据)
+            ai_k = os.environ.get("AI_API_KEY", "")
+            if ai_k:
+                with st.expander("🧠 AI 研究报告 (含Walk Forward)", expanded=False):
+                    with st.spinner("AI分析中..."):
+                        ai_result = AIReportGenerator.build_report(
+                            ai_k, audit_data, metrics,
+                            "DeepSeek-V3 (推荐)"
+                        )
+                        if ai_result.get('success'):
+                            st.markdown(ai_result['report'])
+                        else:
+                            st.caption(f"AI报告跳过: {ai_result.get('error','')}")
+
+            # 缓存
+            st.session_state.audit_cache = {
+                'audit_data': audit_data,
+                'prog_scores': prog_scores,
+                'total_score': total_score,
+                'metrics': metrics,
+            }
+            st.session_state.wf_cache = {
+                'wf_result': wf_result,
+                'audit_data': audit_data,
+                'prog_scores': prog_scores,
+            }
+            st.rerun()
+
+    if not st.session_state.get("show_audit"):
+        st.caption("💡 点击「AI量化审计分析」基础审计 | 点击「滚动样本外测试」含Walk Forward深度验证")
 
     # === AI 策略诊断 (保留原有) ===
     with st.expander("🤖 AI 策略诊断与优化意见", expanded=False):
@@ -1848,10 +2721,16 @@ if submitted:
 # === 审计报告持久视图 ===
 if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
     ac = st.session_state.audit_cache
+    wf_cache = st.session_state.get("wf_cache")
+
     st.subheader("📊 AI量化审计报告")
     if st.button("↩️ 返回回测看板", use_container_width=True):
         st.session_state.show_audit = False
         st.rerun()
+
+    # 🆕 报告类型标识
+    if wf_cache:
+        st.caption("🔬 报告类型: Walk Forward 深度验证 | 含滚动样本外测试 + ADX趋势分析")
 
     sc1, sc2, sc3, sc4, sc5 = st.columns(5)
     total_score = ac['total_score']
@@ -1863,8 +2742,65 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
     sc4.metric("风险收益比", f"{ps['reward_risk_score']}/15")
     sc5.metric("稳定性+真实", f"{ps['stability_score']+ps['realism_score']}/15")
 
+    # === 🆕 Walk Forward 持久展示 ===
+    if wf_cache:
+        wf_result = wf_cache.get('wf_result', {})
+        wf_score = wf_result.get("score", {})
+        adx = wf_result.get("adx_analysis", {})
+
+        with st.expander("📈 Walk Forward 滚动窗口详情", expanded=True):
+            # 评分卡片
+            wc1, wc2, wc3, wc4 = st.columns(4)
+            wc1.metric("WF 综合评分", f"{wf_score.get('walk_forward_score', 0)}/100",
+                       delta=wf_score.get("overfitting_risk", "?"))
+            wc2.metric("样本外平均年化", f"{wf_score.get('avg_oos_return', 0):+.1f}%")
+            wc3.metric("盈利窗口", f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}")
+            wc4.metric("趋势依赖度", adx.get("trend_dependency", "?"))
+
+            # 窗口表
+            windows = wf_result.get("windows", [])
+            if windows:
+                wf_rows = []
+                for w in windows:
+                    if w.get("error"):
+                        wf_rows.append({
+                            "窗口": w.get("window", "?"), "训练期": w.get("train_range", ""),
+                            "测试期": w.get("test_range", ""),
+                            "训练年化": "-", "测试年化": "-", "测试胜率": "-",
+                            "状态": f"❌ {w['error']}",
+                        })
+                        continue
+                    train = w.get("train") or {}
+                    test = w.get("test") or {}
+                    test_ret = test.get("annual_return", 0)
+                    wf_rows.append({
+                        "窗口": w.get("window", "?"),
+                        "训练期": w.get("train_range", ""),
+                        "测试期": w.get("test_range", ""),
+                        "训练年化": f"{train.get('annual_return', 0):+.1f}%",
+                        "测试年化": f"{test_ret:+.1f}%",
+                        "测试胜率": f"{test.get('win_rate', 0):.1f}%",
+                        "测试回撤": f"{test.get('max_drawdown', 0):.1f}%",
+                        "状态": "✅ 盈利" if test_ret > 0 else "⚠️ 亏损",
+                    })
+                st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
+
+            # ADX 分析
+            st.divider()
+            st.caption("📊 ADX 趋势强度分析")
+            adx_c1, adx_c2, adx_c3 = st.columns(3)
+            adx_c1.metric("盈利交易平均ADX", f"{adx.get('avg_adx_winning', 0):.1f}",
+                          delta=f"{adx.get('winning_trade_count', 0)}笔盈利")
+            adx_c2.metric("亏损交易平均ADX", f"{adx.get('avg_adx_losing', 0):.1f}",
+                          delta=f"{adx.get('losing_trade_count', 0)}笔亏损")
+            adx_ratio = adx.get('adx_ratio', 1.0)
+            adx_c3.metric("ADX 比值 (盈/亏)", f"{adx_ratio:.2f}",
+                          delta="⚠️ 趋势依赖" if adx_ratio > 1.3 else "✅ 均衡")
+            st.caption(adx.get("dependency_detail", ""))
+
+    # 审计详情
     ad = ac['audit_data']
-    with st.expander("📊 详细审计数据", expanded=True):
+    with st.expander("📊 详细审计数据", expanded=not wf_cache):
         st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
                    f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
         st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
@@ -1875,7 +2811,14 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
                    f"胜率{ad['trading']['win_rate']:.1f}% | "
                    f"做多{ad['trading']['long_trades']}/做空{ad['trading']['short_trades']} | "
                    f"强平{ad['trading']['liquidation_count']}次")
-        st.caption(f"稳定性: 过拟合风险={ad['stability']['overfitting_risk']}")
+        # 稳定性 (含WF)
+        wf_robust = ad['stability'].get('walk_forward_robustness', 0)
+        if wf_robust > 0:
+            st.caption(f"Walk Forward鲁棒性: {wf_robust}/{ad['stability'].get('walk_forward_max', 100)}分 | "
+                       f"过拟合={ad['stability']['overfitting_risk']} | "
+                       f"趋势依赖={ad['stability'].get('trend_dependency', '未分析')}")
+        else:
+            st.caption(f"稳定性: 过拟合风险={ad['stability']['overfitting_risk']}")
         st.caption(f"真实性: {ad['realism']['grade']}级 ({ad['realism']['realism_score']}/{ad['realism']['max_score']}项摩擦成本)")
         summary = ad['summary']
         if summary['strengths']: st.success("优势: " + "; ".join(summary['strengths']))
