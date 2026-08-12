@@ -45,13 +45,13 @@ SWEEP_DIMENSIONS = {
             {'use_atr': True, 'atr_mult': 2.0},
             {'use_atr': True, 'atr_mult': 3.0},
         ],
-        'format': lambda v: 'ATR关闭' if not v['use_atr'] else f'ATR(14)*{int(v["atr_mult"])}',
+        'format': lambda v: t('dim_format_atr_off') if not v['use_atr'] else f'ATR(14)*{int(v["atr_mult"])}',
         'category': 'hybrid',  # engine_kwargs + selected_indicators
     },
     'fibonacci': {
         'label': 'Fibonacci 回看',
         'values': [100, 150, 200, 300],
-        'format': lambda v: f'{v}根',
+        'format': lambda v: t('bars_unit', n=v),
         'category': 'indicator',
         'indicator_name': '斐波那契回调',
     },
@@ -99,7 +99,7 @@ PARAM_COMBO_GRID = {
     'fibonacci': {
         'label': 'Fibonacci',
         'values': [50, 150, 300],
-        'format': lambda v: f'{v}根',
+        'format': lambda v: t('bars_unit', n=v),
         'indicator_name': '斐波那契回调',
     },
     'volume': {
@@ -248,7 +248,7 @@ class RobustnessLab:
             except Exception as import_err:
                 raise RuntimeError(
                     t('err_import_strategy')
-                    + f' 原始错误: {import_err}'
+                    + ' ' + t('err_orig_fmt', err=import_err)
                 )
 
         # ── 日志: 关键测试参数 ──

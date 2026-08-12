@@ -11,6 +11,8 @@ import pandas as pd, numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional
 
+from i18n import t as _t, of_risk_label, trend_dep_label
+
 # ============================================================
 # 第一部分: AuditEngine — 多维度回测审计
 # ============================================================
@@ -138,8 +140,8 @@ class AuditEngine:
                 'oos_decay': wf_score.get("oos_decay", 0),
                 'oos_avg_return': wf_score.get("avg_oos_return", 0),
                 'oos_profitable_windows': f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}",
-                'overfitting_risk': wf_score.get("overfitting_risk", "未知"),
-                'trend_dependency': adx.get("trend_dependency", "未知"),
+                'overfitting_risk': wf_score.get("overfitting_risk", "unknown"),
+                'trend_dependency': adx.get("trend_dependency", "unknown"),
                 'avg_adx_winning': adx.get("avg_adx_winning", 0),
                 'avg_adx_losing': adx.get("avg_adx_losing", 0),
                 'yearly_pnl_consistency': round(np.std(list(yr_pnl.values())), 1) if len(yr_pnl) > 1 else 0,
@@ -149,21 +151,21 @@ class AuditEngine:
         oos_decay = metrics.get('oos_decay', 0)
 
         if abs(oos_decay) > 30:
-            of_risk = "高"
+            of_risk = "high"
         elif abs(oos_decay) > 15:
-            of_risk = "中"
+            of_risk = "medium"
         else:
-            of_risk = "低"
+            of_risk = "low"
 
         if len(closed) < 10:
-            of_risk = '数据不足'
+            of_risk = 'insufficient'
 
         return {
             'walk_forward_robustness': 0,
             'walk_forward_max': 100,
             'oos_decay': oos_decay,
             'overfitting_risk': of_risk,
-            'trend_dependency': '未分析',
+            'trend_dependency': 'unanalyzed',
             'yearly_pnl_consistency': round(np.std(list(yr_pnl.values())), 1) if len(yr_pnl) > 1 else 0,
         }
 
@@ -190,7 +192,7 @@ class AuditEngine:
     def _audit_walk_forward(walk_forward_data: Dict = None) -> Dict:
         """🆕 Walk Forward 滚动样本外分析数据整理。"""
         if not walk_forward_data or not walk_forward_data.get("score"):
-            return {"available": False, "message": "未执行 Walk Forward 分析"}
+            return {"available": False, "message": _t("wf_not_run")}
 
         wf_score = walk_forward_data.get("score", {})
         adx = walk_forward_data.get("adx_analysis", {})
@@ -218,7 +220,7 @@ class AuditEngine:
             "available": True,
             "score": wf_score.get("walk_forward_score", 0),
             "max_score": wf_score.get("max_score", 100),
-            "overfitting_risk": wf_score.get("overfitting_risk", "未知"),
+            "overfitting_risk": wf_score.get("overfitting_risk", "unknown"),
             "avg_oos_return": wf_score.get("avg_oos_return", 0),
             "avg_oos_sharpe": wf_score.get("avg_oos_sharpe", 0),
             "avg_oos_drawdown": wf_score.get("avg_oos_drawdown", 0),
@@ -226,7 +228,7 @@ class AuditEngine:
             "total_windows": wf_score.get("total_windows", 0),
             "profit_ratio": wf_score.get("profit_ratio", 0),
             "oos_decay": wf_score.get("oos_decay", 0),
-            "trend_dependency": adx.get("trend_dependency", "未分析"),
+            "trend_dependency": adx.get("trend_dependency", "unanalyzed"),
             "avg_adx_winning": adx.get("avg_adx_winning", 0),
             "avg_adx_losing": adx.get("avg_adx_losing", 0),
             "dependency_detail": adx.get("dependency_detail", ""),
@@ -247,34 +249,34 @@ class AuditEngine:
         strengths = []
         weaknesses = []
 
-        if r['annual_return'] > 20: strengths.append("年化收益优秀")
-        elif r['annual_return'] < 0: weaknesses.append("年化收益为负")
+        if r['annual_return'] > 20: strengths.append(_t("audit_annual_good"))
+        elif r['annual_return'] < 0: weaknesses.append(_t("audit_annual_negative"))
 
-        if ri['max_drawdown'] < 25: strengths.append("回撤控制良好")
-        elif ri['max_drawdown'] > 50: weaknesses.append("回撤超过50%")
+        if ri['max_drawdown'] < 25: strengths.append(_t("audit_dd_good"))
+        elif ri['max_drawdown'] > 50: weaknesses.append(_t("audit_dd_over50"))
 
-        if t['win_rate'] > 50: strengths.append("胜率过半")
-        elif t['win_rate'] < 35: weaknesses.append("胜率偏低,可能连亏期长")
+        if t['win_rate'] > 50: strengths.append(_t("audit_wr_good"))
+        elif t['win_rate'] < 35: weaknesses.append(_t("audit_wr_low"))
 
         # 🆕 Walk Forward 稳定性评估
         if wf.get("available"):
             wf_of = wf.get("overfitting_risk", "")
-            if wf_of == '低':
-                strengths.append(f"Walk Forward过拟合风险低 ({wf.get('profitable_windows',0)}/{wf.get('total_windows',0)}窗口盈利)")
-            elif wf_of == '高':
-                weaknesses.append(f"Walk Forward过拟合风险高 (仅{wf.get('profitable_windows',0)}/{wf.get('total_windows',0)}窗口盈利)")
+            if wf_of == 'low':
+                strengths.append(_t("audit_wf_of_low", p=wf.get('profitable_windows',0), t=wf.get('total_windows',0)))
+            elif wf_of == 'high':
+                weaknesses.append(_t("audit_wf_of_high", p=wf.get('profitable_windows',0), t=wf.get('total_windows',0)))
 
             trend_dep = wf.get("trend_dependency", "")
-            if trend_dep == '高':
-                weaknesses.append(f"策略高度依赖趋势行情 (盈利ADX>{wf.get('avg_adx_winning',0):.0f})")
-            elif trend_dep == '低':
-                strengths.append("策略在不同市场环境中表现均衡")
+            if trend_dep == 'high':
+                weaknesses.append(_t("audit_trend_dep_high", adx=wf.get('avg_adx_winning',0)))
+            elif trend_dep == 'low':
+                strengths.append(_t("audit_trend_balanced"))
         else:
             # 无WF数据时的回退
-            if s['overfitting_risk'] == '低': strengths.append("过拟合风险低")
-            elif s['overfitting_risk'] == '高': weaknesses.append("存在严重过拟合风险")
+            if s['overfitting_risk'] == 'low': strengths.append(_t("audit_of_low"))
+            elif s['overfitting_risk'] == 'high': weaknesses.append(_t("audit_of_high"))
 
-        if t['liquidation_count'] > 0: weaknesses.append(f"发生{t['liquidation_count']}次强平")
+        if t['liquidation_count'] > 0: weaknesses.append(_t("audit_liquidation", n=t['liquidation_count']))
 
         return {
             'strengths': strengths,
@@ -371,15 +373,6 @@ class AIReportGenerator:
       - 所有数字必须来源于程序计算结果
     """
 
-    ANTI_HALLUCINATION_PROMPT = """
-【严格约束 - 必须遵守】
-1. 你只能基于下方"审计数据"进行分析，不得编造任何数字
-2. 所有收益率、回撤、胜率等数字必须来自审计数据
-3. 如果某项数据缺失，请明确说"数据显示..."
-4. 禁止保证未来盈利或预测收益
-5. 禁止修改审计数据中的任何数字
-"""
-
     @staticmethod
     def build_report(api_key: str, audit_data: Dict, metrics: Dict,
                      model_name: str = "DeepSeek-V3 (推荐)") -> Dict:
@@ -397,7 +390,7 @@ class AIReportGenerator:
             或 {"success": False, "error": "..."}
         """
         if not api_key:
-            return {"success": False, "error": "未配置API Key"}
+            return {"success": False, "error": _t('ai_report_no_key')}
 
         # 构建结构化数据摘要
         r = audit_data['returns']
@@ -409,59 +402,40 @@ class AIReportGenerator:
         wf = audit_data.get('walk_forward', {})
         wf_context = ""
         if wf.get("available"):
-            wf_context = f"""
-Walk Forward滚动样本外测试:
-  综合得分: {wf.get('score', 0)}/{wf.get('max_score', 100)}
-  过拟合风险: {wf.get('overfitting_risk', '?')}
-  样本外平均年化: {wf.get('avg_oos_return', 0):+.1f}%
-  样本外Sharpe: {wf.get('avg_oos_sharpe', 0):.3f}
-  样本外平均回撤: {wf.get('avg_oos_drawdown', 0):.1f}%
-  盈利窗口: {wf.get('profitable_windows', 0)}/{wf.get('total_windows', 0)} ({wf.get('profit_ratio', 0):.0f}%)
-  样本外衰减: {wf.get('oos_decay', 0):.1f}%
-  趋势依赖度: {wf.get('trend_dependency', '?')}
-  盈利交易平均ADX: {wf.get('avg_adx_winning', 0):.1f}
-  亏损交易平均ADX: {wf.get('avg_adx_losing', 0):.1f}
-  Walk Forward摘要: {wf.get('summary', '无')}
-"""
+            wf_context = _t('ai_wf_context',
+                            score=wf.get('score', 0), max_score=wf.get('max_score', 100),
+                            of_risk=of_risk_label(wf.get('overfitting_risk', 'unknown')),
+                            avg_oos_return=wf.get('avg_oos_return', 0),
+                            avg_oos_sharpe=wf.get('avg_oos_sharpe', 0),
+                            avg_oos_drawdown=wf.get('avg_oos_drawdown', 0),
+                            profitable_windows=wf.get('profitable_windows', 0),
+                            total_windows=wf.get('total_windows', 0),
+                            profit_ratio=wf.get('profit_ratio', 0),
+                            oos_decay=wf.get('oos_decay', 0),
+                            trend_dep=trend_dep_label(wf.get('trend_dependency', 'unknown')),
+                            avg_adx_winning=wf.get('avg_adx_winning', 0),
+                            avg_adx_losing=wf.get('avg_adx_losing', 0),
+                            summary=wf.get('summary', ''))
 
-        data_context = f"""【审计数据 - 只基于以下数据分析】
+        data_context = _t('ai_data_context',
+                          total_return=r['total_return'],
+                          annual_return=r['annual_return'],
+                          years=r['years'],
+                          max_drawdown=ri['max_drawdown'],
+                          sharpe_ratio=ri['sharpe_ratio'],
+                          sortino_ratio=ri['sortino_ratio'],
+                          calmar_ratio=ri['calmar_ratio'],
+                          max_consecutive_losses=ri['max_consecutive_losses'],
+                          total_trades=t['total_trades'],
+                          win_rate=t['win_rate'],
+                          profit_factor=t['profit_factor'],
+                          long_trades=t['long_trades'],
+                          short_trades=t['short_trades'],
+                          liquidation_count=t['liquidation_count'],
+                          overfitting_risk=of_risk_label(s['overfitting_risk']),
+                          wf_context=wf_context)
 
-收益:
-  总收益: {r['total_return']:+.1f}%
-  年化收益: {r['annual_return']:+.1f}%
-  回测时长: {r['years']:.1f}年
-
-风险:
-  最大回撤: {ri['max_drawdown']:.1f}%
-  Sharpe: {ri['sharpe_ratio']:.3f}
-  Sortino: {ri['sortino_ratio']:.3f}
-  Calmar: {ri['calmar_ratio']:.3f}
-  最大连续亏损: {ri['max_consecutive_losses']}笔
-
-交易:
-  总交易: {t['total_trades']}笔
-  胜率: {t['win_rate']:.1f}%
-  盈亏比: {t['profit_factor']:.2f}
-  做多: {t['long_trades']}笔 / 做空: {t['short_trades']}笔
-  强平次数: {t['liquidation_count']}
-
-稳定性:
-  过拟合风险: {s['overfitting_risk']}{wf_context}"""
-
-        prompt = f"""{AIReportGenerator.ANTI_HALLUCINATION_PROMPT}
-
-{data_context}
-
-请按以下格式输出分析报告:
-
-【策略综合评分】(基于数据的客观评价)
-【收益质量分析】(收益来源是否合理)
-【风险诊断】(最大风险点在哪里)
-【稳定性评估】(是否可能过拟合)
-【实盘建议】(是否可以小资金实盘, 需要注意什么)
-【通俗总结】(用新手能理解的语言总结)
-
-总计300字以内, 直接给结论, 不废话。"""
+        prompt = f"{_t('ai_anti_hallucination')}\n\n{data_context}\n\n{_t('ai_report_format')}"
 
         # 调用统一API (复用app.py的 _call_unified_api)
         try:
@@ -478,7 +452,7 @@ Walk Forward滚动样本外测试:
                     "report": result["content"],
                     "program_score": program_scores,
                 }
-            return {"success": False, "error": result.get("error", "AI调用失败")}
+            return {"success": False, "error": result.get("error", _t('ai_call_failed'))}
         except ImportError:
             # 独立运行时, 直接调用API
             return AIReportGenerator._call_direct(api_key, prompt)

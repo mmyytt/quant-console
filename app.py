@@ -25,7 +25,11 @@ from engine_core import (
     DataEngine, StrategyBase, BacktestEngineV2, PerformanceAnalyzer,
     TAKER_FEE, SLIPPAGE, MultiFactorRegime,
 )
-from i18n import t, set_lang, init_lang
+from i18n import (
+    t, set_lang, get_lang, init_lang,
+    INDICATOR_I18N, CATEGORY_I18N, PARAM_LABEL_I18N, PARAM_HELP_I18N,
+    of_risk_label, trend_dep_label,
+)
 
 # ============================================================
 # 登录
@@ -36,14 +40,14 @@ def check_login():
     if not AUTH_CONFIG["enabled"]: return True
     if "logged_in" not in st.session_state: st.session_state.logged_in = False
     if st.session_state.logged_in: return True
-    st.markdown("<h1 style='text-align:center;margin-top:60px'>马总量化控制台</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;opacity:0.5'>请输入账号密码</p>", unsafe_allow_html=True)
+    st.markdown(f"<h1 style='text-align:center;margin-top:60px'>{t('app_login_title')}</h1>", unsafe_allow_html=True)
+    st.markdown(f"<p style='text-align:center;opacity:0.5'>{t('login_prompt')}</p>", unsafe_allow_html=True)
     _, c, _ = st.columns([1, 2, 1])
     with c:
-        u = st.text_input("账号", key="lu"); p = st.text_input("密码", type="password", key="lp")
-        if st.button("登录", use_container_width=True, type="primary"):
+        u = st.text_input(t("login_username"), key="lu"); p = st.text_input(t("login_password"), type="password", key="lp")
+        if st.button(t("login_btn"), use_container_width=True, type="primary"):
             if AUTH_CONFIG["users"].get(u) == p: st.session_state.logged_in = True; st.rerun()
-            else: st.error("账号或密码错误")
+            else: st.error(t("login_error"))
     return False
 
 def export_json(params):
@@ -54,7 +58,9 @@ def export_json(params):
 # ============================================================
 # 页面配置 + CSS
 # ============================================================
-st.set_page_config(page_title="马总量化", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
+# i18n 语言初始化 (放在最前, 让 page_title 和登录页也支持双语)
+init_lang()
+st.set_page_config(page_title=t("page_title"), page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""<style>
 /* === 全局暗黑科技风 === */
 body { font-family: 'Inter', 'Microsoft YaHei', sans-serif; }
@@ -87,9 +93,6 @@ logged_in = check_login()
 if not logged_in:
     st.stop()
 
-# ── i18n 语言初始化 ──
-init_lang()
-
 # ============================================================
 # 数据新鲜度校验: 最新K线超过1天 → 弹警告
 # ============================================================
@@ -99,14 +102,13 @@ def check_data_freshness():
     for c in ["ETH", "BTC", "SOL"]:
         f = get_data_freshness(c)
         if f["status"] == "stale":
-            stale_coins.append(f"{c}({f['gap_hours']:.0f}h前)")
+            stale_coins.append(f"{c}({f['gap_hours']:.0f}{t('stale_hours_ago')})")
     if stale_coins:
-        st.error(f"实时行情 API 请求失败，当前显示为本地历史缓存！ "
-                 f"过期币种: {', '.join(stale_coins)}")
+        st.error(t("data_stale", coins=", ".join(stale_coins)))
 
 check_data_freshness()
 
-if st.sidebar.button("🧹 强制清全部缓存", use_container_width=True):
+if st.sidebar.button(t("btn_clear_cache"), use_container_width=True):
     st.cache_data.clear(); st.cache_resource.clear()
     st.rerun()
 
@@ -115,9 +117,9 @@ lang_col1, lang_col2 = st.sidebar.columns([3, 2])
 with lang_col1:
     st.caption(t("lang_selector"))
 with lang_col2:
-    current_lang_display = "🇨🇳 中文" if st.session_state.lang == "zh" else "🇺🇸 EN"
+    current_lang_display = "🇨🇳 " + t("lang_zh") if st.session_state.lang == "zh" else "🇺🇸 " + t("lang_en")
     if st.button(current_lang_display, use_container_width=True, key="lang_switcher",
-                 help=f"Click to switch / 点击切换"):
+                 help=t("lang_switch_help")):
         st.session_state.lang = "en" if st.session_state.lang == "zh" else "zh"
         set_lang(st.session_state.lang)
         st.rerun()
@@ -397,6 +399,40 @@ for _key, _schema in INDICATOR_SCHEMA.items():
     }
 
 # (旧注册表已由Schema自动生成, 此段删除)
+
+
+# ============================================================
+# i18n 显示辅助: 指标名/类别/参数label/help 按当前语言翻译
+# ============================================================
+def _ind(name):
+    """指标中文名(key) → 当前语言显示名"""
+    if get_lang() == "zh":
+        return name
+    return INDICATOR_I18N.get(name, (name, ""))[0]
+
+def _ind_desc(name):
+    """指标中文名(key) → 当前语言描述"""
+    if get_lang() == "zh":
+        return INDICATOR_REGISTRY.get(name, {}).get("desc", "")
+    return INDICATOR_I18N.get(name, (name, ""))[1]
+
+def _cat(cat):
+    """指标类别中文(key) → 当前语言显示名"""
+    if get_lang() == "zh":
+        return cat
+    return CATEGORY_I18N.get(cat, cat)
+
+def _plabel(label):
+    """参数label中文 → 当前语言显示名"""
+    if get_lang() == "zh":
+        return label
+    return PARAM_LABEL_I18N.get(label, label)
+
+def _phelp(help_text):
+    """参数help中文 → 当前语言显示名"""
+    if get_lang() == "zh":
+        return help_text
+    return PARAM_HELP_I18N.get(help_text, help_text)
 
 
 # ============================================================
@@ -753,40 +789,40 @@ class DynamicStrategy(StrategyBase):
 # ============================================================
 # Sidebar: 基础设置
 # ============================================================
-st.sidebar.title("📊 马总量化控制台")
+st.sidebar.title(t("sidebar_console_title"))
 
 # 日期预设按钮 (在form外面, 立即可用)
 if "date_range" not in st.session_state: st.session_state.date_range = None
 
-st.sidebar.caption("快捷时段:")
+st.sidebar.caption(t("quick_period"))
 dp1, dp2, dp3 = st.sidebar.columns(3)
 for label, dr, col in [
-    ("🐂21牛", ("2021-01-01","2021-12-31"), dp1),
-    ("🐻22熊", ("2022-01-01","2022-12-31"), dp2),
-    ("📈23-24", ("2023-01-01","2024-12-31"), dp3),
+    (t("date_preset_2021"), ("2021-01-01","2021-12-31"), dp1),
+    (t("date_preset_2022"), ("2022-01-01","2022-12-31"), dp2),
+    (t("date_preset_2324"), ("2023-01-01","2024-12-31"), dp3),
 ]:
     if col.button(label, use_container_width=True, key=f"dp_{label}"):
         st.session_state.date_range = dr; st.rerun()
-if st.sidebar.button("🔁 全部历史", use_container_width=True):
+if st.sidebar.button(t("btn_all_history"), use_container_width=True):
     st.session_state.date_range = None; st.rerun()
 
 # 自定义日期选择器 (恢复!)
-st.sidebar.caption("自定义日期:")
+st.sidebar.caption(t("custom_date"))
 dc1, dc2 = st.sidebar.columns(2)
-d_start = dc1.date_input("起始", datetime(2020,1,1), key="d_start")
-d_end = dc2.date_input("结束", datetime.now(), key="d_end")
+d_start = dc1.date_input(t("date_start"), datetime(2020,1,1), key="d_start")
+d_end = dc2.date_input(t("date_end"), datetime.now(), key="d_end")
 dp3, dp4 = st.sidebar.columns(2)
-if dp3.button("近1年", use_container_width=True):
+if dp3.button(t("btn_last_1y"), use_container_width=True):
     st.session_state.date_range = ((datetime.now()-timedelta(days=365)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
     st.rerun()
-if dp4.button("近3年", use_container_width=True):
+if dp4.button(t("btn_last_3y"), use_container_width=True):
     st.session_state.date_range = ((datetime.now()-timedelta(days=1095)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
     st.rerun()
-if st.sidebar.button("✓ 应用自定义日期", use_container_width=True):
+if st.sidebar.button(t("btn_apply_date"), use_container_width=True):
     st.session_state.date_range = (d_start.strftime("%Y-%m-%d"), d_end.strftime("%Y-%m-%d"))
     st.rerun()
 if st.session_state.date_range:
-    st.sidebar.caption(f"当前: {st.session_state.date_range[0]} ~ {st.session_state.date_range[1]}")
+    st.sidebar.caption(t("current_date_range", start=st.session_state.date_range[0], end=st.session_state.date_range[1]))
 
 st.sidebar.divider()
 
@@ -817,19 +853,29 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     c1, c2 = st.columns(2)
     leverage = c1.slider(t("leverage_label"), 1, 20, 3, 1)
     initial_capital = c2.number_input(t("capital_label"), 100, 1000000, 10000, 1000)
-    st.caption("交易方向控制")
+    st.caption(t("direction_control"))
     c1, c2 = st.columns(2)
-    trade_mode = c1.selectbox("交易模式", ["双向交易 (做多+做空)", "仅做多 (Only Long)", "仅做空 (Only Short)"], index=0,
-                              help="双向=牛市做多熊市做空; 仅做多=永远不开空; 仅做空=永远不开多")
-    regime_filter_enabled = c2.checkbox("牛熊方向过滤", True,
-        help="牛市禁止做空, 熊市禁止做多, 震荡市双向允许。关闭则不限制方向。")
+    _trade_mode_options = ["双向交易 (做多+做空)", "仅做多 (Only Long)", "仅做空 (Only Short)"]
+    trade_mode = c1.selectbox(t("trade_mode_label"), _trade_mode_options, index=0,
+                              format_func=lambda x: {"双向交易 (做多+做空)": t("trade_mode_both"),
+                                                     "仅做多 (Only Long)": t("trade_mode_long"),
+                                                     "仅做空 (Only Short)": t("trade_mode_short")}.get(x, x),
+                              help=t("trade_mode_help"))
+    regime_filter_enabled = c2.checkbox(t("regime_filter_label"), True,
+        help=t("regime_filter_help"))
 
-    st.divider(); st.caption("🏗️ 策略模式与参数")
-    strategy_mode = st.selectbox(t("strategy_mode_label"), [
+    st.divider(); st.caption(t("strategy_params_section"))
+    _strategy_mode_options = [
         "经典单向策略 (Classic Directional)",
         "Delta中性对冲 (Delta-Neutral Hedging)",
         "动能突破解封 (Momentum Unlocking)",
-    ], index=0, help="经典=指标信号驱动 | 对冲=双腿锁仓 | 解封=突破平空裸多")
+    ]
+    strategy_mode = st.selectbox(t("strategy_mode_label"), _strategy_mode_options, index=0,
+        format_func=lambda x: {
+            "经典单向策略 (Classic Directional)": t("strategy_mode_classic"),
+            "Delta中性对冲 (Delta-Neutral Hedging)": t("strategy_mode_hedging"),
+            "动能突破解封 (Momentum Unlocking)": t("strategy_mode_unlocking"),
+        }.get(x, x), help=t("strategy_mode_help"))
     mode_map = {"经典": "classic", "Delta": "hedging", "动能": "unlocking"}
     strat_mode_key = [v for k, v in mode_map.items() if k in strategy_mode][0]
     is_dual_leg = strat_mode_key in ("hedging", "unlocking")
@@ -840,227 +886,177 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
     spot_tp = 5.0; spot_sl = 2.0; short_sl = 3.0; funding_threshold = 0.01
 
     if strat_mode_key == "classic":
-        st.caption("经典模式: 下方指标积木 + 风控驱动")
+        st.caption(t("classic_mode_caption"))
         # 通用仓位控制 (不受加仓开关影响)
-        pyr_init_pct = st.slider("单笔建仓比例%", 10, 100, 30, 5,
-            help="信号触发时开仓占总资金的比例。设30%=留余量做加仓/对冲")
+        pyr_init_pct = st.slider(t("single_pos_pct"), 10, 100, 30, 5,
+            help=t("single_pos_help"))
         # 加仓子面板
-        with st.expander("📈 顺势加仓管理 (Pyramiding)", expanded=False):
-            enable_pyramiding = st.checkbox("启用加仓", False)
+        with st.expander(t("pyramiding_title"), expanded=False):
+            enable_pyramiding = st.checkbox(t("enable_pyramiding"), False)
             pyr_trigger_pct = 2.0; pyr_add_pct = 0.5; pyr_max = 3; pyr_trail = False
             if enable_pyramiding:
                 c1, c2 = st.columns(2)
-                pyr_trigger_pct = c1.number_input("触发涨幅%", 0.5, 20.0, 2.0, 0.5,
-                    help="持仓均价浮盈超过X%时触发加仓")
-                pyr_add_pct = c2.slider("加仓比例%", 10, 100, 50, 5,
-                    help="每次加仓占初始仓位的百分比") / 100
-                pyr_max = st.number_input("最大加仓次数", 1, 10, 3)
-                pyr_trail = st.checkbox("加仓后移动止损至均价", False,
-                    help="加仓时将止损位拉抬至最新持仓均价, 实现保本止损")
+                pyr_trigger_pct = c1.number_input(t("pyr_trigger_pct"), 0.5, 20.0, 2.0, 0.5,
+                    help=t("pyr_trigger_help"))
+                pyr_add_pct = c2.slider(t("pyr_add_pct"), 10, 100, 50, 5,
+                    help=t("pyr_add_help")) / 100
+                pyr_max = st.number_input(t("pyr_max"), 1, 10, 3)
+                pyr_trail = st.checkbox(t("pyr_trail"), False,
+                    help=t("pyr_trail_help"))
     elif strat_mode_key == "hedging":
-        st.caption("双腿独立风控 (现货 vs 合约空单)")
-        hedge_ratio = st.slider("现货/合约资金比例", 0.1, 1.0, 0.5, 0.1)
-        st.caption("--- 现货腿 (SPOT LONG) ---")
+        st.caption(t("hedge_legs_caption"))
+        hedge_ratio = st.slider(t("spot_futures_ratio"), 0.1, 1.0, 0.5, 0.1)
+        st.caption(t("spot_leg_caption"))
         c1, c2 = st.columns(2)
-        spot_tp = c1.number_input("现货止盈%", 1.0, 50.0, 5.0, 0.5, key="hedge_spot_tp")
-        spot_sl = c2.number_input("现货止损%", 0.5, 20.0, 2.0, 0.5, key="hedge_spot_sl")
-        st.caption("--- 合约空单腿 (FUTURES SHORT) ---")
-        short_sl = st.number_input("空单止损%", 1.0, 20.0, 3.0, 0.5, key="hedge_short_sl")
-        st.caption("组合保护: 总权益回撤3%强行双边全平")
+        spot_tp = c1.number_input(t("spot_tp_label"), 1.0, 50.0, 5.0, 0.5, key="hedge_spot_tp")
+        spot_sl = c2.number_input(t("spot_sl_label"), 0.5, 20.0, 2.0, 0.5, key="hedge_spot_sl")
+        st.caption(t("futures_leg_caption"))
+        short_sl = st.number_input(t("short_sl_label"), 1.0, 20.0, 3.0, 0.5, key="hedge_short_sl")
+        st.caption(t("combo_protection_caption"))
     elif strat_mode_key == "unlocking":
-        st.caption("解封触发条件 (多条件OR触发)")
+        st.caption(t("unlock_triggers_caption"))
         c1, c2 = st.columns(2)
-        unlock_pct = c1.number_input("价格突破%", 1.0, 20.0, 5.0, 0.5)
-        use_ema_unlock = c2.checkbox("EMA金叉解锁", True)
-        use_rsi_unlock = st.checkbox("RSI突破解锁", False)
-        use_vol_unlock = st.checkbox("放量突破解锁", False)
-        st.caption("解封后裸多风控:")
+        unlock_pct = c1.number_input(t("price_break_pct"), 1.0, 20.0, 5.0, 0.5)
+        use_ema_unlock = c2.checkbox(t("ema_unlock"), True)
+        use_rsi_unlock = st.checkbox(t("rsi_unlock"), False)
+        use_vol_unlock = st.checkbox(t("vol_unlock"), False)
+        st.caption(t("unlock_risk_caption"))
         c1, c2 = st.columns(2)
-        unlock_sl = c1.number_input("解封后止损%", 1.0, 15.0, 3.0, 0.5)
-        unlock_tp = c2.number_input("解封后止盈%", 5.0, 50.0, 15.0, 0.5)
+        unlock_sl = c1.number_input(t("unlock_sl"), 1.0, 15.0, 3.0, 0.5)
+        unlock_tp = c2.number_input(t("unlock_tp"), 5.0, 50.0, 15.0, 0.5)
 
     # === 单向风控 (仅非对冲模式渲染) ===
     if not is_dual_leg:
-        st.divider(); st.caption("🛡️ 单向风控")
+        st.divider(); st.caption(t("one_way_risk_caption"))
 
         # ── 仓位模式 ──
-        st.caption("① 仓位模式 — 决定仓位如何计算")
-        pos_mode = st.radio("仓位模式", [
-            "固定资金比例 (Fixed Capital)", "固定风险比例 (Fixed Risk)"
-        ], index=0, horizontal=True)
+        st.caption(t("pos_mode_caption"))
+        _pos_mode_options = ["固定资金比例 (Fixed Capital)", "固定风险比例 (Fixed Risk)"]
+        pos_mode = st.radio(t("pos_mode_label"), _pos_mode_options,
+            index=0, horizontal=True,
+            format_func=lambda x: t("pos_mode_fixed_capital_opt") if "Capital" in x else t("pos_mode_fixed_risk_opt"))
         use_fixed_risk = "Risk" in pos_mode
 
         if use_fixed_risk:
-            st.info(
-                "**固定风险比例 (Fixed Risk)**\n\n"
-                "根据**最大允许亏损金额**和**止损距离**自动计算仓位。\n\n"
-                "公式：`风险金额 ÷ 止损距离 = 实际仓位`\n\n"
-                "特点：\n"
-                "- 波动越大 → 止损越宽 → 仓位越小\n"
-                "- 波动越小 → 止损越窄 → 仓位越大\n"
-                "- ATR开启后，仓位自动跟随市场波动调整"
-            )
+            st.info(t("fixed_risk_info"))
         else:
-            st.info(
-                "**固定资金比例 (Fixed Capital)**\n\n"
-                "根据**账户资金比例**直接决定仓位。\n\n"
-                "公式：`账户资金 × 市场系数 × 建仓比例`\n\n"
-                "特点：\n"
-                "- 止损不会改变仓位大小\n"
-                "- 止损只决定**退出价格**"
-            )
+            st.info(t("fixed_capital_info"))
 
         # ── 单笔建仓比例 (动态语义) ──
-        st.caption("② 单笔建仓比例 — 仓位计算的\"总阀门\"")
+        st.caption(t("alloc_caption"))
         if use_fixed_risk:
-            alloc_label = "风险预算比例%"
-            alloc_help = (
-                "控制**风险预算的使用比例**。\n\n"
-                "100% = 使用完整风险预算（如允许亏$500就全用）\n"
-                "50% = 只用一半风险预算（如允许亏$500实际只亏$250）\n\n"
-                "⚠️ 这不是投入资金比例！实际保证金由风险预算÷止损距离自动算出。"
-            )
+            alloc_label = t("risk_budget_pct")
+            alloc_help = t("alloc_help_risk")
         else:
-            alloc_label = "初始资金投入比例%"
-            alloc_help = (
-                "控制**投入保证金的比例**。\n\n"
-                "100% = 全部可用资金参与仓位计算\n"
-                "50% = 只用一半资金\n\n"
-                "实际投入 = 权益 × 市场系数 × 此比例"
-            )
+            alloc_label = t("init_capital_pct")
+            alloc_help = t("alloc_help_capital")
         pyr_init_pct = st.slider(alloc_label, 10, 100, 30, 5, help=alloc_help)
         if use_fixed_risk:
-            st.caption(
-                "示例：权益10,000U × 风险1% × 牛市100% × 100% = 最大亏损约100U。"
-                "当前比例决定允许亏损的上限。"
-            )
+            st.caption(t("example_risk"))
         else:
-            st.caption(
-                "示例：权益10,000U × 牛市100% × 30% = 保证金约3,000U"
-            )
+            st.caption(t("example_capital"))
 
         # ── 止盈/止损模式 ──
-        st.caption("③ 止盈/止损模式")
+        st.caption(t("tp_sl_mode_caption"))
         c1, c2 = st.columns(2)
-        tp_mode = c1.radio("止盈模式", ["保证金收益率 (Margin%)", "价格百分比 (Price%)"],
+        _tp_mode_options = ["保证金收益率 (Margin%)", "价格百分比 (Price%)"]
+        tp_mode = c1.radio(t("tp_mode_label"), _tp_mode_options,
                            index=0, horizontal=True,
-                           help="保证金%: 杠杆收益达到X%止盈 | 价格%: 价格上涨X%止盈（与杠杆无关）")
-        sl_mode = c2.radio("止损模式", ["保证金亏损率 (Margin%)", "价格百分比 (Price%)"],
+                           format_func=lambda x: t("tp_mode_margin") if "Margin" in x else t("tp_mode_price"),
+                           help=t("tp_mode_help"))
+        _sl_mode_options = ["保证金亏损率 (Margin%)", "价格百分比 (Price%)"]
+        sl_mode = c2.radio(t("sl_mode_label"), _sl_mode_options,
                            index=0, horizontal=True,
-                           help="保证金%: 保证金亏损X%止损 | 价格%: 价格下跌X%止损（与杠杆无关）")
+                           format_func=lambda x: t("sl_mode_margin") if "Margin" in x else t("sl_mode_price"),
+                           help=t("sl_mode_help"))
         c1, c2 = st.columns(2)
         use_margin_tp = "Margin" in tp_mode
-        tp_label = "保证金止盈%" if use_margin_tp else "价格止盈%"
+        tp_label = t("margin_tp_pct") if use_margin_tp else t("price_tp_pct")
         tp_pct = c1.slider(tp_label, 2.0, 50.0, 10.0, 0.5,
-            help=f"{'杠杆收益达此%止盈' if use_margin_tp else '价格上涨此%止盈（与杠杆无关）'}")
+            help=t("tp_help_margin") if use_margin_tp else t("tp_help_price"))
         use_margin_sl = "Margin" in sl_mode
-        sl_label = "保证金止损%" if use_margin_sl else "价格止损%"
+        sl_label = t("margin_sl_pct") if use_margin_sl else t("price_sl_pct")
         sl_pct = c2.slider(sl_label, 1.0, 30.0, 5.0, 0.5,
-            help=f"{'保证金亏损此%止损' if use_margin_sl else '价格下跌此%止损（与杠杆无关）'}")
+            help=t("sl_help_margin") if use_margin_sl else t("sl_help_price"))
 
         # ── 市场系数 (动态标签) ──
-        coeff_label = "风险预算系数" if use_fixed_risk else "市场仓位系数"
-        st.caption(f"④ {coeff_label} — 根据牛/震/熊市场状态缩放{'风险预算' if use_fixed_risk else '仓位'}")
+        coeff_label = t("risk_budget_coeff") if use_fixed_risk else t("market_coeff")
+        st.caption(t("coeff_caption", coeff=coeff_label,
+                     target=t("risk_budget_word") if use_fixed_risk else t("position_word")))
         c1, c2, c3 = st.columns(3)
-        bull_label = "🐂 牛市" + ("预算%" if use_fixed_risk else "仓位%")
-        bull_help = (
-            f"牛市时{'风险预算' if use_fixed_risk else '仓位'}比例。\n"
-            f"100%={'全额预算' if use_fixed_risk else '正常仓位'} | 0%=牛市不开仓 | 200%=双倍"
-        )
+        bull_label = t("bull_label") + (t("budget_pct") if use_fixed_risk else t("position_pct"))
+        bull_help = t("bull_help_risk") if use_fixed_risk else t("bull_help_capital")
         bull_a = c1.number_input(bull_label, 0, 200, 100, 5, help=bull_help)
-        range_label = "↔️ 震荡" + ("预算%" if use_fixed_risk else "仓位%")
-        range_help = (
-            f"震荡市{'风险预算' if use_fixed_risk else '仓位'}比例。\n"
-            f"100%={'全额' if use_fixed_risk else '正常仓位'} | 0%=震荡不开仓"
-        )
+        range_label = t("range_label") + (t("budget_pct") if use_fixed_risk else t("position_pct"))
+        range_help = t("range_help_risk") if use_fixed_risk else t("range_help_capital")
         range_a = c2.number_input(range_label, 0, 200, 50, 5, help=range_help)
-        bear_label = "🐻 熊市" + ("预算%" if use_fixed_risk else "仓位%")
-        bear_help = (
-            f"熊市{'风险预算' if use_fixed_risk else '仓位'}比例。\n"
-            f"0%=完全避开熊市 | 默认30%"
-        )
+        bear_label = t("bear_label") + (t("budget_pct") if use_fixed_risk else t("position_pct"))
+        bear_help = t("bear_help_risk") if use_fixed_risk else t("bear_help_capital")
         bear_a = c3.number_input(bear_label, 0, 200, 30, 5, help=bear_help)
 
         # ── 连亏锁仓 ──
         c1, c2 = st.columns(2)
-        lock_streak_val = c1.number_input("连亏锁仓(笔)", 1, 10, 3,
-            help="连续亏损N笔后暂停开仓")
-        lock_days = c2.number_input("锁仓天数", 1, 30, 2,
-            help="暂停开仓的天数")
+        lock_streak_val = c1.number_input(t("lock_streak"), 1, 10, 3,
+            help=t("lock_streak_help"))
+        lock_days = c2.number_input(t("lock_days"), 1, 30, 2,
+            help=t("lock_days_help"))
 
         # ── 风险参数 ──
-        st.caption("⑤ 风险参数")
+        st.caption(t("risk_params_caption"))
         c1, c2 = st.columns(2)
         if use_fixed_risk:
-            risk_per_trade = c1.number_input("单笔风险占比%", 0.1, 30.0, 1.0, 0.5,
-                help=(
-                    "每笔交易**最大亏损**占账户权益的百分比。\n\n"
-                    "这是Fixed Risk模式的核心参数：系统根据此值倒推仓位。\n\n"
-                    f"例：权益{initial_capital:,.0f}U × 1% = 每笔最多亏{initial_capital*0.01:,.0f}U\n"
-                    "止损越宽 → 仓位越小；止损越窄 → 仓位越大"
-                ))
+            risk_per_trade = c1.number_input(t("risk_per_trade_pct"), 0.1, 30.0, 1.0, 0.5,
+                help=t("risk_help", equity=f"{initial_capital:,.0f}", max_loss=f"{initial_capital*0.01:,.0f}"))
             # 收敛警告
             if abs(risk_per_trade - sl_pct) < 0.05:
-                st.warning(
-                    f"⚠️ 单笔风险占比({risk_per_trade}%) ≈ 止损({sl_pct}%) → "
-                    f"Fixed Risk 与 Fixed Capital 仓位数学收敛，模式切换无效果。\n\n"
-                    f"建议将风险%设得比止损%小（如 {max(0.1, sl_pct*0.4):.1f}%），才能体现风控差异。"
-                )
+                st.warning(t("risk_converge_warning", risk=risk_per_trade, sl=sl_pct,
+                             suggested=f"{max(0.1, sl_pct*0.4):.1f}"))
         else:
             risk_per_trade = 1.0
-            c1.metric("单笔风险占比%", "N/A",
-                help="仅在固定风险(Fixed Risk)模式下生效。Fixed Capital模式由建仓比例控制仓位。")
+            c1.metric(t("risk_per_trade_pct"), "N/A",
+                help=t("risk_n_a_help"))
 
         # ── ATR 动态止损 (含覆盖状态) ──
-        use_atr_stop = c2.checkbox("ATR入场止损", False,
-            help=(
-                "启用后，系统用ATR波动率自动计算止损距离，固定止损%不再生效。\n\n"
-                "ATR大(高波动) → 止损宽 → 仓位小（Fixed Risk）\n"
-                "ATR小(低波动) → 止损窄 → 仓位大（Fixed Risk）"
-            ))
+        use_atr_stop = c2.checkbox(t("atr_entry_stop"), False, help=t("atr_help"))
         atr_period_val, atr_mult_val = 14, 2.0
         if use_atr_stop:
             c1, c2 = st.columns(2)
-            atr_period_val = c1.number_input("ATR周期", 5, 30, 14, 1,
-                help="计算ATR的K线根数。14=约2周(4H)")
-            atr_mult_val = c2.number_input("止损倍数", 1.0, 5.0, 2.0, 0.5,
-                help="止损距离 = ATR × 此倍数。2.0=两倍波动范围")
+            atr_period_val = c1.number_input(t("atr_period"), 5, 30, 14, 1,
+                help=t("atr_period_help"))
+            atr_mult_val = c2.number_input(t("atr_mult"), 1.0, 5.0, 2.0, 0.5,
+                help=t("atr_mult_help"))
 
             # ATR覆盖状态提示
-            sl_mode_label = "保证金亏损率" if "Margin" in sl_mode else "价格百分比"
+            sl_mode_label = t("margin_mode_label") if "Margin" in sl_mode else t("price_mode_label")
             effective_sl_display = f"{sl_pct}%（{sl_mode_label}）"
-            st.warning(
-                f"⚠️ **止损模式已切换为 ATR 动态止损**\n\n"
-                f"固定止损 {effective_sl_display} → **状态：已覆盖**\n\n"
-                f"当前实际止损：**ATR({atr_period_val}) × {atr_mult_val}倍**\n\n"
-                f"ATR根据市场波动自动调整止损距离，"
-                f"{'并用于Fixed Risk仓位计算。' if use_fixed_risk else '但不影响Fixed Capital仓位大小。'}"
-                f"{'\\n\\n市场波动大 → ATR止损变宽 → 仓位自动缩小；波动小 → 止损变窄 → 仓位自动放大。' if use_fixed_risk else ''}"
-            )
+            risk_desc = t("atr_override_risk_desc") if use_fixed_risk else t("atr_override_capital_desc")
+            st.warning(t("atr_override_warning", sl=effective_sl_display,
+                         period=atr_period_val, mult=atr_mult_val, risk_desc=risk_desc))
         else:
             # ATR关闭时显示当前有效止损
-            sl_mode_label2 = "保证金亏损率" if "Margin" in sl_mode else "价格百分比"
-            st.caption(f"当前有效止损：固定止损 {sl_pct}%（{sl_mode_label2}）")
+            sl_mode_label2 = t("margin_mode_label") if "Margin" in sl_mode else t("price_mode_label")
+            st.caption(t("current_effective_sl", sl=sl_pct, mode=sl_mode_label2))
     else:
         tp_pct = 10.0; sl_pct = 5.0
         bull_a = 100.0; range_a = 50.0; bear_a = 30.0
         lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
         use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
 
-    oos_enabled = st.checkbox("样本外测试 (OOS)", False)
-    oos_ratio = st.slider("训练集%", 50, 90, 70, 5, disabled=not oos_enabled)
+    oos_enabled = st.checkbox(t("oos_toggle"), False)
+    oos_ratio = st.slider(t("train_pct"), 50, 90, 70, 5, disabled=not oos_enabled)
 
-    st.divider(); st.caption("🧱 指标积木")
-    st.caption(f"💡 当前所有指标参数基于【{timeframe}】K线周期实时计算")
-    logic_mode = st.radio("信号组合模式",
-        ["AND 全部满足 (严格)", "OR 任一满足 (灵敏)", "加权打分 N个以上触发 (推荐)"],
-        horizontal=False, key="logic_mode")
+    st.divider(); st.caption(t("indicator_blocks_caption"))
+    st.caption(t("indicator_tf_hint", tf=timeframe))
+    _logic_options = ["AND 全部满足 (严格)", "OR 任一满足 (灵敏)", "加权打分 N个以上触发 (推荐)"]
+    logic_mode = st.radio(t("signal_logic_label"), _logic_options,
+        horizontal=False, key="logic_mode",
+        format_func=lambda x: t("logic_and") if "AND" in x else (t("logic_weighted") if "加权" in x else t("logic_or")))
     use_and = "AND" in logic_mode
     use_weighted = "加权" in logic_mode
     weighted_threshold = 2
     if use_weighted:
-        weighted_threshold = st.slider("最少满足指标数", 1, 10, 2, 1,
-            help="勾选的指标中, 至少N个同时触发才开仓。值越大信号越少但质量越高")
+        weighted_threshold = st.slider(t("min_indicator_count"), 1, 10, 2, 1,
+            help=t("min_indicator_help"))
 
     categories = {}
     for name, info in INDICATOR_REGISTRY.items():
@@ -1071,12 +1067,12 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         st.session_state.selected_indicators = {"EMA 双均线": {"enabled": True, "params": {"EMA_short": 7, "EMA_long": 21}}}
 
     for cat_name, ind_names in categories.items():
-        with st.expander(f"▸ {cat_name} ({len(ind_names)}种)", expanded=False):
+        with st.expander(t("indicator_category_fmt", cat=_cat(cat_name), n=len(ind_names)), expanded=False):
             for name in ind_names:
                 info = INDICATOR_REGISTRY[name]
                 sel = st.session_state.selected_indicators
                 checked = name in sel and sel[name].get("enabled", False)
-                new_checked = st.checkbox(name, checked, key=f"ind_{name}", help=info["desc"])
+                new_checked = st.checkbox(_ind(name), checked, key=f"ind_{name}", help=_ind_desc(name))
                 if new_checked and name not in sel:
                     # 用schema key初始化params, 不是label
                     sel[name] = {"enabled": True, "params": {
@@ -1090,19 +1086,19 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
                     param_items = list(info["params"].items())
                     cols = st.columns(min(2, len(param_items)))
                     for i, (pk, pdef) in enumerate(param_items):
-                        label = pdef["label"]
+                        label = _plabel(pdef["label"])
                         val = cols[i % 2].number_input(
                             label, pdef["min"], pdef["max"],
                             sel[name]["params"].get(pk, pdef["default"]),
                             pdef["step"], key=f"p_{name}_{pk}",
-                            help=pdef.get("help", ""),
+                            help=_phelp(pdef.get("help", "")),
                         )
                         sel[name]["params"][pk] = val
 
-    st.divider(); st.caption("🔬 多因子牛熊 + 共振")
+    st.divider(); st.caption(t("mf_resonance_caption"))
     c1, c2 = st.columns(2)
-    mf_enabled = c1.checkbox("多因子牛熊", True, key="mf_on")
-    resonance_enabled = c2.checkbox("共振打分", False, key="res_on")
+    mf_enabled = c1.checkbox(t("mf_toggle"), True, key="mf_on")
+    resonance_enabled = c2.checkbox(t("resonance_toggle"), False, key="res_on")
     res_f1, res_f2, res_f3 = "", "", ""
     if resonance_enabled:
         cat_list = ["趋势类", "摆动类", "通道/支撑", "成交量", "K线形态"]
@@ -1110,13 +1106,15 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         cat23_opts = [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[1:3]]
         cat45_opts = [""] + [n for n, i in INDICATOR_REGISTRY.items() if i["category"] in cat_list[3:]]
         # 堆叠布局, 避免文字截断
-        res_f1 = st.selectbox("因子1 (趋势类)", cat1_opts, key="rf1")
-        res_f2 = st.selectbox("因子2 (摆动/通道)", cat23_opts, key="rf2")
-        res_f3 = st.selectbox("因子3 (量价/形态)", cat45_opts, key="rf3")
+        _ind_fmt = lambda x: _ind(x) if x else ""
+        res_f1 = st.selectbox(t("factor1"), cat1_opts, key="rf1", format_func=_ind_fmt)
+        res_f2 = st.selectbox(t("factor2"), cat23_opts, key="rf2", format_func=_ind_fmt)
+        res_f3 = st.selectbox(t("factor3"), cat45_opts, key="rf3", format_func=_ind_fmt)
         # 展开选中因子的子参数
+        _factor_short = {"因子1": "factor1_short", "因子2": "factor2_short", "因子3": "factor3_short"}
         for label, fname in [("因子1", res_f1), ("因子2", res_f2), ("因子3", res_f3)]:
             if fname and fname in INDICATOR_REGISTRY and INDICATOR_REGISTRY[fname]["params"]:
-                with st.expander(f"{label}: {fname} 参数", expanded=False):
+                with st.expander(t("factor_params", label=t(_factor_short[label]), fname=_ind(fname)), expanded=False):
                     fparams = INDICATOR_REGISTRY[fname]["params"]
                     cols = st.columns(min(2, len(fparams)))
                     for i, (pk, pdef) in enumerate(fparams.items()):
@@ -1124,19 +1122,19 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
                         # 从selected_indicators获取或默认值
                         cur_val = st.session_state.selected_indicators.get(fname, {}).get("params", {}).get(pk, pdef["default"])
                         new_val = cols[i % 2].number_input(
-                            pdef["label"], pdef["min"], pdef["max"],
+                            _plabel(pdef["label"]), pdef["min"], pdef["max"],
                             cur_val, pdef["step"], key=val_key,
-                            help=pdef.get("help", ""),
+                            help=_phelp(pdef.get("help", "")),
                         )
                         if fname not in st.session_state.selected_indicators:
                             st.session_state.selected_indicators[fname] = {"enabled": True, "params": {}}
                         st.session_state.selected_indicators[fname]["params"][pk] = new_val
     if mf_enabled:
         c1, c2 = st.columns(2)
-        ema_w = c1.slider("EMA权重", 0.0, 1.0, 0.40, 0.05, key="mf_ew")
-        adx_w = c2.slider("ADX权重", 0.0, 1.0, 0.35, 0.05, key="mf_aw")
-        adx_th = st.slider("ADX阈值", 10, 50, 25, 5, key="mf_at")
-        bull_th = st.slider("牛市判定", 0.10, 0.60, 0.30, 0.05, key="mf_bt")
+        ema_w = c1.slider(t("ema_w_label"), 0.0, 1.0, 0.40, 0.05, key="mf_ew")
+        adx_w = c2.slider(t("adx_w_label"), 0.0, 1.0, 0.35, 0.05, key="mf_aw")
+        adx_th = st.slider(t("adx_th_label"), 10, 50, 25, 5, key="mf_at")
+        bull_th = st.slider(t("bull_th_label"), 0.10, 0.60, 0.30, 0.05, key="mf_bt")
 
     st.divider()
     submitted = st.form_submit_button(t("btn_run_backtest"), use_container_width=True, type="primary")
@@ -1144,20 +1142,20 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 st.sidebar.divider()
 # 导出 + 刷新 + 登出 (在form外面)
 c_refresh1, c_refresh2 = st.sidebar.columns(2)
-if c_refresh1.button("🔄 刷新行情", use_container_width=True):
+if c_refresh1.button(t("btn_refresh_quote"), use_container_width=True):
     st.cache_data.clear(); st.cache_resource.clear()
-    st.success("缓存已清除, 正在检查断层并补全..."); time.sleep(1); st.rerun()
-if c_refresh2.button("🔁 强制重刷", use_container_width=True,
-                     help="删除全部本地缓存, 从交易所完整重新下载历史K线"):
-    with st.spinner("正在重新下载全部历史数据 (2-3分钟)..."):
+    st.success(t("refresh_success")); time.sleep(1); st.rerun()
+if c_refresh2.button(t("btn_force_refresh"), use_container_width=True,
+                     help=t("force_refresh_help")):
+    with st.spinner(t("force_refresh_spinner")):
         try:
             from data_loader import force_redownload
             for c in ["ETH", "BTC", "SOL"]:
                 force_redownload(c)
             st.cache_data.clear(); st.cache_resource.clear()
-            st.success("全部数据已重新下载!"); time.sleep(1); st.rerun()
+            st.success(t("force_refresh_done")); time.sleep(1); st.rerun()
         except Exception as e:
-            st.error(f"下载失败: {e}")
+            st.error(t("download_failed", error=e))
 # ============================================================
 # 预设管理器
 # ============================================================
@@ -1177,12 +1175,12 @@ def save_presets(data):
 
 presets = load_presets()
 st.sidebar.divider()
-with st.sidebar.expander("💾 策略预设管理", expanded=False):
+with st.sidebar.expander(t("preset_manager"), expanded=False):
     preset_names = list(presets.keys())
     if preset_names:
-        selected_preset = st.selectbox("已保存预设", [""] + preset_names, key="preset_sel")
+        selected_preset = st.selectbox(t("saved_presets"), [""] + preset_names, key="preset_sel")
         c1, c2 = st.columns(2)
-        if c1.button("📥 加载", use_container_width=True, disabled=not selected_preset):
+        if c1.button(t("btn_load"), use_container_width=True, disabled=not selected_preset):
             p = presets[selected_preset]
             # 恢复参数到session_state
             for k, v in p.get("params", {}).items():
@@ -1190,15 +1188,15 @@ with st.sidebar.expander("💾 策略预设管理", expanded=False):
                     st.session_state.selected_indicators = v
                 elif k in st.session_state:
                     st.session_state[k] = v
-            st.success(f"已加载预设: {selected_preset}")
+            st.success(t("loaded_preset", name=selected_preset))
             time.sleep(1); st.rerun()
-        if c2.button("🗑️ 删除", use_container_width=True, disabled=not selected_preset):
+        if c2.button(t("btn_delete"), use_container_width=True, disabled=not selected_preset):
             del presets[selected_preset]
             save_presets(presets)
             st.rerun()
 
-    preset_name = st.text_input("预设名称", placeholder="ETH-4H-高盈亏比突破V1", key="preset_name")
-    if st.button("💾 保存当前策略", use_container_width=True, disabled=not preset_name):
+    preset_name = st.text_input(t("preset_name"), placeholder=t("preset_placeholder"), key="preset_name")
+    if st.button(t("btn_save_strategy"), use_container_width=True, disabled=not preset_name):
         # 收集所有参数
         bt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
         saved_metrics = {}
@@ -1222,12 +1220,12 @@ with st.sidebar.expander("💾 策略预设管理", expanded=False):
             "metrics": saved_metrics,
         }
         save_presets(presets)
-        st.success(f"预设 '{preset_name}' 已保存!")
+        st.success(t("preset_saved", name=preset_name))
 
 cur_params = {"coin": coin, "tf": timeframe, "lev": leverage,
               "tp": tp_pct, "sl": sl_pct, "indicators": list(st.session_state.selected_indicators.keys())}
 st.sidebar.markdown(export_json(cur_params), unsafe_allow_html=True)
-if st.sidebar.button("登出"): st.session_state.logged_in = False; st.rerun()
+if st.sidebar.button(t("btn_logout")): st.session_state.logged_in = False; st.rerun()
 
 # ============================================================
 # 缓存数据加载 (避免每次切换参数都重新读取)
@@ -1298,7 +1296,7 @@ st.divider()
 def _call_unified_api(messages: list, api_key: str, model_name: str, trading_notes: str) -> dict:
     import requests
     if trading_notes.strip():
-        np = {"role": "system", "content": f"你是翔哥，马总的专属量化导师。精通加密货币技术分析。\n\n【马总交易心法】\n{trading_notes.strip()}\n\n用简洁中文回答, 直接给结论。"}
+        np = {"role": "system", "content": t("unified_api_prompt", notes=trading_notes.strip())}
         hs = any(m["role"] == "system" for m in messages)
         if hs:
             for m in messages:
@@ -1342,7 +1340,7 @@ def _call_unified_api(messages: list, api_key: str, model_name: str, trading_not
 # Tab 2: 翔哥 AI 对话舱
 # ============================================================
 if "AI" in st.session_state.active_tab:
-    from ai_assistant import build_context, DEFAULT_TRADING_NOTES
+    from ai_assistant import build_context, DEFAULT_TRADING_NOTES, get_quick_prompts
     set_lang(st.session_state.lang)
 
     # 模型预设 (整合所有主流API)
@@ -1355,43 +1353,39 @@ if "AI" in st.session_state.active_tab:
         "Google Gemini 2.0":   {"base": "https://generativelanguage.googleapis.com", "model": "gemini-2.0-flash"},
     }
 
-    with st.expander("⚙️ AI 配置", expanded=not st.session_state.get("ai_configured", False)):
+    with st.expander(t("ai_config"), expanded=not st.session_state.get("ai_configured", False)):
         c1, c2 = st.columns(2)
-        ai_key = c1.text_input("API Key / 密钥", type="password",
+        ai_key = c1.text_input(t("api_key_input"), type="password",
                                value=os.environ.get("AI_API_KEY", ""),
-                               key="ai_main_key", placeholder="sk-... 或 AIza...")
-        ai_model_name = c2.selectbox("模型", list(ALL_MODELS.keys()), index=0, key="ai_mdl")
+                               key="ai_main_key", placeholder=t("api_key_placeholder"))
+        ai_model_name = c2.selectbox(t("model_select"), list(ALL_MODELS.keys()), index=0, key="ai_mdl",
+            format_func=lambda x: {"DeepSeek-V3 (推荐)": t("model_dsv3"),
+                                   "DeepSeek-R1 (推理)": t("model_dsr1")}.get(x, x))
 
         if "trading_notes" not in st.session_state:
             st.session_state.trading_notes = DEFAULT_TRADING_NOTES
-        st.caption("翔哥私房交易心法 (自动注入 System Prompt)")
-        trading_notes = st.text_area("心法", value=st.session_state.trading_notes, height=100,
+        st.caption(t("trading_notes_caption"))
+        trading_notes = st.text_area(t("notes_area"), value=st.session_state.trading_notes, height=100,
                                       key="tnotes", label_visibility="collapsed")
         st.session_state.trading_notes = trading_notes
 
     if not ai_key:
-        st.info("展开上方 ⚙️ AI 配置, 填入 API Key 即可使用")
+        st.info(t("ai_key_hint"))
     else:
         st.session_state.ai_configured = True
 
     # 快捷按钮行
     qcols = st.columns(5)
-    quick_msgs = {
-        "💡 行情解读": "帮我解读当前行情是否符合我的交易心法。",
-        "🎯 共振策略": "结合我选的指标，帮我设计一套三体共振策略并讲解原理。",
-        "❓ 假突破检测": "现在的指标数据里，有没有出现'无量洗盘'或假突破的信号？",
-        "📊 参数优化": "根据回测结果，给出3条止盈止损参数优化建议。",
-        "🔍 风险诊断": "扫描我当前的策略配置，指出最大的3个风险点。",
-    }
+    quick_msgs = get_quick_prompts()
     quick_clicked = None
-    for i, (label, prompt) in enumerate(quick_msgs.items()):
+    for i, (label, prompt) in enumerate(quick_msgs):
         if qcols[i].button(label, use_container_width=True, key=f"qp_{i}", disabled=not ai_key):
             quick_clicked = prompt
 
     # 一键诊断按钮
     dcol, _ = st.columns([1, 3])
-    if dcol.button("🧠 一键诊断当前行情与策略", use_container_width=True, type="primary", disabled=not ai_key):
-        quick_clicked = "请给我一份完整的策略诊断报告：1)当前多空格局解读 2)推荐的指标参数和止盈止损 3)Alpha因子优化建议。"
+    if dcol.button(t("btn_diagnose"), use_container_width=True, type="primary", disabled=not ai_key):
+        quick_clicked = t("diagnose_report_prompt")
 
     # 聊天记录
     if "ai_chat_history" not in st.session_state:
@@ -1401,7 +1395,7 @@ if "AI" in st.session_state.active_tab:
         with st.chat_message(msg["role"]):
             st.write(msg["content"])
 
-    user_msg = st.chat_input("和翔哥聊聊你的策略...", key="ai_main_chat", disabled=not ai_key)
+    user_msg = st.chat_input(t("chat_input_placeholder"), key="ai_main_chat", disabled=not ai_key)
     if quick_clicked:
         user_msg = quick_clicked
 
@@ -1427,8 +1421,8 @@ if "AI" in st.session_state.active_tab:
                     info["compute"](dft, cfg.get("params", {}))
                     l = "_long" in dft.columns and dft["_long"].iloc[-1]
                     s = "_short" in dft.columns and dft["_short"].iloc[-1]
-                    ind_ctx[name] = "做多" if l else ("做空" if s else "无信号")
-                except: ind_ctx[name] = "异常"
+                    ind_ctx[name] = t("signal_long") if l else (t("signal_short") if s else t("signal_none"))
+                except: ind_ctx[name] = t("diag_abnormal")
         except: px = 0; ind_ctx = {}
 
         bt = {}
@@ -1442,17 +1436,17 @@ if "AI" in st.session_state.active_tab:
         msgs = [{"role": "system", "content": context}] + st.session_state.ai_chat_history[-8:]
 
         with st.chat_message("assistant"):
-            with st.spinner("翔哥思考中..."):
+            with st.spinner(t("spinner_thinking")):
                 result = _call_unified_api(msgs, ai_key, ai_model_name, trading_notes)
                 if result["success"]:
                     st.write(result["content"])
-                    st.caption(f"模型: {result.get('model','?')}")
+                    st.caption(t("model_caption", model=result.get('model','?')))
                     st.session_state.ai_chat_history.append({"role": "assistant", "content": result["content"]})
                 else:
                     st.error(result["error"])
 
     if st.session_state.ai_chat_history:
-        if st.button("🗑️ 清空对话", use_container_width=True):
+        if st.button(t("btn_clear_chat"), use_container_width=True):
             st.session_state.ai_chat_history = []; st.rerun()
 
     st.stop()
@@ -1619,10 +1613,10 @@ if "鲁棒性" in st.session_state.active_tab:
                 all_results[dim] = sweeps
             except TypeError as te:
                 st.error(t("err_type_error_call"))
-                st.code(f"维度: {dim}\n"
-                        f"错误: {te}\n"
-                        f"run_sweep 签名: {_inspect.signature(RobustnessLab.run_sweep)}\n"
-                        f"检查: strategy_class 参数是否存在? "
+                st.code(f"{t('debug_dim_label')}: {dim}\n"
+                        f"{t('debug_error_label')}: {te}\n"
+                        f"{t('debug_signature', sig=_inspect.signature(RobustnessLab.run_sweep))}\n"
+                        f"{t('debug_check_strategy')} "
                         f"{'strategy_class' in _inspect.signature(RobustnessLab.run_sweep).parameters}")
                 import traceback as _tb
                 st.code(_tb.format_exc())
@@ -1640,7 +1634,7 @@ if "鲁棒性" in st.session_state.active_tab:
         stability = RobustnessLab.stability_score(all_results)
 
         # DEBUG: 输出 stability 结构
-        with st.expander("🔧 stability 结构调试", expanded=False):
+        with st.expander(t("debug_stability_title"), expanded=False):
             st.write(f"stability.keys() = {list(stability.keys())}")
             st.write(f"overall = {stability.get('overall', 'MISSING')}")
             st.write(f"dim_scores keys = {list(stability.get('dim_scores', {}).keys())}")
@@ -1678,7 +1672,7 @@ if "鲁棒性" in st.session_state.active_tab:
                 errors_in_dim = [s for s in sweeps if s.get('error')]
                 if errors_in_dim:
                     for ei, es in enumerate(errors_in_dim):
-                        with st.expander(f"🐛 错误详情: {es['label']}", expanded=False):
+                        with st.expander(t("err_detail_fmt", label=es['label']), expanded=False):
                             st.code(es.get('traceback', es['error']))
 
                 # 迷你折线图: 收益随参数变化（跳过错误项）
@@ -1692,7 +1686,7 @@ if "鲁棒性" in st.session_state.active_tab:
                 dsc1, dsc2, dsc3 = st.columns(3)
                 with dsc1:
                     st.metric(t("robustness_stability_cv"), f"{ds.get('cv', 0):.3f}",
-                             delta="稳定" if ds.get('cv', 0) < 0.3 else "敏感")
+                             delta=t("delta_stable") if ds.get('cv', 0) < 0.3 else t("delta_sensitive"))
                 with dsc2:
                     st.metric(t("robustness_stability_range"), f"{ds.get('range_pct', 0):.1f}%")
                 with dsc3:
@@ -1917,70 +1911,70 @@ p1.metric(t("coin_select"), coin); p2.metric(t("timeframe_select"), timeframe); 
 # 已选指标摘要
 active_inds = [n for n, c in st.session_state.selected_indicators.items() if isinstance(c, dict) and c.get("enabled")]
 if is_dual_leg:
-    st.caption("Delta中性对冲/解锁模式 (无需技术指标，自动建仓对冲)")
+    st.caption(t("dual_leg_caption"))
 else:
-    st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:10]) + ("..." if len(active_inds) > 10 else ""))
+    st.caption(t("active_inds_summary", n=len(active_inds), list=", ".join(active_inds[:10]) + ("..." if len(active_inds) > 10 else "")))
 
 st.divider()
 if submitted:
     # ── 需求六: 实时风险摘要卡 ──
     if not is_dual_leg:
-        with st.expander("📋 当前策略风险配置", expanded=True):
+        with st.expander(t("risk_config_title"), expanded=True):
             c1, c2, c3 = st.columns(3)
             # 列1: 仓位模式 + 止损方式
             with c1:
-                st.caption("仓位模式")
+                st.caption(t("risk_position_mode"))
                 if use_fixed_risk:
-                    st.markdown("**Fixed Risk**\n*风险预算 → 倒推仓位*")
+                    st.markdown(t("fixed_risk_desc"))
                 else:
-                    st.markdown("**Fixed Capital**\n*资金比例 → 仓位*")
+                    st.markdown(t("fixed_capital_desc"))
 
-                st.caption("杠杆")
+                st.caption(t("leverage_label"))
                 st.markdown(f"**{leverage}x**")
 
-                st.caption("单笔风险")
+                st.caption(t("risk_per_trade_caption"))
                 if use_fixed_risk:
                     max_loss = initial_capital * risk_per_trade / 100
-                    st.markdown(f"**{risk_per_trade}%** (约{max_loss:,.0f}U)")
+                    st.markdown(t("risk_pct_approx", pct=risk_per_trade, loss=max_loss))
                 else:
                     st.markdown("**N/A**")
 
             # 列2: 有效止损 + 覆盖关系
             with c2:
-                st.caption("有效止损")
+                st.caption(t("effective_sl_caption"))
                 if use_atr_stop:
                     st.markdown(f"**ATR({atr_period_val}) × {atr_mult_val}**")
-                    st.caption(f"固定止损 {sl_pct}% → ~~已覆盖~~")
+                    st.caption(t("fixed_sl_covered", pct=sl_pct))
                 else:
-                    sl_mode_label3 = "保证金" if "Margin" in sl_mode else "价格"
-                    st.markdown(f"**固定止损 {sl_pct}%** ({sl_mode_label3})")
-                    st.caption("无覆盖")
+                    sl_mode_label3 = t("sl_mode_margin") if "Margin" in sl_mode else t("sl_mode_price")
+                    st.markdown(t("fixed_sl_pct", pct=sl_pct, mode=sl_mode_label3))
+                    st.caption(t("no_override"))
 
-                st.caption("建仓比例")
+                st.caption(t("position_pct_caption"))
                 st.markdown(f"**{pyr_init_pct}%**")
 
             # 列3: 市场调整 + 仓位计算方式
             with c3:
-                st.caption("市场调整系数")
-                st.markdown(f"牛 **{bull_a}%** / 震 **{range_a}%** / 熊 **{bear_a}%**")
+                st.caption(t("market_adjust_caption"))
+                st.markdown(t("market_adjust_fmt", bull=bull_a, range=range_a, bear=bear_a))
 
-                st.caption("仓位计算方式")
+                st.caption(t("position_calc_caption"))
                 if use_fixed_risk:
-                    st.markdown("**系统自动计算**\n(风险预算 / 止损距离)")
+                    st.markdown(t("auto_calc_desc"))
                 else:
-                    st.markdown("**固定公式**\n(权益 × 系数 × 建仓%)")
+                    st.markdown(t("fixed_formula_desc"))
 
     # 强制刷新最新行情数据
-    with st.spinner("检查最新行情数据..."):
+    with st.spinner(t("spinner_check_data")):
         try:
             from data_loader import ensure_data
             ensure_data(coin)
             st.cache_data.clear()  # 清除旧缓存, 强制重新加载
         except Exception as e:
-            st.caption(f"数据刷新跳过: {e}")
+            st.caption(t("data_refresh_skipped", e=e))
 
     # 加载数据
-    with st.spinner("加载数据 & 计算指标..."):
+    with st.spinner(t("spinner_load_data")):
         de = DataEngine()
         all_tf = de.get_multi_timeframe(coin)
         df = all_tf.get(timeframe, all_tf['4h'])
@@ -1991,7 +1985,7 @@ if submitted:
             df.index = df.index.tz_localize(None)
         df = df.sort_index()
         # 数据范围校验
-        st.caption(f"已加载 {timeframe} 数据: {len(df):,}根 | {df.index[0]} ~ {df.index[-1]}")
+        st.caption(t("data_loaded_fmt", tf=timeframe, n=len(df), start=df.index[0], end=df.index[-1]))
 
         # 时间范围过滤
         dr = st.session_state.date_range
@@ -2004,9 +1998,9 @@ if submitted:
                 warmup_start = dr_start - pd.Timedelta(hours=warmup_bars * {'5m':5/60,'15m':0.25,'1h':1,'4h':4,'1d':24}.get(timeframe,4))
                 df = df.loc[warmup_start:dr_end]
             except Exception as e:
-                st.warning(f"日期过滤失败: {e}，使用全部数据")
+                st.warning(t("warning_date_filter_failed", error=e))
         if len(df) < 200:
-            st.error(f"数据不足 ({len(df)}根), 请扩大时间范围"); st.stop()
+            st.error(t("data_insufficient", n=len(df))); st.stop()
 
         # OOS
         if oos_enabled:
@@ -2118,7 +2112,7 @@ if submitted:
     # OOS
     oos_m = None
     if oos_enabled and df_test is not None and len(df_test) > 200:
-        with st.spinner("样本外测试..."):
+        with st.spinner(t("oos_spinner")):
             e2 = BacktestEngineV2(**strat_kwargs)
             r2 = e2.run({coin: df_test}, strategy)
             oos_m = PerformanceAnalyzer.analyze(r2)
@@ -2140,8 +2134,8 @@ if submitted:
                     if cfg > mp: mp = int(cfg)
             return mp
         total_warmup = _get_max_period(st.session_state.get("selected_indicators", {}))
-        st.warning(f"当前组合条件未触发任何交易！数据共 {len(df_train):,} 根K线 (含预热 {total_warmup} 根)")
-        st.caption("已选指标逐项诊断 (扫描最近500根K线):")
+        st.warning(t("no_trades_triggered", n=f"{len(df_train):,}", warmup=total_warmup))
+        st.caption(t("indicator_diagnosis"))
 
         diag_rows = []
         df_diag = df_train.tail(500).copy()
@@ -2158,35 +2152,33 @@ if submitted:
                 l_cnt = df_tmp["_long"].sum() if has_l else 0
                 s_cnt = df_tmp["_short"].sum() if has_s else 0
                 if l_cnt + s_cnt > 0:
-                    status = f"✅ 做多{l_cnt}次 / 做空{s_cnt}次"
+                    status = t("diag_long_short", l=l_cnt, s=s_cnt)
                 else:
-                    status = "⚪ 计算正常, 但未触发信号 (条件未满足)"
-                diag_rows.append((name, status, "正常"))
+                    status = t("diag_no_signal")
+                diag_rows.append((_ind(name), status, t("diag_ok")))
             except Exception as e:
-                diag_rows.append((name, f"❌ 计算失败: {str(e)[:60]}", "异常"))
+                diag_rows.append((_ind(name), t("diag_error", msg=str(e)[:60]), t("diag_abnormal")))
 
         if diag_rows:
-            df_diag_out = pd.DataFrame(diag_rows, columns=["指标", "状态", "类型"])
+            df_diag_out = pd.DataFrame(diag_rows, columns=[t("diag_ind_col"), t("diag_status_col"), t("diag_type_col")])
             st.dataframe(df_diag_out, use_container_width=True, hide_index=True)
 
-        st.info("💡 建议: 1)切换为[OR/加权打分]模式 2)调松参数(如降低RSI阈值) 3)扩大时间范围")
+        st.info(t("diag_suggestion"))
         st.stop()
 
     # === 指标卡片 ===
-    st.subheader("📈 回测结果")
+    st.subheader(t("backtest_result_title"))
     c = st.columns(7)
-    c[0].metric("总收益", f"{metrics.get('total_return',0):+.1f}%")
-    c[1].metric("年化", f"{metrics.get('annual_return',0):+.1f}%",
-                help="基于实际回测天数折算的365天标准化复利收益率")
-    c[2].metric("最大回撤", f"{metrics.get('max_drawdown',0):.1f}%")
-    c[3].metric("胜率", f"{metrics.get('win_rate',0):.1f}%")
-    c[4].metric("盈亏比", f"{metrics.get('profit_factor',0):.2f}" if metrics.get('profit_factor') != float('inf') else "inf")
-    c[5].metric("交易数", metrics.get('total_trades', 0))
+    c[0].metric(t("total_return"), f"{metrics.get('total_return',0):+.1f}%")
+    c[1].metric(t("metric_annual_short"), f"{metrics.get('annual_return',0):+.1f}%",
+                help=t("annual_help"))
+    c[2].metric(t("max_drawdown"), f"{metrics.get('max_drawdown',0):.1f}%")
+    c[3].metric(t("win_rate"), f"{metrics.get('win_rate',0):.1f}%")
+    c[4].metric(t("profit_factor"), f"{metrics.get('profit_factor',0):.2f}" if metrics.get('profit_factor') != float('inf') else "inf")
+    c[5].metric(t("metric_trades_short"), metrics.get('total_trades', 0))
     # 新增风险指标
-    st.caption(f"Sortino: {metrics.get('sortino_ratio',0):.3f} | "
-               f"Calmar: {metrics.get('calmar_ratio',0):.3f} | "
-               f"最大连亏: {metrics.get('max_consecutive_losses',0)}笔 | "
-               f"Recovery Factor: {metrics.get('recovery_factor',0):.2f}")
+    st.caption(t("metrics_caption", sortino=metrics.get('sortino_ratio',0), calmar=metrics.get('calmar_ratio',0),
+                 losses=metrics.get('max_consecutive_losses',0), recovery=metrics.get('recovery_factor',0)))
     # 用真实时间戳算回测时长 (不依赖K线数)
     ec = result.get('equity_curve', [])
     if ec and len(ec) > 1:
@@ -2196,14 +2188,14 @@ if submitted:
         real_yrs = round(real_days / 365.25, 1)
     else:
         real_yrs = metrics.get('years', 0); real_days = int(real_yrs * 365.25)
-    st.caption(f"回测时长: {real_yrs:.1f}年 ({real_days}天) | 年化 = 总收益按此区间复利折算为365天标准收益率")
+    st.caption(t("backtest_duration_fmt", yrs=real_yrs, days=real_days))
     final_eq = result.get('final_equity', initial_capital)
-    c[6].metric("最终权益", f"${final_eq:,.0f}")
+    c[6].metric(t("final_equity"), f"${final_eq:,.0f}")
 
     # Delta暴露曲线 & 仓位状态 (多Leg模式)
     portfolio_data = result.get('portfolio_curve', [])
     if portfolio_data:
-        st.subheader("📐 Delta 暴露 & 仓位状态")
+        st.subheader(t("delta_exposure_title"))
         delta_times = [p['timestamp'] for p in portfolio_data]
         delta_vals = [p['net_delta'] for p in portfolio_data]
         states = [p.get('state', '?') for p in portfolio_data]
@@ -2234,10 +2226,10 @@ if submitted:
     short_trades = [t for t in closed_trades if t.get('side') == 'SHORT']
     long_wr = len([t for t in long_trades if t.get('pnl_pct', 0) > 0]) / len(long_trades) * 100 if long_trades else 0
     short_wr = len([t for t in short_trades if t.get('pnl_pct', 0) > 0]) / len(short_trades) * 100 if short_trades else 0
-    st.caption(f"做多: {len(long_trades)}笔 (胜率{long_wr:.0f}%) | 做空: {len(short_trades)}笔 (胜率{short_wr:.0f}%)")
+    st.caption(t("long_short_stats_fmt", long=len(long_trades), long_wr=long_wr, short=len(short_trades), short_wr=short_wr))
 
     if oos_m:
-        st.subheader("🔬 样本外验证 (OOS)")
+        st.subheader(t("oos_title"))
         # 折算年化后再对比 (消除时长差异)
         train_yrs = metrics.get('years', 1)
         test_yrs = oos_m.get('years', 1)
@@ -2248,24 +2240,24 @@ if submitted:
         ann_decay = test_ann - train_ann
 
         oc1, oc2, oc3, oc4, oc5, oc6 = st.columns(6)
-        oc1.metric("训练年化", f"{train_ann:+.1f}%")
-        oc2.metric("测试年化", f"{test_ann:+.1f}%",
+        oc1.metric(t("oos_train_annual"), f"{train_ann:+.1f}%")
+        oc2.metric(t("oos_test_annual"), f"{test_ann:+.1f}%",
                    delta=f"{ann_decay:+.1f}%", delta_color="inverse")
-        oc3.metric("训练总收益", f"{metrics['total_return']:+.1f}%")
-        oc4.metric("测试总收益", f"{oos_m['total_return']:+.1f}%")
-        oc5.metric("训练胜率", f"{metrics.get('win_rate',0):.1f}%")
-        oc6.metric("测试胜率", f"{oos_m.get('win_rate',0):.1f}%")
+        oc3.metric(t("oos_train_return"), f"{metrics['total_return']:+.1f}%")
+        oc4.metric(t("oos_test_return"), f"{oos_m['total_return']:+.1f}%")
+        oc5.metric(t("oos_train_wr"), f"{metrics.get('win_rate',0):.1f}%")
+        oc6.metric(t("oos_test_wr"), f"{oos_m.get('win_rate',0):.1f}%")
 
         # 判定逻辑: 测试亏钱或年化衰减>50%才算过拟合
         if test_ret < 0:
-            oos_status = "❌ 严重过拟合 (测试集亏损)"
+            oos_status = t("oos_status_severe")
         elif train_ann > 0 and test_ann < train_ann * 0.5:
-            oos_status = "⚠️ 中等衰减 (测试年化衰减超50%)"
+            oos_status = t("oos_status_moderate")
         elif train_ann > 0 and test_ann >= train_ann * 0.8:
-            oos_status = "✅ 样本外验证通过 (表现极其稳健)"
+            oos_status = t("oos_status_pass")
         else:
-            oos_status = "⚡ 轻微衰减 (可接受范围)"
-        st.caption(f"OOS评估: {oos_status} | 训练{train_yrs:.1f}年 vs 测试{test_yrs:.1f}年 | 年化差{ann_decay:+.1f}%")
+            oos_status = t("oos_status_slight")
+        st.caption(t("oos_eval_fmt", status=oos_status, train=train_yrs, test=test_yrs, decay=ann_decay))
 
         # 智能实盘建议卡片
         if oos_m:
@@ -2273,19 +2265,19 @@ if submitted:
             test_dd = oos_m.get('max_drawdown', 100)
             test_ann_val = test_ann
             if test_ann_val > 80 and test_dd < 25:
-                st.success("💡 【优秀策略】样本外表现极佳, 建议: 1.复核手续费/滑点; 2.可先10%小资金实盘演练。")
+                st.success(t("oos_advice_excellent"))
             elif test_wr < 35:
-                st.warning("⚠️ 【低胜率高盈亏比】依赖大行情拉动, 实盘可能面临较长连亏期, 请严格遵守锁仓冷却风控。")
+                st.warning(t("oos_advice_low_wr"))
             if test_dd > 50:
-                st.error("🚨 【高回撤警告】测试集最大回撤超50%, 实盘前务必降低杠杆或收紧止损。")
+                st.error(t("oos_advice_high_dd"))
 
     # === 权益曲线 ===
-    st.subheader("💰 权益曲线")
+    st.subheader(t("equity_curve_title"))
     ec = result.get('equity_curve', [])
     if ec:
         times = [e['timestamp'] for e in ec]; eqs = [e['equity'] for e in ec]
         fig_eq = go.Figure()
-        fig_eq.add_trace(go.Scattergl(x=times, y=eqs, mode='lines', name='权益',
+        fig_eq.add_trace(go.Scattergl(x=times, y=eqs, mode='lines', name=t("equity_trace_name"),
                                      line=dict(color='#818cf8', width=2),
                                      fill='tozeroy', fillcolor='rgba(129,140,248,0.1)'))
         fig_eq.add_hline(y=initial_capital, line_dash="dash", line_color="gray")
@@ -2294,17 +2286,17 @@ if submitted:
         st.plotly_chart(fig_eq, use_container_width=True)
 
     # === K线图 (带缩放按钮) ===
-    st.subheader("📈 K线图 & 交易信号")
+    st.subheader(t("kline_title"))
     # 缩放按钮
     zc1, zc2, zc3, zc4, zc5, zc6 = st.columns([1,1,1,1,1,2])
     zoom_n = min(2000, len(df_train))  # 默认最多2000根, 点[全部]显示所有
     tf_hours = {"5m": 1/12, "15m": 0.25, "1h": 1, "4h": 4, "1d": 24}
-    if zc1.button("1月", use_container_width=True, key="z1m"): zoom_n = int(30 * 24 / tf_hours.get(timeframe, 4))
-    if zc2.button("6月", use_container_width=True, key="z6m"): zoom_n = int(180 * 24 / tf_hours.get(timeframe, 4))
-    if zc3.button("1年", use_container_width=True, key="z1y"): zoom_n = int(365 * 24 / tf_hours.get(timeframe, 4))
-    if zc4.button("3年", use_container_width=True, key="z3y"): zoom_n = int(1095 * 24 / tf_hours.get(timeframe, 4))
-    if zc5.button("全部", use_container_width=True, key="zall"): zoom_n = len(df_train)
-    zc6.caption(f"显示最近 {min(zoom_n, len(df_train))} 根")
+    if zc1.button(t("zoom_1m"), use_container_width=True, key="z1m"): zoom_n = int(30 * 24 / tf_hours.get(timeframe, 4))
+    if zc2.button(t("zoom_6m"), use_container_width=True, key="z6m"): zoom_n = int(180 * 24 / tf_hours.get(timeframe, 4))
+    if zc3.button(t("zoom_1y"), use_container_width=True, key="z1y"): zoom_n = int(365 * 24 / tf_hours.get(timeframe, 4))
+    if zc4.button(t("zoom_3y"), use_container_width=True, key="z3y"): zoom_n = int(1095 * 24 / tf_hours.get(timeframe, 4))
+    if zc5.button(t("zoom_all"), use_container_width=True, key="zall"): zoom_n = len(df_train)
+    zc6.caption(t("zoom_display_fmt", n=min(zoom_n, len(df_train))))
 
     df_show = df_train.tail(zoom_n)
     fig_kl = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.7, 0.3])
@@ -2315,28 +2307,24 @@ if submitted:
     fig_kl.add_trace(go.Candlestick(
         x=df_show.index, open=df_show['open'], high=df_show['high'],
         low=df_show['low'], close=df_show['close'],
-        name='K线', increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
+        name=t("kline_candle_name"), increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
         showlegend=False,
-        hovertemplate=(
-            "时间: %{x}<br>"
-            "开: %{open:.2f}<br>高: %{high:.2f}<br>"
-            "低: %{low:.2f}<br>收: %{close:.2f}<extra></extra>"
-        ),
+        hovertemplate=t("kline_hovertemplate"),
     ), row=1, col=1)
 
     # 叠加EMA
     if 'ema_fast' in df_show.columns:
         fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['ema_fast'], mode='lines',
-                                     line=dict(color='#FFD700', width=1), name='EMA快'), row=1, col=1)
+                                     line=dict(color='#FFD700', width=1), name=t("ema_fast_name")), row=1, col=1)
         fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['ema_slow'], mode='lines',
-                                     line=dict(color='#FF6B6B', width=1), name='EMA慢'), row=1, col=1)
+                                     line=dict(color='#FF6B6B', width=1), name=t("ema_slow_name")), row=1, col=1)
 
     # 布林带
     if 'bb_upper' in df_show.columns:
         fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['bb_upper'], mode='lines',
-                                     line=dict(color='gray', width=0.5, dash='dot'), name='BB上'), row=1, col=1)
+                                     line=dict(color='gray', width=0.5, dash='dot'), name=t("bb_upper_name")), row=1, col=1)
         fig_kl.add_trace(go.Scattergl(x=df_show.index, y=df_show['bb_lower'], mode='lines',
-                                     line=dict(color='gray', width=0.5, dash='dot'), name='BB下'), row=1, col=1)
+                                     line=dict(color='gray', width=0.5, dash='dot'), name=t("bb_lower_name")), row=1, col=1)
 
     # 交易标记
     trades_list = result.get('trades', [])
@@ -2351,17 +2339,17 @@ if submitted:
     if buy_t:
         fig_kl.add_trace(go.Scattergl(x=buy_t, y=buy_p, mode='markers',
                                      marker=dict(symbol='triangle-up', size=12, color='#22c55e'),
-                                     name='做多'), row=1, col=1)
+                                     name=t("long_trades")), row=1, col=1)
     if sell_t:
         fig_kl.add_trace(go.Scattergl(x=sell_t, y=sell_p, mode='markers',
                                      marker=dict(symbol='triangle-down', size=12, color='#ef4444'),
-                                     name='做空'), row=1, col=1)
+                                     name=t("short_trades")), row=1, col=1)
 
     colors = ['#26a69a' if df_show['close'].iloc[i] >= df_show['open'].iloc[i] else '#ef5350' for i in range(len(df_show))]
     fig_kl.add_trace(go.Bar(
         x=df_show.index, y=df_show['vol'], marker_color=colors, opacity=0.4,
-        name='成交量', showlegend=False,
-        hovertemplate="时间: %{x}<br>成交量: %{y:,.0f}<br>成交额: %{customdata:,.0f} USDT<extra></extra>",
+        name=t("volume_name"), showlegend=False,
+        hovertemplate=t("volume_hovertemplate"),
         customdata=df_show['quote_vol'],
     ), row=2, col=1)
 
@@ -2376,8 +2364,8 @@ if submitted:
     )
     fig_kl.update_xaxes(type='date', range=[x0, x1], autorange=False, row=1, col=1)
     fig_kl.update_xaxes(type='date', range=[x0, x1], autorange=False, row=2, col=1)
-    fig_kl.update_yaxes(title_text="价格", range=[y_lo, y_hi], autorange=False, row=1, col=1)
-    fig_kl.update_yaxes(title_text="量", autorange=True, row=2, col=1)
+    fig_kl.update_yaxes(title_text=t("yaxis_price"), range=[y_lo, y_hi], autorange=False, row=1, col=1)
+    fig_kl.update_yaxes(title_text=t("yaxis_volume"), autorange=True, row=2, col=1)
     st.plotly_chart(fig_kl, use_container_width=True,
                     config={'responsive': True, 'displayModeBar': False,
                             'scrollZoom': False})
@@ -2387,14 +2375,14 @@ if submitted:
         strong = [t for t in closed if t.get('resonance_score', 0) >= 3]
         weak = [t for t in closed if 1 <= t.get('resonance_score', 0) <= 2]
         if strong or weak:
-            st.subheader("🔗 共振效果对比")
+            st.subheader(t("resonance_title"))
             rc1, rc2, rc3, rc4 = st.columns(4)
             def _wr(ts): return len([t for t in ts if t.get('pnl_pct',0)>0])/len(ts)*100 if ts else 0
             def _ar(ts): return sum(t.get('pnl_pct',0) for t in ts) if ts else 0
-            rc1.metric("类型", "强信号(3分共振)", delta=f"{len(strong)}笔")
-            rc2.metric("胜率", f"{_wr(strong):.0f}%", delta=f"{_wr(strong)-_wr(closed):+.0f}% vs 全部")
-            rc3.metric("累计盈亏", f"{_ar(strong):+.1f}%")
-            rc4.metric("弱信号(1-2分)", f"{len(weak)}笔", delta=f"胜率{_wr(weak):.0f}%")
+            rc1.metric(t("resonance_type"), t("resonance_strong"), delta=t("trades_count_unit", n=len(strong)))
+            rc2.metric(t("win_rate"), f"{_wr(strong):.0f}%", delta=t("resonance_wr_vs_all", d=_wr(strong)-_wr(closed)))
+            rc3.metric(t("cum_pnl"), f"{_ar(strong):+.1f}%")
+            rc4.metric(t("resonance_weak"), t("trades_count_unit", n=len(weak)), delta=t("resonance_weak_wr", wr=_wr(weak)))
 
     # 年度筛选 + 月度热力图
     if closed:
@@ -2404,9 +2392,9 @@ if submitted:
         closed_df['month'] = pd.to_datetime(closed_df['close_time']).dt.month
         years_available = sorted(closed_df['year'].unique())
 
-        st.subheader("📊 年度/月度分析")
+        st.subheader(t("annual_monthly_title"))
         yr_cols = st.columns([1, 4])
-        selected_year = yr_cols[0].selectbox("年度筛选", ["全部"] + [str(y) for y in years_available], key="year_filter")
+        selected_year = yr_cols[0].selectbox(t("year_filter"), [t("year_all")] + [str(y) for y in years_available], key="year_filter")
         # 月度热力图
         monthly = closed_df.pivot_table(values='pnl_pct', index='year', columns='month', aggfunc='sum')
         # 补全12个月
@@ -2427,14 +2415,13 @@ if submitted:
         st.dataframe(styled, use_container_width=True)
 
         # 年度过滤 → 重新计算指标
-        if selected_year != "全部":
+        if selected_year != t("year_all"):
             yr = int(selected_year)
             yr_closed = closed_df[closed_df['year'] == yr]
             yr_wins = yr_closed[yr_closed['pnl_pct'] > 0]
             yr_pnl = yr_closed['pnl_pct'].sum()
-            st.caption(f"{selected_year}年: {len(yr_closed)}笔 | "
-                       f"胜率{len(yr_wins)/max(len(yr_closed),1)*100:.0f}% | "
-                       f"累计{yr_pnl:+.1f}%")
+            st.caption(t("year_summary_fmt", year=selected_year, n=len(yr_closed),
+                         wr=len(yr_wins)/max(len(yr_closed),1)*100, pnl=yr_pnl))
 
     # ================================================================
     # 收益质量审计模块 (2026-08-11 新增)
@@ -2445,161 +2432,161 @@ if submitted:
         audit = PerformanceAnalyzer.quality_audit(result, metrics)
 
         # 折叠: 默认展开核心指标
-        with st.expander("📊 收益质量审计 (Earnings Quality Audit)", expanded=False):
-            st.caption("所有数据来自真实交易记录，非收益曲线估算。用于判断策略收益稳定性。")
+        with st.expander(t("quality_audit_title"), expanded=False):
+            st.caption(t("quality_audit_caption"))
 
             # ── Tab1: 年度表现明细表 ──
             annual = audit.get('annual_table', [])
             if annual:
-                st.markdown("##### 年度表现明细表")
+                st.markdown(t("annual_detail_table"))
                 yr_df = pd.DataFrame(annual)
-                yr_df.columns = ['年份', '收益率%', '最大回撤%', '交易次数', '胜率%', '盈亏比']
-                st.dataframe(yr_df.set_index('年份'), use_container_width=True)
+                yr_df.columns = [t("col_year"), t("col_return_pct"), t("col_maxdd_pct"), t("col_trades"), t("col_wr_pct"), t("col_pf")]
+                st.dataframe(yr_df.set_index(t("col_year")), use_container_width=True)
 
             # ── Tab2: 交易贡献分析 ──
             contrib = audit.get('contribution', {})
-            st.markdown("##### 交易贡献分析")
+            st.markdown(t("contribution_analysis"))
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.metric("最大1笔盈利", f"${contrib.get('top1_amount', 0):+,.0f}",
-                         delta=f"占总盈利{contrib.get('top1_pct', 0):.1f}%")
+                st.metric(t("top1_profit"), f"${contrib.get('top1_amount', 0):+,.0f}",
+                         delta=t("pct_of_total_profit", pct=contrib.get('top1_pct', 0)))
             with c2:
-                st.metric("最大5笔盈利", f"${contrib.get('top5_amount', 0):+,.0f}",
-                         delta=f"占总盈利{contrib.get('top5_pct', 0):.1f}%")
+                st.metric(t("top5_profit"), f"${contrib.get('top5_amount', 0):+,.0f}",
+                         delta=t("pct_of_total_profit", pct=contrib.get('top5_pct', 0)))
             with c3:
-                st.metric("最大10笔盈利", f"${contrib.get('top10_amount', 0):+,.0f}",
-                         delta=f"占总盈利{contrib.get('top10_pct', 0):.1f}%")
+                st.metric(t("top10_profit"), f"${contrib.get('top10_amount', 0):+,.0f}",
+                         delta=t("pct_of_total_profit", pct=contrib.get('top10_pct', 0)))
 
             # 集中度风险提示
-            level = contrib.get('level', '未知')
+            level = contrib.get('level', t('unanalyzed'))
             warn = contrib.get('warning', 'grey')
             if warn == 'green':
-                st.success(f"✅ 收益集中度: {level} — 策略收益来源多元化，不依赖少数极端行情")
+                st.success(t("concentration_green", level=level))
             elif warn == 'yellow':
-                st.warning(f"⚠️ 收益集中度: {level} — 前5笔盈利占比{contrib.get('top5_pct',0):.0f}%，需关注尾部风险")
+                st.warning(t("concentration_yellow", level=level, pct=contrib.get('top5_pct',0)))
             elif warn == 'red':
-                st.error(f"🔴 收益集中度: {level} — 前5笔盈利占比{contrib.get('top5_pct',0):.0f}%，策略高度依赖少数极端行情！")
+                st.error(t("concentration_red", level=level, pct=contrib.get('top5_pct',0)))
             else:
-                st.caption(f"收益集中度: {level}")
+                st.caption(t("concentration_plain", level=level))
 
             # ── Tab3: 极端收益剔除测试 ──
             removal = audit.get('extreme_removal', [])
             if removal:
-                st.markdown("##### 极端收益剔除测试")
-                st.caption("模拟删除最大N笔盈利后，重新计算核心指标。数值越稳定越好。")
+                st.markdown(t("extreme_removal_title"))
+                st.caption(t("extreme_removal_caption"))
                 rem_rows = []
                 for r in removal:
                     rem_rows.append({
-                        '操作': r['label'],
-                        '删除金额': f"${r['removed_amount']:+,.0f}",
-                        '剩余总收益': f"{r['new_return']:+.2f}%",
-                        '剩余年化': f"{r['new_annual']:+.2f}%",
-                        '剩余最大回撤': f"{r['new_maxdd']:.2f}%",
+                        t('col_operation'): r['label'],
+                        t('col_removed_amount'): f"${r['removed_amount']:+,.0f}",
+                        t('col_remaining_return'): f"{r['new_return']:+.2f}%",
+                        t('col_remaining_annual'): f"{r['new_annual']:+.2f}%",
+                        t('col_remaining_maxdd'): f"{r['new_maxdd']:.2f}%",
                     })
                 st.dataframe(pd.DataFrame(rem_rows), use_container_width=True, hide_index=True)
 
             # ── Tab4: 风险贡献分析 ──
             risk = audit.get('risk_contrib', {})
-            st.markdown("##### 风险贡献分析")
+            st.markdown(t("risk_contrib_title"))
             rc1, rc2, rc3, rc4 = st.columns(4)
             with rc1:
-                st.metric("最大单笔亏损", f"${risk.get('max_single_loss', 0):+,.0f}")
+                st.metric(t("max_single_loss"), f"${risk.get('max_single_loss', 0):+,.0f}")
             with rc2:
-                st.metric("最大连续亏损次数", f"{risk.get('max_consecutive_losses', 0)}笔")
+                st.metric(t("max_consecutive_losses"), t("trades_count_unit", n=risk.get('max_consecutive_losses', 0)))
             with rc3:
                 period = risk.get('max_consecutive_period', 'N/A')
-                st.metric("最大连续亏损周期", period[:10] if period != 'N/A' else 'N/A')
+                st.metric(t("max_consecutive_period"), period[:10] if period != 'N/A' else 'N/A')
             with rc4:
-                st.metric("最大5笔亏损占比", f"{risk.get('top5_loss_pct', 0):.1f}%",
-                         delta=f"金额${risk.get('top5_loss_amount', 0):+,.0f}")
+                st.metric(t("top5_loss_pct"), f"{risk.get('top5_loss_pct', 0):.1f}%",
+                         delta=t("amount_delta", amt=risk.get('top5_loss_amount', 0)))
 
             # ── Tab5: 交易统计 ──
             tstats = audit.get('trade_stats', {})
-            st.markdown("##### 交易统计详情")
+            st.markdown(t("trade_stats_title"))
             tc1, tc2, tc3, tc4 = st.columns(4)
             with tc1:
-                st.metric("平均盈利", f"${tstats.get('avg_win', 0):+,.0f}")
-                st.metric("最大盈利", f"${tstats.get('max_win', 0):+,.0f}")
+                st.metric(t("avg_win"), f"${tstats.get('avg_win', 0):+,.0f}")
+                st.metric(t("max_profit"), f"${tstats.get('max_win', 0):+,.0f}")
             with tc2:
-                st.metric("平均亏损", f"${tstats.get('avg_loss', 0):+,.0f}")
-                st.metric("最大亏损", f"${tstats.get('max_loss', 0):+,.0f}")
+                st.metric(t("avg_loss"), f"${tstats.get('avg_loss', 0):+,.0f}")
+                st.metric(t("max_loss"), f"${tstats.get('max_loss', 0):+,.0f}")
             with tc3:
                 avg_h = tstats.get('avg_hold_hours', 0)
                 max_h = tstats.get('max_hold_hours', 0)
                 if avg_h >= 24:
-                    st.metric("平均持仓", f"{avg_h/24:.1f}天")
+                    st.metric(t("avg_hold"), t("days_unit", d=avg_h/24))
                 else:
-                    st.metric("平均持仓", f"{avg_h:.0f}小时")
+                    st.metric(t("avg_hold"), t("hours_unit", h=avg_h))
                 if max_h >= 24:
-                    st.metric("最长持仓", f"{max_h/24:.1f}天")
+                    st.metric(t("max_hold"), t("days_unit", d=max_h/24))
                 else:
-                    st.metric("最长持仓", f"{max_h:.0f}小时")
+                    st.metric(t("max_hold"), t("hours_unit", h=max_h))
             with tc4:
-                st.metric("总盈利笔数", f"{(pd.DataFrame(closed)['pnl'] > 0).sum() if closed else 0}")
-                st.metric("总亏损笔数", f"{(pd.DataFrame(closed)['pnl'] <= 0).sum() if closed else 0}")
+                st.metric(t("total_win_trades"), f"{(pd.DataFrame(closed)['pnl'] > 0).sum() if closed else 0}")
+                st.metric(t("total_loss_trades"), f"{(pd.DataFrame(closed)['pnl'] <= 0).sum() if closed else 0}")
 
     # ================================================================
     # 交易频率分析 (2026-08-11 新增)
     # ================================================================
     if closed:
         st.divider()
-        st.subheader("⏱️ 交易频率分析")
+        st.subheader(t("trade_freq_title"))
         freq = PerformanceAnalyzer.trading_frequency(result)
         fc1, fc2, fc3, fc4 = st.columns(4)
         with fc1:
-            st.metric("总交易次数", f"{freq['total_trades']}笔")
+            st.metric(t("total_trades_count"), t("trades_count_unit", n=freq['total_trades']))
         with fc2:
-            st.metric("年均交易", f"{freq['avg_per_year']:.1f}笔/年")
+            st.metric(t("avg_per_year"), t("per_year_unit", n=freq['avg_per_year']))
         with fc3:
-            st.metric("月均交易", f"{freq['avg_per_month']:.1f}笔/月")
+            st.metric(t("avg_per_month"), t("per_month_unit", n=freq['avg_per_month']))
         with fc4:
-            level = freq['level']
-            if '低频' in level: delta = "样本量不足风险"
-            elif '高频' in level: delta = "交易成本敏感"
-            else: delta = "频率适中"
-            st.metric("策略频率分类", level, delta=delta)
-        st.caption(f"统计周期: {freq['period']}（{freq['total_years']}年）")
+            avg_yr = freq['avg_per_year']
+            if avg_yr < 6: delta = t("freq_low_risk")
+            elif avg_yr >= 100: delta = t("freq_high_risk")
+            else: delta = t("freq_moderate")
+            st.metric(t("freq_class_label"), freq['level'], delta=delta)
+        st.caption(t("freq_period_fmt", period=freq['period'], years=freq['total_years']))
 
     # ================================================================
     # 市场状态归因分析 (2026-08-11 新增)
     # ================================================================
     if closed:
         st.divider()
-        st.subheader("🌤️ 市场状态归因")
+        st.subheader(t("market_attr_title"))
         attr = PerformanceAnalyzer.market_attribution(result)
 
         # 三列: 牛市/震荡/熊市
         ac1, ac2, ac3 = st.columns(3)
         with ac1:
-            st.markdown("##### 🐂 牛市")
-            st.metric("累计盈亏", f"${attr['bull_pnl']:+,.0f}",
-                     delta=f"占比{attr['bull_pct']:.0f}%")
-            st.metric("交易次数", f"{attr['bull_trades']}笔")
-            st.metric("胜率", f"{attr['bull_wr']:.0f}%")
+            st.markdown(t("market_bull_title"))
+            st.metric(t("cum_pnl"), f"${attr['bull_pnl']:+,.0f}",
+                     delta=t("pct_share", pct=attr['bull_pct']))
+            st.metric(t("col_trades"), t("trades_count_unit", n=attr['bull_trades']))
+            st.metric(t("win_rate"), f"{attr['bull_wr']:.0f}%")
         with ac2:
-            st.markdown("##### 😐 震荡市")
-            st.metric("累计盈亏", f"${attr['range_pnl']:+,.0f}",
-                     delta=f"占比{attr['range_pct']:.0f}%")
-            st.metric("交易次数", f"{attr['range_trades']}笔")
-            st.metric("胜率", f"{attr['range_wr']:.0f}%")
+            st.markdown(t("market_range_title"))
+            st.metric(t("cum_pnl"), f"${attr['range_pnl']:+,.0f}",
+                     delta=t("pct_share", pct=attr['range_pct']))
+            st.metric(t("col_trades"), t("trades_count_unit", n=attr['range_trades']))
+            st.metric(t("win_rate"), f"{attr['range_wr']:.0f}%")
         with ac3:
-            st.markdown("##### 🐻 熊市")
-            st.metric("累计盈亏", f"${attr['bear_pnl']:+,.0f}",
-                     delta=f"占比{attr['bear_pct']:.0f}%")
-            st.metric("交易次数", f"{attr['bear_trades']}笔")
-            st.metric("胜率", f"{attr['bear_wr']:.0f}%")
+            st.markdown(t("market_bear_title"))
+            st.metric(t("cum_pnl"), f"${attr['bear_pnl']:+,.0f}",
+                     delta=t("pct_share", pct=attr['bear_pct']))
+            st.metric(t("col_trades"), t("trades_count_unit", n=attr['bear_trades']))
+            st.metric(t("win_rate"), f"{attr['bear_wr']:.0f}%")
 
         # 归因结论
-        st.info(f"📝 归因结论: {attr['conclusion']}")
+        st.info(t("attr_conclusion_fmt", conclusion=attr['conclusion']))
 
     # ================================================================
     # 策略评价报告 (2026-08-11 新增 — 自动生成)
     # ================================================================
     if closed:
         st.divider()
-        st.subheader("📝 策略评价报告")
+        st.subheader(t("strategy_summary_title"))
         summary = PerformanceAnalyzer.generate_strategy_summary(result, metrics, audit)
-        with st.expander("🤖 自动生成策略评价", expanded=True):
+        with st.expander(t("auto_summary_expander"), expanded=True):
             for line in summary.split('\n'):
                 if line.startswith('策略类型'):
                     st.markdown(f"**{line}**")
@@ -2627,43 +2614,43 @@ if submitted:
     # ================================================================
     if closed:
         st.divider()
-        st.subheader("🔍 参数一致性审计")
+        st.subheader(t("param_audit_title"))
         p_report = PerformanceAnalyzer.param_audit_report(result, metrics)
 
         pc1, pc2 = st.columns(2)
         with pc1:
-            st.metric("UI参数总数", f"{p_report['total_params']}个",
-                     delta="全部检查")
-            st.caption("参数清单: " + ", ".join(p_report['ui_params']))
+            st.metric(t("ui_params_total"), t("params_count_unit", n=p_report['total_params']),
+                     delta=t("all_checked"))
+            st.caption(t("params_list", list=", ".join(p_report['ui_params'])))
         with pc2:
             confirmed = len(p_report['engine_params'])
             anomalies = len(p_report['anomalies'])
             if anomalies == 0:
-                st.metric("引擎参数确认", f"{confirmed}项生效",
-                         delta="✅ 无异常")
+                st.metric(t("engine_params_confirmed"), t("items_effective", n=confirmed),
+                         delta=t("no_anomaly"))
             else:
-                st.metric("引擎参数确认", f"{confirmed}项生效",
-                         delta=f"⚠️ {anomalies}项异常")
+                st.metric(t("engine_params_confirmed"), t("items_effective", n=confirmed),
+                         delta=t("anomaly_count", n=anomalies))
 
         # 引擎参数详情
         if p_report['engine_params']:
-            with st.expander("📋 引擎参数详情", expanded=False):
+            with st.expander(t("engine_params_detail"), expanded=False):
                 for ep in p_report['engine_params']:
                     st.caption(f"✓ {ep}")
 
         # 异常报告
         if p_report['anomalies']:
-            st.error("⚠️ 参数异常警告:")
+            st.error(t("param_anomaly_warning"))
             for a in p_report['anomalies']:
                 st.warning(f"• {a}")
 
     # 交易记录
     if closed:
-        st.subheader("📋 最近交易")
-        rows = [{"时间": t.get('close_time','')[:16], "币种": t.get('coin',coin),
-                 "方向": t.get('side','?'), "入场": f"${t.get('entry',0):.2f}",
-                 "出场": f"${t.get('exit',0):.2f}", "原因": t.get('reason','?'),
-                 "盈亏%": f"{t.get('pnl_pct',0):+.2f}%"} for t in closed[-15:]]
+        st.subheader(t("recent_trades_title"))
+        rows = [{t("col_time"): t.get('close_time','')[:16], t("col_coin"): t.get('coin',coin),
+                 t("col_side"): t.get('side','?'), t("col_entry"): f"${t.get('entry',0):.2f}",
+                 t("col_exit"): f"${t.get('exit',0):.2f}", t("col_reason"): t.get('reason','?'),
+                 t("col_pnl_pct"): f"{t.get('pnl_pct',0):+.2f}%"} for t in closed[-15:]]
         st.dataframe(pd.DataFrame(rows[::-1]), use_container_width=True, height=300)
 
     # === AI 量化审计分析 ===
@@ -2675,14 +2662,14 @@ if submitted:
         st.session_state.wf_cache = None
 
     st.divider()
-    st.caption("🔍 策略审计与泛化能力验证")
+    st.caption(t("audit_section_caption"))
     c_audit, c_wf = st.columns(2)
 
     # --- 按钮1: 基础审计 (不含Walk Forward) ---
-    if c_audit.button("🤖 AI量化审计分析", use_container_width=True, type="primary"):
+    if c_audit.button(t("btn_audit"), use_container_width=True, type="primary"):
         st.session_state.show_audit = True
         st.session_state.wf_cache = None  # 清除旧WF数据
-        with st.spinner("审计引擎分析中..."):
+        with st.spinner(t("spinner_audit")):
             from audit_engine import AuditEngine, StrategyScorer, AIReportGenerator
             audit_data = AuditEngine.audit(result, metrics)
             prog_scores = StrategyScorer.score(audit_data)
@@ -2690,49 +2677,46 @@ if submitted:
 
             # 得分卡片
             sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-            sc1.metric("总得分", f"{total_score}/70",
-                       delta="优秀" if total_score >= 55 else ("良好" if total_score >= 40 else "待优化"))
-            sc2.metric("收益能力", f"{prog_scores['return_score']}/20")
-            sc3.metric("风险控制", f"{prog_scores['risk_score']}/20")
-            sc4.metric("风险收益比", f"{prog_scores['reward_risk_score']}/15")
-            sc5.metric("稳定性+真实", f"{prog_scores['stability_score']+prog_scores['realism_score']}/15")
+            sc1.metric(t("total_score"), f"{total_score}/70",
+                       delta=t("score_excellent") if total_score >= 55 else (t("score_good") if total_score >= 40 else t("score_needs_improve")))
+            sc2.metric(t("return_ability"), f"{prog_scores['return_score']}/20")
+            sc3.metric(t("score_risk"), f"{prog_scores['risk_score']}/20")
+            sc4.metric(t("reward_risk"), f"{prog_scores['reward_risk_score']}/15")
+            sc5.metric(t("stability_realism"), f"{prog_scores['stability_score']+prog_scores['realism_score']}/15")
 
             # 审计详情
-            with st.expander("📊 详细审计数据", expanded=True):
+            with st.expander(t("audit_detail_expander"), expanded=True):
                 ad = audit_data
-                st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
-                           f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
-                st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
-                           f"Sharpe{ad['risk']['sharpe_ratio']:.3f} | "
-                           f"Sortino{ad['risk']['sortino_ratio']:.3f} | "
-                           f"Calmar{ad['risk']['calmar_ratio']:.3f}")
-                st.caption(f"交易: {ad['trading']['total_trades']}笔 | "
-                           f"胜率{ad['trading']['win_rate']:.1f}% | "
-                           f"做多{ad['trading']['long_trades']}/做空{ad['trading']['short_trades']} | "
-                           f"强平{ad['trading']['liquidation_count']}次")
-                st.caption(f"稳定性: 过拟合风险={ad['stability']['overfitting_risk']}")
-                st.caption(f"真实性: {ad['realism']['grade']}级 ({ad['realism']['realism_score']}/{ad['realism']['max_score']}项摩擦成本)")
+                st.caption(t("return_annual_fmt", ret=ad['returns']['annual_return'], std=ad['returns']['return_stability_std']))
+                st.caption(t("risk_dd_fmt", dd=ad['risk']['max_drawdown'], sharpe=ad['risk']['sharpe_ratio'],
+                             sortino=ad['risk']['sortino_ratio'], calmar=ad['risk']['calmar_ratio']))
+                st.caption(t("trading_audit_fmt", n=ad['trading']['total_trades'], wr=ad['trading']['win_rate'],
+                             long=ad['trading']['long_trades'], short=ad['trading']['short_trades'],
+                             liq=ad['trading']['liquidation_count']))
+                st.caption(t("stability_audit_fmt", risk=ad['stability']['overfitting_risk']))
+                st.caption(t("realism_fmt", grade=ad['realism']['grade'], score=ad['realism']['realism_score'],
+                             max=ad['realism']['max_score']))
 
                 # 优势/劣势
                 summary = ad['summary']
                 if summary['strengths']:
-                    st.success("优势: " + "; ".join(summary['strengths']))
+                    st.success(t("strengths_label", list="; ".join(summary['strengths'])))
                 if summary['weaknesses']:
-                    st.warning("风险: " + "; ".join(summary['weaknesses']))
+                    st.warning(t("weaknesses_label", list="; ".join(summary['weaknesses'])))
 
             # AI报告 (可选)
             ai_k = os.environ.get("AI_API_KEY", "")
             if ai_k:
-                with st.expander("🧠 AI 研究报告", expanded=False):
-                    with st.spinner("AI分析中..."):
+                with st.expander(t("ai_report_expander"), expanded=False):
+                    with st.spinner(t("spinner_ai")):
                         ai_result = AIReportGenerator.build_report(
                             ai_k, audit_data, metrics,
-                            "DeepSeek-V3 (推荐)"
+                            t("model_dsv3")
                         )
                         if ai_result.get('success'):
                             st.markdown(ai_result['report'])
                         else:
-                            st.caption(f"AI报告跳过: {ai_result.get('error','')}")
+                            st.caption(t("ai_report_skipped", error=ai_result.get('error','')))
             # 缓存审计结果到session_state
             st.session_state.audit_cache = {
                 'audit_data': audit_data,
@@ -2743,9 +2727,9 @@ if submitted:
             st.rerun()
 
     # --- 按钮2: Walk Forward 滚动样本外测试 ---
-    if c_wf.button("📈 滚动样本外测试\n(Walk Forward)", use_container_width=True):
+    if c_wf.button(t("btn_walk_forward"), use_container_width=True):
         st.session_state.show_audit = True
-        with st.spinner("🔄 Walk Forward 滚动窗口测试运行中... (预计1-3分钟)"):
+        with st.spinner(t("spinner_wf")):
             from walk_forward import WalkForwardAnalyzer
             from audit_engine import AuditEngine, StrategyScorer, AIReportGenerator
 
@@ -2762,15 +2746,14 @@ if submitted:
                 data_end_yr = df_wf.index.max().year
                 # 确保至少有4年数据做滚动窗口
                 if data_end_yr - data_start_yr < 3:
-                    st.warning(f"数据范围 {data_start_yr}-{data_end_yr} 不足, 至少需要4年")
+                    st.warning(t("data_range_insufficient", start=data_start_yr, end=data_end_yr))
                     st.stop()
                 wf_start = max(data_start_yr, 2017)
                 wf_end = min(data_end_yr, 2026)
             except Exception as e:
-                st.error(f"数据加载失败: {e}"); st.stop()
+                st.error(t("data_load_failed", e=e)); st.stop()
 
-            st.caption(f"📅 Walk Forward 窗口: {wf_start}-{wf_end} | "
-                       f"每窗口训练3年 + 测试1年")
+            st.caption(t("wf_window_caption", start=wf_start, end=wf_end))
 
             # 构造 engine_kwargs (复用当前回测参数)
             lock_bars = int(lock_days * 6) if timeframe == '4h' else int(lock_days * 24)
@@ -2806,7 +2789,7 @@ if submitted:
             )
 
             if wf_result.get("error"):
-                st.warning(f"Walk Forward 运行异常: {wf_result['error']}")
+                st.warning(t("wf_run_error", error=wf_result['error']))
 
             # 执行含 WF 数据的审计
             audit_data = AuditEngine.audit(result, metrics, wf_result)
@@ -2815,25 +2798,25 @@ if submitted:
 
             # 得分卡片
             sc1, sc2, sc3, sc4, sc5 = st.columns(5)
-            sc1.metric("总得分", f"{total_score}/70",
-                       delta="优秀" if total_score >= 55 else ("良好" if total_score >= 40 else "待优化"))
-            sc2.metric("收益能力", f"{prog_scores['return_score']}/20")
-            sc3.metric("风险控制", f"{prog_scores['risk_score']}/20")
-            sc4.metric("风险收益比", f"{prog_scores['reward_risk_score']}/15")
-            sc5.metric("稳定性+真实", f"{prog_scores['stability_score']+prog_scores['realism_score']}/15")
+            sc1.metric(t("total_score"), f"{total_score}/70",
+                       delta=t("score_excellent") if total_score >= 55 else (t("score_good") if total_score >= 40 else t("score_needs_improve")))
+            sc2.metric(t("return_ability"), f"{prog_scores['return_score']}/20")
+            sc3.metric(t("score_risk"), f"{prog_scores['risk_score']}/20")
+            sc4.metric(t("reward_risk"), f"{prog_scores['reward_risk_score']}/15")
+            sc5.metric(t("stability_realism"), f"{prog_scores['stability_score']+prog_scores['realism_score']}/15")
 
             # === 🆕 Walk Forward 详细结果 ===
-            with st.expander("📈 Walk Forward 滚动窗口详情", expanded=True):
+            with st.expander(t("wf_detail_expander"), expanded=True):
                 wf_score = wf_result.get("score", {})
                 adx = wf_result.get("adx_analysis", {})
 
                 # Walk Forward 综合评分卡片
                 wc1, wc2, wc3, wc4 = st.columns(4)
-                wc1.metric("WF 综合评分", f"{wf_score.get('walk_forward_score', 0)}/100",
+                wc1.metric(t("wf_score_label"), f"{wf_score.get('walk_forward_score', 0)}/100",
                            delta=wf_score.get("overfitting_risk", "?"))
-                wc2.metric("样本外平均年化", f"{wf_score.get('avg_oos_return', 0):+.1f}%")
-                wc3.metric("盈利窗口", f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}")
-                wc4.metric("趋势依赖度", adx.get("trend_dependency", "?"))
+                wc2.metric(t("oos_avg_annual"), f"{wf_score.get('avg_oos_return', 0):+.1f}%")
+                wc3.metric(t("profitable_windows"), f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}")
+                wc4.metric(t("trend_dependency"), adx.get("trend_dependency", "?"))
 
                 # 窗口明细表
                 windows = wf_result.get("windows", [])
@@ -2842,78 +2825,74 @@ if submitted:
                     for w in windows:
                         if w.get("error"):
                             wf_rows.append({
-                                "窗口": w.get("window", "?"),
-                                "训练期": w.get("train_range", ""),
-                                "测试期": w.get("test_range", ""),
-                                "训练年化": "-",
-                                "测试年化": "-",
-                                "测试胜率": "-",
-                                "状态": f"❌ {w['error']}",
+                                t("col_window"): w.get("window", "?"),
+                                t("col_train_period"): w.get("train_range", ""),
+                                t("col_test_period"): w.get("test_range", ""),
+                                t("col_train_annual"): "-",
+                                t("col_test_annual"): "-",
+                                t("col_test_wr"): "-",
+                                t("col_status"): f"❌ {w['error']}",
                             })
                             continue
                         train = w.get("train") or {}
                         test = w.get("test") or {}
                         test_ret = test.get("annual_return", 0)
                         wf_rows.append({
-                            "窗口": w.get("window", "?"),
-                            "训练期": w.get("train_range", ""),
-                            "测试期": w.get("test_range", ""),
-                            "训练年化": f"{train.get('annual_return', 0):+.1f}%",
-                            "测试年化": f"{test_ret:+.1f}%",
-                            "测试胜率": f"{test.get('win_rate', 0):.1f}%",
-                            "测试回撤": f"{test.get('max_drawdown', 0):.1f}%",
-                            "状态": "✅ 盈利" if test_ret > 0 else "⚠️ 亏损",
+                            t("col_window"): w.get("window", "?"),
+                            t("col_train_period"): w.get("train_range", ""),
+                            t("col_test_period"): w.get("test_range", ""),
+                            t("col_train_annual"): f"{train.get('annual_return', 0):+.1f}%",
+                            t("col_test_annual"): f"{test_ret:+.1f}%",
+                            t("col_test_wr"): f"{test.get('win_rate', 0):.1f}%",
+                            t("col_test_dd"): f"{test.get('max_drawdown', 0):.1f}%",
+                            t("col_status"): t("wf_profitable") if test_ret > 0 else t("wf_loss"),
                         })
                     st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
 
                 # ADX 趋势分析
                 st.divider()
-                st.caption("📊 ADX 趋势强度分析")
+                st.caption(t("adx_analysis_caption"))
                 adx_c1, adx_c2, adx_c3 = st.columns(3)
-                adx_c1.metric("盈利交易平均ADX", f"{adx.get('avg_adx_winning', 0):.1f}",
-                              delta=f"{adx.get('winning_trade_count', 0)}笔")
-                adx_c2.metric("亏损交易平均ADX", f"{adx.get('avg_adx_losing', 0):.1f}",
-                              delta=f"{adx.get('losing_trade_count', 0)}笔")
+                adx_c1.metric(t("avg_adx_winning"), f"{adx.get('avg_adx_winning', 0):.1f}",
+                              delta=t("trades_count_unit", n=adx.get('winning_trade_count', 0)))
+                adx_c2.metric(t("avg_adx_losing"), f"{adx.get('avg_adx_losing', 0):.1f}",
+                              delta=t("trades_count_unit", n=adx.get('losing_trade_count', 0)))
                 adx_ratio = adx.get('adx_ratio', 1.0)
-                adx_c3.metric("ADX 比值 (盈/亏)", f"{adx_ratio:.2f}",
-                              delta="趋势依赖" if adx_ratio > 1.3 else "均衡")
+                adx_c3.metric(t("adx_ratio_label"), f"{adx_ratio:.2f}",
+                              delta=t("trend_dependent") if adx_ratio > 1.3 else t("balanced"))
                 st.caption(adx.get("dependency_detail", ""))
 
             # 审计详情 (含WF数据)
-            with st.expander("📊 详细审计数据", expanded=False):
+            with st.expander(t("audit_detail_expander"), expanded=False):
                 ad = audit_data
-                st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
-                           f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
-                st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
-                           f"Sharpe{ad['risk']['sharpe_ratio']:.3f} | "
-                           f"Sortino{ad['risk']['sortino_ratio']:.3f} | "
-                           f"Calmar{ad['risk']['calmar_ratio']:.3f}")
-                st.caption(f"交易: {ad['trading']['total_trades']}笔 | "
-                           f"胜率{ad['trading']['win_rate']:.1f}%")
+                st.caption(t("return_annual_fmt", ret=ad['returns']['annual_return'], std=ad['returns']['return_stability_std']))
+                st.caption(t("risk_dd_fmt", dd=ad['risk']['max_drawdown'], sharpe=ad['risk']['sharpe_ratio'],
+                             sortino=ad['risk']['sortino_ratio'], calmar=ad['risk']['calmar_ratio']))
+                st.caption(t("trading_audit_fmt_simple", n=ad['trading']['total_trades'], wr=ad['trading']['win_rate']))
                 # WF 稳定性
-                st.caption(f"Walk Forward: {ad['stability']['walk_forward_robustness']}/"
-                           f"{ad['stability'].get('walk_forward_max', 100)}分 | "
-                           f"过拟合={ad['stability']['overfitting_risk']} | "
-                           f"趋势依赖={ad['stability'].get('trend_dependency', '未分析')}")
+                st.caption(t("wf_robustness_fmt", n=ad['stability']['walk_forward_robustness'],
+                             max=ad['stability'].get('walk_forward_max', 100),
+                             of=of_risk_label(ad['stability']['overfitting_risk']),
+                             td=trend_dep_label(ad['stability'].get('trend_dependency', 'unknown'))))
                 summary = ad['summary']
                 if summary['strengths']:
-                    st.success("优势: " + "; ".join(summary['strengths']))
+                    st.success(t("strengths_label", list="; ".join(summary['strengths'])))
                 if summary['weaknesses']:
-                    st.warning("风险: " + "; ".join(summary['weaknesses']))
+                    st.warning(t("weaknesses_label", list="; ".join(summary['weaknesses'])))
 
             # AI报告 (含WF数据)
             ai_k = os.environ.get("AI_API_KEY", "")
             if ai_k:
-                with st.expander("🧠 AI 研究报告 (含Walk Forward)", expanded=False):
-                    with st.spinner("AI分析中..."):
+                with st.expander(t("ai_report_expander_wf"), expanded=False):
+                    with st.spinner(t("spinner_ai")):
                         ai_result = AIReportGenerator.build_report(
                             ai_k, audit_data, metrics,
-                            "DeepSeek-V3 (推荐)"
+                            t("model_dsv3")
                         )
                         if ai_result.get('success'):
                             st.markdown(ai_result['report'])
                         else:
-                            st.caption(f"AI报告跳过: {ai_result.get('error','')}")
+                            st.caption(t("ai_report_skipped", error=ai_result.get('error','')))
 
             # 缓存
             st.session_state.audit_cache = {
@@ -2930,34 +2909,32 @@ if submitted:
             st.rerun()
 
     if not st.session_state.get("show_audit"):
-        st.caption("💡 点击「AI量化审计分析」基础审计 | 点击「滚动样本外测试」含Walk Forward深度验证")
+        st.caption(t("audit_hint"))
 
     # === AI 策略诊断 (保留原有) ===
-    with st.expander("🤖 AI 策略诊断与优化意见", expanded=False):
-        if st.button("🧠 生成 AI 诊断报告", use_container_width=True):
+    with st.expander(t("ai_diag_expander"), expanded=False):
+        if st.button(t("btn_gen_diag"), use_container_width=True):
             ai_k = os.environ.get("AI_API_KEY", "")
             if not ai_k:
-                st.warning("请先在 AI 对话舱配置 API Key")
+                st.warning(t("warn_config_api"))
             else:
-                with st.spinner("AI 分析中..."):
+                with st.spinner(t("spinner_ai_analyzing")):
                     ytd = ""
                     if closed:
                         try:
                             ydf = pd.DataFrame(closed)
                             ydf['year'] = pd.to_datetime(ydf['close_time']).dt.year
                             for yr, grp in ydf.groupby('year'):
-                                ytd += f"  {yr}年: {grp['pnl_pct'].sum():+.1f}% ({len(grp)}笔)\n"
+                                ytd += t("ytd_line_fmt", year=yr, pnl=grp['pnl_pct'].sum(), n=len(grp))
                         except: pass
-                    diag_prompt = f"""回测诊断:
-标的:{coin} {timeframe} {leverage}x
-收益:{metrics.get('total_return',0):+.1f}% 年化:{metrics.get('annual_return',0):+.1f}%
-回撤:{metrics.get('max_drawdown',0):.1f}% 夏普:{metrics.get('sharpe_ratio',0):.3f}
-胜率:{metrics.get('win_rate',0):.1f}% 交易:{metrics.get('total_trades',0)}笔
-分年:{ytd}
-输出:1)策略评分(1-100) 2)牛熊点评 3)最大回撤预警 4)2条优化建议。中文,200字。"""
+                    diag_prompt = t("diag_prompt_template",
+                                    coin=coin, tf=timeframe, lev=leverage,
+                                    total=metrics.get('total_return',0), annual=metrics.get('annual_return',0),
+                                    dd=metrics.get('max_drawdown',0), sharpe=metrics.get('sharpe_ratio',0),
+                                    wr=metrics.get('win_rate',0), trades=metrics.get('total_trades',0), ytd=ytd)
                     result = _call_unified_api(
                         [{"role": "user", "content": diag_prompt}],
-                        ai_k, "DeepSeek-V3 (推荐)", st.session_state.get("trading_notes", ""))
+                        ai_k, t("model_dsv3"), st.session_state.get("trading_notes", ""))
                     if result["success"]:
                         st.markdown(result["content"])
                     else:
@@ -2968,24 +2945,24 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
     ac = st.session_state.audit_cache
     wf_cache = st.session_state.get("wf_cache")
 
-    st.subheader("📊 AI量化审计报告")
-    if st.button("↩️ 返回回测看板", use_container_width=True):
+    st.subheader(t("audit_report_title"))
+    if st.button(t("btn_back_to_dashboard"), use_container_width=True):
         st.session_state.show_audit = False
         st.rerun()
 
     # 🆕 报告类型标识
     if wf_cache:
-        st.caption("🔬 报告类型: Walk Forward 深度验证 | 含滚动样本外测试 + ADX趋势分析")
+        st.caption(t("report_type_wf"))
 
     sc1, sc2, sc3, sc4, sc5 = st.columns(5)
     total_score = ac['total_score']
-    sc1.metric("总得分", f"{total_score}/70",
-               delta="优秀" if total_score >= 55 else ("良好" if total_score >= 40 else "待优化"))
+    sc1.metric(t("total_score"), f"{total_score}/70",
+               delta=t("score_excellent") if total_score >= 55 else (t("score_good") if total_score >= 40 else t("score_needs_improve")))
     ps = ac['prog_scores']
-    sc2.metric("收益能力", f"{ps['return_score']}/20")
-    sc3.metric("风险控制", f"{ps['risk_score']}/20")
-    sc4.metric("风险收益比", f"{ps['reward_risk_score']}/15")
-    sc5.metric("稳定性+真实", f"{ps['stability_score']+ps['realism_score']}/15")
+    sc2.metric(t("return_ability"), f"{ps['return_score']}/20")
+    sc3.metric(t("risk_control"), f"{ps['risk_score']}/20")
+    sc4.metric(t("reward_risk"), f"{ps['reward_risk_score']}/15")
+    sc5.metric(t("stability_realism"), f"{ps['stability_score']+ps['realism_score']}/15")
 
     # === 🆕 Walk Forward 持久展示 ===
     if wf_cache:
@@ -2993,14 +2970,14 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
         wf_score = wf_result.get("score", {})
         adx = wf_result.get("adx_analysis", {})
 
-        with st.expander("📈 Walk Forward 滚动窗口详情", expanded=True):
+        with st.expander(t("wf_detail_expander"), expanded=True):
             # 评分卡片
             wc1, wc2, wc3, wc4 = st.columns(4)
-            wc1.metric("WF 综合评分", f"{wf_score.get('walk_forward_score', 0)}/100",
-                       delta=wf_score.get("overfitting_risk", "?"))
-            wc2.metric("样本外平均年化", f"{wf_score.get('avg_oos_return', 0):+.1f}%")
-            wc3.metric("盈利窗口", f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}")
-            wc4.metric("趋势依赖度", adx.get("trend_dependency", "?"))
+            wc1.metric(t("wf_score_label"), f"{wf_score.get('walk_forward_score', 0)}/100",
+                       delta=of_risk_label(wf_score.get("overfitting_risk", "unknown")))
+            wc2.metric(t("oos_avg_annual"), f"{wf_score.get('avg_oos_return', 0):+.1f}%")
+            wc3.metric(t("profitable_windows"), f"{wf_score.get('profitable_windows', 0)}/{wf_score.get('total_windows', 0)}")
+            wc4.metric(t("trend_dependency"), trend_dep_label(adx.get("trend_dependency", "unknown")))
 
             # 窗口表
             windows = wf_result.get("windows", [])
@@ -3009,70 +2986,70 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
                 for w in windows:
                     if w.get("error"):
                         wf_rows.append({
-                            "窗口": w.get("window", "?"), "训练期": w.get("train_range", ""),
-                            "测试期": w.get("test_range", ""),
-                            "训练年化": "-", "测试年化": "-", "测试胜率": "-",
-                            "状态": f"❌ {w['error']}",
+                            t("col_window"): w.get("window", "?"), t("col_train_period"): w.get("train_range", ""),
+                            t("col_test_period"): w.get("test_range", ""),
+                            t("col_train_annual"): "-", t("col_test_annual"): "-", t("col_test_wr"): "-",
+                            t("col_status"): f"❌ {w['error']}",
                         })
                         continue
                     train = w.get("train") or {}
                     test = w.get("test") or {}
                     test_ret = test.get("annual_return", 0)
                     wf_rows.append({
-                        "窗口": w.get("window", "?"),
-                        "训练期": w.get("train_range", ""),
-                        "测试期": w.get("test_range", ""),
-                        "训练年化": f"{train.get('annual_return', 0):+.1f}%",
-                        "测试年化": f"{test_ret:+.1f}%",
-                        "测试胜率": f"{test.get('win_rate', 0):.1f}%",
-                        "测试回撤": f"{test.get('max_drawdown', 0):.1f}%",
-                        "状态": "✅ 盈利" if test_ret > 0 else "⚠️ 亏损",
+                        t("col_window"): w.get("window", "?"),
+                        t("col_train_period"): w.get("train_range", ""),
+                        t("col_test_period"): w.get("test_range", ""),
+                        t("col_train_annual"): f"{train.get('annual_return', 0):+.1f}%",
+                        t("col_test_annual"): f"{test_ret:+.1f}%",
+                        t("col_test_wr"): f"{test.get('win_rate', 0):.1f}%",
+                        t("col_test_dd"): f"{test.get('max_drawdown', 0):.1f}%",
+                        t("col_status"): t("wf_profitable") if test_ret > 0 else t("wf_loss"),
                     })
                 st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
 
             # ADX 分析
             st.divider()
-            st.caption("📊 ADX 趋势强度分析")
+            st.caption(t("adx_analysis_caption"))
             adx_c1, adx_c2, adx_c3 = st.columns(3)
-            adx_c1.metric("盈利交易平均ADX", f"{adx.get('avg_adx_winning', 0):.1f}",
-                          delta=f"{adx.get('winning_trade_count', 0)}笔盈利")
-            adx_c2.metric("亏损交易平均ADX", f"{adx.get('avg_adx_losing', 0):.1f}",
-                          delta=f"{adx.get('losing_trade_count', 0)}笔亏损")
+            adx_c1.metric(t("avg_adx_winning"), f"{adx.get('avg_adx_winning', 0):.1f}",
+                          delta=t("winning_trades_delta", n=adx.get('winning_trade_count', 0)))
+            adx_c2.metric(t("avg_adx_losing"), f"{adx.get('avg_adx_losing', 0):.1f}",
+                          delta=t("losing_trades_delta", n=adx.get('losing_trade_count', 0)))
             adx_ratio = adx.get('adx_ratio', 1.0)
-            adx_c3.metric("ADX 比值 (盈/亏)", f"{adx_ratio:.2f}",
-                          delta="⚠️ 趋势依赖" if adx_ratio > 1.3 else "✅ 均衡")
+            adx_c3.metric(t("adx_ratio_label"), f"{adx_ratio:.2f}",
+                          delta=t("trend_dependent") if adx_ratio > 1.3 else t("balanced"))
             st.caption(adx.get("dependency_detail", ""))
 
     # 审计详情
     ad = ac['audit_data']
-    with st.expander("📊 详细审计数据", expanded=not wf_cache):
-        st.caption(f"收益: 年化{ad['returns']['annual_return']:+.1f}% | "
-                   f"稳定性σ={ad['returns']['return_stability_std']:.1f}")
-        st.caption(f"风险: 回撤{ad['risk']['max_drawdown']:.1f}% | "
-                   f"Sharpe{ad['risk']['sharpe_ratio']:.3f} | "
-                   f"Sortino{ad['risk']['sortino_ratio']:.3f} | "
-                   f"Calmar{ad['risk']['calmar_ratio']:.3f}")
-        st.caption(f"交易: {ad['trading']['total_trades']}笔 | "
-                   f"胜率{ad['trading']['win_rate']:.1f}% | "
-                   f"做多{ad['trading']['long_trades']}/做空{ad['trading']['short_trades']} | "
-                   f"强平{ad['trading']['liquidation_count']}次")
+    with st.expander(t("audit_detail_expander"), expanded=not wf_cache):
+        st.caption(t("return_annual_fmt", ret=ad['returns']['annual_return'],
+                     std=ad['returns']['return_stability_std']))
+        st.caption(t("risk_dd_fmt", dd=ad['risk']['max_drawdown'],
+                     sharpe=ad['risk']['sharpe_ratio'], sortino=ad['risk']['sortino_ratio'],
+                     calmar=ad['risk']['calmar_ratio']))
+        st.caption(t("trading_audit_fmt", n=ad['trading']['total_trades'],
+                     wr=ad['trading']['win_rate'], long=ad['trading']['long_trades'],
+                     short=ad['trading']['short_trades'], liq=ad['trading']['liquidation_count']))
         # 稳定性 (含WF)
         wf_robust = ad['stability'].get('walk_forward_robustness', 0)
         if wf_robust > 0:
-            st.caption(f"Walk Forward鲁棒性: {wf_robust}/{ad['stability'].get('walk_forward_max', 100)}分 | "
-                       f"过拟合={ad['stability']['overfitting_risk']} | "
-                       f"趋势依赖={ad['stability'].get('trend_dependency', '未分析')}")
+            st.caption(t("wf_robustness_fmt", n=wf_robust,
+                         max=ad['stability'].get('walk_forward_max', 100),
+                         of=of_risk_label(ad['stability']['overfitting_risk']),
+                         td=trend_dep_label(ad['stability'].get('trend_dependency', 'unanalyzed'))))
         else:
-            st.caption(f"稳定性: 过拟合风险={ad['stability']['overfitting_risk']}")
-        st.caption(f"真实性: {ad['realism']['grade']}级 ({ad['realism']['realism_score']}/{ad['realism']['max_score']}项摩擦成本)")
+            st.caption(t("stability_audit_fmt", risk=of_risk_label(ad['stability']['overfitting_risk'])))
+        st.caption(t("realism_fmt", grade=ad['realism']['grade'],
+                     score=ad['realism']['realism_score'], max=ad['realism']['max_score']))
         summary = ad['summary']
-        if summary['strengths']: st.success("优势: " + "; ".join(summary['strengths']))
-        if summary['weaknesses']: st.warning("风险: " + "; ".join(summary['weaknesses']))
+        if summary['strengths']: st.success(t("strengths_label", list="; ".join(summary['strengths'])))
+        if summary['weaknesses']: st.warning(t("weaknesses_label", list="; ".join(summary['weaknesses'])))
 
     st.stop()
 
 elif not submitted:
-    st.info("👆 左侧配置策略 & 指标 → 点【运行策略回测】")
+    st.info(t("backtest_hint"))
 
     # === 图表专属周期切换器 (独立于回测周期) ===
     chart_periods = ["5m", "15m", "1h", "4h", "1D"]
@@ -3080,7 +3057,7 @@ elif not submitted:
         st.session_state.chart_period = timeframe  # 初始同步侧边栏
 
     st.divider()
-    st.subheader(f"📈 {coin} 数据预览")
+    st.subheader(t("data_preview_title", coin=coin))
     cc_cols = st.columns([1, 1, 1, 1, 1, 3])
     for i, period in enumerate(chart_periods):
         col = cc_cols[i]
@@ -3112,26 +3089,26 @@ elif not submitted:
               f"{df_pv.index.min()} ~ {df_pv.index.max()}", flush=True)
 
         if len(df_pv) < 2:
-            st.warning("所选时间范围数据不足")
+            st.warning(t("insufficient_range"))
             st.stop()
 
         # 摘要指标
         mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-        mc1.metric("K线数", f"{len(df_pv):,}")
-        mc2.metric("起始", str(df_pv.index[0])[:16])
-        mc3.metric("结束", str(df_pv.index[-1])[:16])
+        mc1.metric(t("kline_count"), f"{len(df_pv):,}")
+        mc2.metric(t("start_label"), str(df_pv.index[0])[:16])
+        mc3.metric(t("end_label"), str(df_pv.index[-1])[:16])
         chg = (df_pv['close'].iloc[-1] / df_pv['close'].iloc[0] - 1) * 100
-        mc4.metric("涨跌幅", f"{chg:+.1f}%")
-        mc5.metric("最新价", f"${df_pv['close'].iloc[-1]:.2f}")
+        mc4.metric(t("change_pct"), f"{chg:+.1f}%")
+        mc5.metric(t("latest_price"), f"${df_pv['close'].iloc[-1]:.2f}")
 
         # === 双子图: 最多显示1000根, 防卡顿 ===
         MAX_BARS = 1000
         df_show = df_pv if len(df_pv) <= MAX_BARS else df_pv.tail(MAX_BARS)
         if len(df_pv) > MAX_BARS:
-            st.caption(f"数据共 {len(df_pv):,} 根, 图表显示最近 {MAX_BARS:,} 根 (流畅渲染)")
+            st.caption(t("preview_bars_fmt", n=len(df_pv), max=MAX_BARS))
         # DEBUG
         july_bars = len(df_pv["2026-07-01":"2026-07-31"]) if len(df_pv) > 0 else 0
-        st.sidebar.info(f"🔍 数据: {len(df_pv):,}根 | {df_pv.index[0]} ~ {df_pv.index[-1]} | 7月={july_bars}根")
+        st.sidebar.info(t("sidebar_data_debug", n=len(df_pv), start=df_pv.index[0], end=df_pv.index[-1], july=july_bars))
 
         fig_pv = make_subplots(
             rows=2, cols=1, shared_xaxes=True,
@@ -3143,16 +3120,10 @@ elif not submitted:
             x=df_show.index,
             open=df_show['open'], high=df_show['high'],
             low=df_show['low'], close=df_show['close'],
-            name="K线",
+            name=t("kline_candle_name"),
             increasing_line_color='#26a69a', decreasing_line_color='#ef5350',
             showlegend=False,
-            hovertemplate=(
-                "时间: %{x}<br>"
-                "开: %{open:.2f}<br>"
-                "高: %{high:.2f}<br>"
-                "低: %{low:.2f}<br>"
-                "收: %{close:.2f}<extra></extra>"
-            ),
+            hovertemplate=t("kline_hovertemplate"),
         ), row=1, col=1)
 
         # 下图: 成交量柱 (红绿)
@@ -3164,12 +3135,8 @@ elif not submitted:
         fig_pv.add_trace(go.Bar(
             x=df_show.index, y=df_show['vol'],
             marker_color=vol_colors, opacity=0.45,
-            name="成交量",
-            hovertemplate=(
-                "时间: %{x}<br>"
-                "成交量: %{y:,.0f}<br>"
-                + ("成交额: %{customdata:,.0f} USDT<extra></extra>" if has_qv else "<extra></extra>")
-            ),
+            name=t("volume_name"),
+            hovertemplate=(t("volume_hovertemplate") if has_qv else t("volume_hovertemplate_basic")),
             customdata=df_show['quote_vol'] if has_qv else None,
             showlegend=False,
         ), row=2, col=1)
@@ -3191,16 +3158,16 @@ elif not submitted:
         fig_pv.update_xaxes(type='date', range=[x0, x1], autorange=False,
                             row=2, col=1, title_text="")
         # Y轴: 自适应价格范围
-        fig_pv.update_yaxes(title_text="价格 (USD)", range=[y_lo, y_hi],
+        fig_pv.update_yaxes(title_text=t("price_usd"), range=[y_lo, y_hi],
                             autorange=False, row=1, col=1)
-        fig_pv.update_yaxes(title_text="成交量", autorange=True, row=2, col=1)
+        fig_pv.update_yaxes(title_text=t("volume_axis"), autorange=True, row=2, col=1)
 
         st.plotly_chart(fig_pv, use_container_width=True,
                         config={'responsive': True, 'displayModeBar': False,
                                 'scrollZoom': False})
 
     except FileNotFoundError as e:
-        st.warning(f"数据文件未就绪, 正在后台下载中。请稍后刷新页面。")
-        st.caption(f"详情: {e}")
+        st.warning(t("file_not_ready"))
+        st.caption(t("detail_label", error=e))
     except Exception as e:
-        st.warning(f"预览加载失败: {e}")
+        st.warning(t("preview_load_failed", e=e))

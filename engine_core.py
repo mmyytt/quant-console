@@ -21,6 +21,8 @@ from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Union
 from abc import ABC, abstractmethod
 
+from i18n import t
+
 warnings.filterwarnings("ignore")
 
 # ============================================================
@@ -236,7 +238,7 @@ class DataEngine:
             interval = "15m"
             if not os.path.exists(path):
                 if not ensure_data_ready(coin):
-                    raise FileNotFoundError(f"数据文件不存在且下载失败: {path}")
+                    raise FileNotFoundError(t("err_data_file_missing", path=path))
 
         df = pd.read_parquet(path)
         # 检查数据是否过期 (>7天未更新 → 触发重新下载)
@@ -269,7 +271,7 @@ class DataEngine:
         required = ['open', 'high', 'low', 'close', 'vol']
         for col in required:
             if col not in df.columns:
-                raise ValueError(f"缺少列: {col}")
+                raise ValueError(t("err_missing_column", col=col))
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
         df = df.dropna()
@@ -634,7 +636,7 @@ class BacktestEngineV2:
         self._atr_mult = atr_mult
         # 杠杆上限保护 (交易所最高125x)
         if self.leverage > 125:
-            raise ValueError(f"杠杆 {self.leverage}x 超过交易所上限 125x")
+            raise ValueError(t('leverage_limit_error', lev=self.leverage))
 
         # 内部状态 (每次 run 时重置)
         self.equity = initial_capital
@@ -1529,7 +1531,7 @@ class PerformanceAnalyzer:
         initial = result['initial_capital']
 
         if equity_arr is None or len(equity_arr) < 2:
-            return {'error': '权益数据不足'}
+            return {'error': t('err_equity_insufficient')}
 
         metrics = {}
 
@@ -1756,15 +1758,15 @@ class PerformanceAnalyzer:
             # 集中度风险评级 (用top5)
             top5_pct = contribution.get('top5_pct', 0)
             if top5_pct < 30:
-                contribution['level'] = '收益分散'; contribution['warning'] = 'green'
+                contribution['level'] = t('contrib_dispersed'); contribution['warning'] = 'green'
             elif top5_pct < 50:
-                contribution['level'] = '中等集中'; contribution['warning'] = 'yellow'
+                contribution['level'] = t('contrib_moderate'); contribution['warning'] = 'yellow'
             else:
-                contribution['level'] = '高度依赖少数交易'; contribution['warning'] = 'red'
+                contribution['level'] = t('contrib_concentrated'); contribution['warning'] = 'red'
         else:
             for n in ['top1', 'top5', 'top10']:
                 contribution[f'{n}_amount'] = 0; contribution[f'{n}_pct'] = 0
-            contribution['level'] = '无交易数据'; contribution['warning'] = 'grey'
+            contribution['level'] = t('contrib_no_trades'); contribution['warning'] = 'grey'
         audit['contribution'] = contribution
 
         # ── 3. 极端收益剔除测试 ──
@@ -1782,7 +1784,7 @@ class PerformanceAnalyzer:
             except:
                 eq_ts_list = list(range(len(equity_arr)))
 
-            for n, label in [(1, '剔除最大1笔盈利'), (5, '剔除最大5笔盈利'), (10, '剔除最大10笔盈利')]:
+            for n, label in [(1, t('remove_top1')), (5, t('remove_top5')), (10, t('remove_top10'))]:
                 removed_trades = sorted_by_pnl[:min(n, len(sorted_by_pnl))]
                 removed_pnl = sum(t['pnl'] for t in removed_trades)
                 new_final = final_eq - removed_pnl
@@ -1904,7 +1906,7 @@ class PerformanceAnalyzer:
         """交易频率分析 — 从真实交易时间计算"""
         closed = PerformanceAnalyzer._get_closed_trades(result)
         if not closed:
-            return {'total_trades': 0, 'avg_per_year': 0, 'avg_per_month': 0, 'level': '无交易'}
+            return {'total_trades': 0, 'avg_per_year': 0, 'avg_per_month': 0, 'level': t('freq_no_trades')}
 
         df = pd.DataFrame(closed)
         df['close_dt'] = pd.to_datetime(df['close_time'])
@@ -1917,10 +1919,10 @@ class PerformanceAnalyzer:
         avg_yr = n / total_years
         avg_mo = n / total_months
 
-        if avg_yr < 6: level = '极低频策略'
-        elif avg_yr < 24: level = '低频策略'
-        elif avg_yr < 100: level = '中频策略'
-        else: level = '高频策略'
+        if avg_yr < 6: level = t('freq_very_low')
+        elif avg_yr < 24: level = t('freq_low')
+        elif avg_yr < 100: level = t('freq_mid')
+        else: level = t('freq_high')
 
         return {
             'total_trades': n,
@@ -1937,7 +1939,7 @@ class PerformanceAnalyzer:
         closed = PerformanceAnalyzer._get_closed_trades(result)
         if not closed:
             return {'bull_pnl': 0, 'range_pnl': 0, 'bear_pnl': 0, 'bull_trades': 0, 'range_trades': 0, 'bear_trades': 0,
-                    'conclusion': '无交易数据'}
+                    'conclusion': t('attr_no_trades')}
 
         bull_pnl = sum(t['pnl'] for t in closed if t.get('regime') == 'bull')
         range_pnl = sum(t['pnl'] for t in closed if t.get('regime') == 'range')
@@ -1955,13 +1957,13 @@ class PerformanceAnalyzer:
 
         # 结论
         if bull_pct > 60 and bear_pct < 20:
-            conclusion = '策略主要依赖牛市趋势行情，熊市贡献有限'
+            conclusion = t('attr_bull_dominant')
         elif bull_pct > 40 and range_pct > 30:
-            conclusion = '收益来源较均衡，牛市和震荡市均有贡献'
+            conclusion = t('attr_balanced')
         elif bear_pct > 50:
-            conclusion = '策略在熊市中表现突出（可能依赖做空或对冲）'
+            conclusion = t('attr_bear_strong')
         else:
-            conclusion = '收益来源多元，各市场状态均有表现'
+            conclusion = t('attr_diversified')
 
         # 各市场胜率
         bull_wr = len([t for t in closed if t.get('regime') == 'bull' and t['pnl'] > 0]) / max(bull_n, 1) * 100
@@ -1985,27 +1987,28 @@ class PerformanceAnalyzer:
         removal = audit.get('extreme_removal', [])
 
         lines = []
-        lines.append(f"策略类型：{result.get('strategy', 'Unknown')} — {freq.get('level', '未知')}")
+        lines.append(t('summary_strategy_type', strategy=result.get('strategy', 'Unknown'), level=freq.get('level', '未知')))
 
         # 收益特征
         total_ret = metrics.get('total_return', 0)
         max_dd = metrics.get('max_drawdown', 0)
         sharpe = metrics.get('sharpe_ratio', 0)
-        lines.append(f"收益特征：总收益{total_ret:+.1f}%，最大回撤{max_dd:.1f}%，夏普{sharpe:.2f}")
+        lines.append(t('summary_return_feature', total=total_ret, dd=max_dd, sharpe=sharpe))
 
         # 频率特征
-        lines.append(f"交易频率：{freq.get('avg_per_year',0):.1f}笔/年，{freq.get('avg_per_month',0):.1f}笔/月 — {freq.get('level','')}")
+        lines.append(t('summary_frequency', yr=freq.get('avg_per_year',0), mo=freq.get('avg_per_month',0), level=freq.get('level','')))
 
         # 收益来源
-        lines.append(f"收益来源：牛市{attr.get('bull_pct',0):.0f}%（{attr.get('bull_trades',0)}笔，胜率{attr.get('bull_wr',0):.0f}%），"
-                     f"震荡{attr.get('range_pct',0):.0f}%（{attr.get('range_trades',0)}笔，胜率{attr.get('range_wr',0):.0f}%），"
-                     f"熊市{attr.get('bear_pct',0):.0f}%（{attr.get('bear_trades',0)}笔，胜率{attr.get('bear_wr',0):.0f}%）")
-        lines.append(f"收益来源判断：{attr.get('conclusion', '')}")
+        lines.append(t('summary_return_source',
+                       bull=attr.get('bull_pct',0), bull_n=attr.get('bull_trades',0), bull_wr=attr.get('bull_wr',0),
+                       range=attr.get('range_pct',0), range_n=attr.get('range_trades',0), range_wr=attr.get('range_wr',0),
+                       bear=attr.get('bear_pct',0), bear_n=attr.get('bear_trades',0), bear_wr=attr.get('bear_wr',0)))
+        lines.append(t('summary_return_judge', conclusion=attr.get('conclusion', '')))
 
         # 集中度
         top5_pct = contrib.get('top5_pct', 0)
         level = contrib.get('level', '未知')
-        lines.append(f"收益集中度：前5笔占{top5_pct:.0f}% — {level}")
+        lines.append(t('summary_concentration', top5=top5_pct, level=level))
 
         # 极端依赖
         if removal:
@@ -2014,30 +2017,30 @@ class PerformanceAnalyzer:
             new_ret = r10.get('new_return', 0)
             decay = abs(new_ret - orig_ret)
             if decay > abs(orig_ret) * 0.5:
-                lines.append(f"极端行情依赖：删除10笔最大盈利后收益从{orig_ret:+.1f}%降至{new_ret:+.1f}%，策略高度依赖少数交易")
+                lines.append(t('summary_extreme_dependent', orig=orig_ret, new=new_ret))
             else:
-                lines.append(f"极端行情依赖：删除10笔最大盈利后收益变化{decay:.1f}%，策略收益来源较稳定")
+                lines.append(t('summary_extreme_stable', decay=decay))
 
         # 风险
         risk = audit.get('risk_contrib', {})
-        lines.append(f"风险特征：最大单笔亏损${risk.get('max_single_loss',0):+.0f}，最大连续亏损{risk.get('max_consecutive_losses',0)}笔")
+        lines.append(t('summary_risk_feature', loss=risk.get('max_single_loss',0), cons=risk.get('max_consecutive_losses',0)))
 
         # 综合建议
         suggestions = []
         if attr.get('bull_pct', 0) > 70:
-            suggestions.append("关注熊市过滤有效性，考虑降低熊市风险暴露")
+            suggestions.append(t('sugg_bear_filter'))
         if top5_pct > 40:
-            suggestions.append("收益集中度高，建议分散入场时机或降低单笔风险")
+            suggestions.append(t('sugg_concentration'))
         if freq.get('avg_per_year', 0) < 6:
-            suggestions.append("交易频率极低，样本量不足可能导致统计偏差")
+            suggestions.append(t('sugg_low_freq'))
         if max_dd > 30:
-            suggestions.append("最大回撤偏高，建议收紧止损或降低杠杆")
+            suggestions.append(t('sugg_high_dd'))
         if sharpe < 0.5:
-            suggestions.append("风险调整后收益偏低，考虑优化入场信号质量")
+            suggestions.append(t('sugg_low_sharpe'))
         if not suggestions:
-            suggestions.append("当前策略表现均衡，持续监控市场状态变化即可")
+            suggestions.append(t('sugg_balanced'))
 
-        lines.append(f"优化建议：{'；'.join(suggestions)}")
+        lines.append(f"{t('summary_suggestion_label')}{t('summary_sep').join(suggestions)}")
 
         return '\n'.join(lines)
 
@@ -2060,21 +2063,21 @@ class PerformanceAnalyzer:
         if closed:
             # 检查是否有不同regime的交易 -> 验证市场系数生效
             regimes = set(t.get('regime', '?') for t in closed)
-            report['engine_params'].append(f'市场系数生效: {regimes}')
+            report['engine_params'].append(t('audit_market_coeff', regimes=regimes))
 
             # 检查保证金是否变化 -> 验证alloc参数生效
             margins = [t.get('margin', 0) for t in closed if t.get('margin')]
             if len(set(round(m, 2) for m in margins)) > 1:
-                report['engine_params'].append('仓位大小有变化 -> alloc参数生效')
+                report['engine_params'].append(t('audit_alloc_active'))
             else:
-                report['anomalies'].append('所有仓位大小相同 -> alloc参数可能未生效')
+                report['anomalies'].append(t('audit_alloc_inactive'))
 
             # 检查exit_reason -> 验证TP/SL生效
             reasons = set(t.get('reason', '?') for t in closed)
             if 'SL' in str(reasons) or 'TP' in str(reasons):
-                report['engine_params'].append(f'TP/SL触发: {reasons}')
+                report['engine_params'].append(t('audit_tp_sl', reasons=reasons))
             if 'LIQUIDATED' in str(reasons):
-                report['engine_params'].append('爆仓检测生效')
+                report['engine_params'].append(t('audit_liquidation'))
 
         # UI参数清单
         report['ui_params'] = [
@@ -2089,7 +2092,7 @@ class PerformanceAnalyzer:
         if closed:
             atr_trades = [t for t in closed if 'ATR' in str(t.get('reason', ''))]
             if not atr_trades and any('ATR' in str(r) for r in reasons):
-                report['overridden_params'].append('ATR动态止损覆盖固定SL')
+                report['overridden_params'].append(t('audit_atr_override'))
 
         return report
 
@@ -2393,7 +2396,7 @@ def walk_forward_validation(strategy, coin: str, timeframe: str = '4h',
     de = DataEngine()
     df = de.get_multi_timeframe(coin).get(timeframe)
     if df is None or len(df) < 500:
-        return {'error': '数据不足'}
+        return {'error': t('err_data_insufficient')}
 
     kw = engine_kwargs or {}
     results = {}
@@ -2549,7 +2552,7 @@ def run_backtest(
         all_tf = de.get_multi_timeframe(coin)
         df = all_tf.get(timeframe, all_tf['4h'])
         if not de.validate(df):
-            raise ValueError(f"{coin} {timeframe} 数据校验失败")
+            raise ValueError(t("err_data_validation", coin=coin, tf=timeframe))
         dfs[coin] = df
 
     engine = BacktestEngineV2(

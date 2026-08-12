@@ -4,6 +4,7 @@ DeepSeek AI 策略分析师模块
 兼容 OpenAI SDK 格式, 使用 requests 调用
 """
 import requests, json, time
+from i18n import t as _t
 
 DEEPSEEK_BASE = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
@@ -49,34 +50,31 @@ def analyze(
         或 {"success": False, "error": "..."}
     """
     if not api_key or not api_key.startswith("sk-"):
-        return {"success": False, "error": "API Key 无效, 请填入以 sk- 开头的 DeepSeek Key"}
+        return {"success": False, "error": _t("analyst_need_key")}
 
     # 构建上下文
-    context = f"""【当前交易环境】
-标的: {coin} | K线周期: {timeframe}
-最新价格: ${current_price}
-
-【技术指标状态】
-"""
+    context = _t("analyst_ctx_env", coin=coin, timeframe=timeframe, current_price=current_price)
     for name, state in indicators_state.items():
         context += f"  {name}: {state}\n"
 
     if backtest_metrics and backtest_metrics.get("total_trades", 0) > 0:
         m = backtest_metrics
-        context += f"""
-【最近回测结果】
-总收益: {m.get('total_return',0):+.1f}% | 年化: {m.get('annual_return',0):+.1f}%
-最大回撤: {m.get('max_drawdown',0):.1f}% | 夏普: {m.get('sharpe_ratio',0):.3f}
-交易数: {m.get('total_trades',0)} | 胜率: {m.get('win_rate',0):.1f}%
-平均盈利: {m.get('avg_win',0):+.1f}% | 平均亏损: {m.get('avg_loss',0):+.1f}%
-"""
+        context += _t("analyst_ctx_backtest",
+                      total_return=m.get('total_return',0),
+                      annual_return=m.get('annual_return',0),
+                      max_drawdown=m.get('max_drawdown',0),
+                      sharpe_ratio=m.get('sharpe_ratio',0),
+                      total_trades=m.get('total_trades',0),
+                      win_rate=m.get('win_rate',0),
+                      avg_win=m.get('avg_win',0),
+                      avg_loss=m.get('avg_loss',0))
     else:
-        context += "\n【回测结果】尚未运行回测\n"
+        context += _t("analyst_ctx_no_backtest")
 
-    context += "\n请给出你的分析报告(读盘 + 参数建议 + Alpha优化)。"
+    context += _t("analyst_ctx_footer")
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": _t("analyst_system_prompt")},
         {"role": "user", "content": context},
     ]
 
@@ -98,7 +96,7 @@ def analyze(
 
         if resp.status_code != 200:
             err = resp.text[:300]
-            return {"success": False, "error": f"API 返回 {resp.status_code}: {err}"}
+            return {"success": False, "error": _t("api_error_fmt", code=resp.status_code, err=err)}
 
         data = resp.json()
         content = data["choices"][0]["message"]["content"]
@@ -110,6 +108,6 @@ def analyze(
         }
 
     except requests.Timeout:
-        return {"success": False, "error": "API 请求超时, 请稍后重试"}
+        return {"success": False, "error": _t("analyst_timeout")}
     except Exception as e:
-        return {"success": False, "error": f"请求异常: {type(e).__name__}: {str(e)[:200]}"}
+        return {"success": False, "error": _t("analyst_error", type=type(e).__name__, msg=str(e)[:200])}
