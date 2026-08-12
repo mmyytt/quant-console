@@ -11,6 +11,8 @@ from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 
+from i18n import t, set_lang
+
 from engine_core import (
     BacktestEngineV2, DataEngine, PerformanceAnalyzer,
     MultiFactorRegime, StrategyBase,
@@ -61,6 +63,21 @@ SWEEP_DIMENSIONS = {
         'indicator_name': '成交量突破',
     },
 }
+
+
+# 维度 key → i18n key 映射 (用于动态翻译维度名称)
+_DIM_I18N_KEY = {
+    'leverage': 'dim_leverage',
+    'ema': 'dim_ema',
+    'atr_stop': 'dim_atr_stop',
+    'fibonacci': 'dim_fibonacci',
+    'volume': 'dim_volume',
+}
+
+
+def _dim_label(dim: str) -> str:
+    """获取维度的翻译后标签"""
+    return t(_DIM_I18N_KEY.get(dim, dim))
 
 
 # ================================================================
@@ -129,7 +146,7 @@ class RobustnessLab:
         for i, val in enumerate(values):
             label = dim_def['format'](val)
             if progress_callback:
-                progress_callback(i + 1, len(values), f'{dim_def["label"]}: {label}')
+                progress_callback(i + 1, len(values), label)
 
             try:
                 cfg = RobustnessLab._build_config(base_config, dimension, val)
@@ -230,9 +247,8 @@ class RobustnessLab:
                     from app import DynamicStrategy as DynamicStrategyCls
             except Exception as import_err:
                 raise RuntimeError(
-                    f"[鲁棒性测试] 无法导入 DynamicStrategy。"
-                    f"请从 app.py 调用时传入 strategy_class 参数。"
-                    f"原始错误: {import_err}"
+                    t('err_import_strategy')
+                    + f' 原始错误: {import_err}'
                 )
 
         # ── 日志: 关键测试参数 ──
@@ -287,19 +303,19 @@ class RobustnessLab:
             return {
                 'dim_scores': {},
                 'overall': 'insufficient_data',
-                'summary': '无有效回测数据，无法生成稳定性评估。请先运行回测。',
+                'summary': t('overall_no_data'),
             }
 
         dim_scores = {}
         for dim, sweeps in all_results.items():
             if not isinstance(sweeps, list):
-                dim_scores[dim] = {'verdict': '数据异常', 'cv': 0, 'range_pct': 0}
+                dim_scores[dim] = {'verdict': t('verdict_data_error'), 'cv': 0, 'range_pct': 0}
                 continue
 
             returns = [s.get('total_return', 0) for s in sweeps
                       if isinstance(s, dict) and s.get('metrics')]
             if len(returns) < 2:
-                dim_scores[dim] = {'verdict': '数据不足', 'cv': 0, 'range_pct': 0}
+                dim_scores[dim] = {'verdict': t('verdict_insufficient'), 'cv': 0, 'range_pct': 0}
                 continue
 
             try:
@@ -307,7 +323,7 @@ class RobustnessLab:
                 std_r = statistics.stdev(returns) if len(returns) > 1 else 0
                 cv = abs(std_r / mean_r) if abs(mean_r) > 0.01 else abs(std_r / 1.0)
             except Exception:
-                dim_scores[dim] = {'verdict': '计算异常', 'cv': 0, 'range_pct': 0}
+                dim_scores[dim] = {'verdict': t('verdict_calc_error'), 'cv': 0, 'range_pct': 0}
                 continue
 
             best_idx = returns.index(max(returns))
@@ -335,31 +351,26 @@ class RobustnessLab:
             }
 
         # 综合判断 — overall 字段始终存在
-        verdicts = [s.get('verdict', '未知') for s in dim_scores.values()]
+        verdicts = [s.get('verdict', t('unknown')) for s in dim_scores.values()]
+        summary_dims = []
         if not verdicts:
             overall = 'insufficient_data'
-            summary = '所有维度数据不足，无法生成综合评级。'
         elif all(v == 'robust' for v in verdicts):
             overall = 'robust'
-            summary = '策略对参数变化不敏感，多个参数区域均有效，具有良好鲁棒性。'
         elif any(v == 'overfit' for v in verdicts):
-            overfit_dims = [SWEEP_DIMENSIONS.get(d, {}).get('label', d)
-                           for d, s in dim_scores.items() if s.get('verdict') == 'overfit']
+            summary_dims = [d for d, s in dim_scores.items() if s.get('verdict') == 'overfit']
             overall = 'overfit_risk'
-            summary = f'参数小幅变化导致收益大幅变化，可能过拟合。敏感维度: {", ".join(overfit_dims)}。建议简化策略或增大样本量。'
         elif any(v == 'sensitive' for v in verdicts):
-            sensitive_dims = [SWEEP_DIMENSIONS.get(d, {}).get('label', d)
-                             for d, s in dim_scores.items() if s.get('verdict') == 'sensitive']
+            summary_dims = [d for d, s in dim_scores.items() if s.get('verdict') == 'sensitive']
             overall = 'sensitive'
-            summary = f'策略对某些参数较敏感。敏感维度: {", ".join(sensitive_dims)}。建议在敏感维度上做更多验证。'
         else:
             overall = 'moderate'
-            summary = '策略对参数变化中等敏感，部分维度需关注。'
 
         return {
             'dim_scores': dim_scores,
             'overall': overall,
-            'summary': summary,
+            'summary': RobustnessLab._build_summary(overall, summary_dims),
+            'summary_dims': summary_dims,
         }
 
     # ================================================================
@@ -375,66 +386,73 @@ class RobustnessLab:
                 # 显示真实错误原因（截断到60字符）
                 err_msg = s['error'][:60] + ('...' if len(s['error']) > 60 else '')
                 rows.append({
-                    '参数': s['label'],
-                    '总收益%': f'ERR: {err_msg}',
-                    '年化收益%': '-',
-                    '最大回撤%': '-',
-                    '夏普': '-',
-                    '胜率%': '-',
-                    '交易次数': '-',
+                    t('param_label'): s['label'],
+                    f'{t("total_return")}%': f'ERR: {err_msg}',
+                    f'{t("annual_return")}%': '-',
+                    f'{t("max_drawdown")}%': '-',
+                    t('sharpe'): '-',
+                    f'{t("win_rate")}%': '-',
+                    t('trade_count'): '-',
                 })
                 continue
             rows.append({
-                '参数': s['label'],
-                '总收益%': round(s['total_return'], 2),
-                '年化收益%': round(s['annual_return'], 2),
-                '最大回撤%': round(s['max_drawdown'], 2),
-                '夏普': round(s['sharpe_ratio'], 3),
-                '胜率%': round(s['win_rate'], 1),
-                '交易次数': s['total_trades'],
+                t('param_label'): s['label'],
+                f'{t("total_return")}%': round(s['total_return'], 2),
+                f'{t("annual_return")}%': round(s['annual_return'], 2),
+                f'{t("max_drawdown")}%': round(s['max_drawdown'], 2),
+                t('sharpe'): round(s['sharpe_ratio'], 3),
+                f'{t("win_rate")}%': round(s['win_rate'], 1),
+                t('trade_count'): s['total_trades'],
             })
         return pd.DataFrame(rows)
 
     @staticmethod
-    def generate_report(all_results: Dict, stability: Dict) -> str:
+    def generate_report(all_results: Dict, stability: Dict, lang: str = None) -> str:
         """生成自然语言鲁棒性报告
 
         全面防御：任一维度失败不影响其他维度报告生成。
+
+        Args:
+            all_results: 所有维度的扫描结果
+            stability: 稳定性评分
+            lang: 可选语言参数 (zh/en)，若不传则使用当前全局语言
         """
+        if lang:
+            set_lang(lang)
+
         lines = []
-        lines.append(f'## 策略鲁棒性评估报告')
+        lines.append(f'## {t("robustness_report_title")}')
         lines.append(f'')
 
         # ── 安全读取 stability 字段 ──
         if not isinstance(stability, dict):
-            lines.append(f'**综合评级**: [ERROR] stability 对象非字典类型: {type(stability)}')
+            lines.append(t('report_stability_error', type=str(type(stability))))
             lines.append(f'')
             lines.append(f'---')
-            lines.append(f'*报告生成异常 — stability 结构错误*')
+            lines.append(f'*{t("report_generation_error")}*')
             return '\n'.join(lines)
 
         overall = stability.get('overall', 'unknown')
-        summary = stability.get('summary', '无摘要信息')
-        lines.append(f'**综合评级**: {RobustnessLab._verdict_emoji(overall)} {summary}')
+        # 动态生成 summary（避免缓存文本语言固化）
+        summary = RobustnessLab._build_summary(overall, stability.get('summary_dims', []))
+        lines.append(t('report_overall_rating',
+                       verdict=RobustnessLab._verdict_emoji(overall),
+                       summary=summary))
         lines.append(f'')
 
         # ── 安全遍历各维度 ──
         if not isinstance(all_results, dict):
-            lines.append(f'**维度结果**: [ERROR] all_results 非字典类型')
+            lines.append(f'**{t("report_generation_error")}**')
             return '\n'.join(lines)
 
         for dim, sweeps in all_results.items():
-            # 维度定义安全查找
-            dim_def = SWEEP_DIMENSIONS.get(dim)
-            if not dim_def:
-                lines.append(f'### {dim} (未知维度)')
-            else:
-                lines.append(f'### {dim_def["label"]}')
+            # 维度标题使用翻译后的标签
+            lines.append(f'### {_dim_label(dim)}')
 
             # 维度评分安全查找
             dim_scores = stability.get('dim_scores', {})
             if not isinstance(dim_scores, dict):
-                lines.append(f'- 稳定性: 数据异常 (dim_scores 非字典)')
+                lines.append(f'- {t("report_generation_error")}')
                 lines.append(f'')
                 continue
 
@@ -442,7 +460,7 @@ class RobustnessLab:
             if not isinstance(ds, dict):
                 ds = {}
 
-            verdict = ds.get('verdict', '未知')
+            verdict = ds.get('verdict', t('unknown'))
             cv = ds.get('cv', 0)
             range_pct = ds.get('range_pct', 0)
             best = ds.get('best', '?')
@@ -450,40 +468,63 @@ class RobustnessLab:
             worst = ds.get('worst', '?')
             worst_return = ds.get('worst_return', 0)
 
-            lines.append(f'- 稳定性: {RobustnessLab._verdict_emoji(verdict)} '
-                         f'CV={cv:.3f}, 收益波动范围={range_pct:.1f}%')
-            lines.append(f'- 最优: {best} (收益{best_return:+.1f}%)')
-            lines.append(f'- 最劣: {worst} (收益{worst_return:+.1f}%)')
+            lines.append(t('report_stability_detail',
+                           verdict=RobustnessLab._verdict_emoji(verdict),
+                           cv=cv, range=range_pct))
+            lines.append(t('report_best', best=best, ret=best_return))
+            lines.append(t('report_worst', worst=worst, ret=worst_return))
 
             # 错误详情
             errors_in_dim = [s for s in sweeps if isinstance(s, dict) and s.get('error')]
             if errors_in_dim:
                 err_labels = [s.get('label', '?') for s in errors_in_dim]
-                lines.append(f'- ⚠️ 该维度 {len(errors_in_dim)} 组测试失败: {", ".join(err_labels[:3])}')
+                lines.append(t('report_dim_errors', count=len(errors_in_dim),
+                              labels=', '.join(err_labels[:3])))
 
             lines.append(f'')
 
         lines.append(f'---')
-        lines.append(f'*报告由 QuantCode 鲁棒性实验室自动生成*')
+        lines.append(f'*{t("report_footer")}*')
         return '\n'.join(lines)
 
     @staticmethod
     def _verdict_emoji(verdict: str) -> str:
-        """将 verdict 字段转为可读标记"""
+        """将 verdict 字段转为可读标记（支持中英文）"""
         if not verdict or not isinstance(verdict, str):
-            return '[?] 未知'
+            return t('verdict_unknown')
         v = verdict.lower()
         if v == 'robust':
-            return '[ROBUST] 鲁棒'
+            return t('verdict_robust')
         elif v in ('overfit_risk', 'overfit'):
-            return '[OVERFIT] 过拟合风险'
+            return t('verdict_overfit')
         elif v == 'sensitive':
-            return '[SENSITIVE] 敏感'
+            return t('verdict_sensitive')
         elif v == 'moderate':
-            return '[MODERATE] 中等敏感'
-        elif '不足' in verdict:
-            return '[INSUFFICIENT] 数据不足'
+            return t('verdict_moderate')
+        elif '不足' in verdict or 'insufficient' in v:
+            return t('verdict_insufficient')
         return f'[{verdict}]'
+
+    @staticmethod
+    def _build_summary(overall: str, summary_dims: list = None) -> str:
+        """根据 overall 评级动态生成 summary 文本（用当前全局语言）
+
+        这样缓存的结构化数据 (overall + summary_dims) 与语言解耦，
+        切换语言后重新调用即可得到对应语言的摘要。
+        summary_dims 存的是维度 key（如 'leverage'），翻译时动态映射。
+        """
+        dims = ', '.join(_dim_label(d) for d in summary_dims) if summary_dims else ''
+        if overall == 'robust':
+            return t('overall_robust')
+        elif overall == 'overfit_risk':
+            return t('overall_overfit', dims=dims)
+        elif overall == 'sensitive':
+            return t('overall_sensitive', dims=dims)
+        elif overall == 'moderate':
+            return t('overall_moderate')
+        elif overall == 'insufficient_data':
+            return t('overall_insufficient')
+        return t('overall_unknown')
 
     # ================================================================
     # 参数组合优化 (Combo Optimization)
@@ -596,7 +637,9 @@ class RobustnessLab:
                         'is_metrics': is_metrics,
                         'oos_metrics': oos_metrics,
                         'skip': True,
-                        'skip_reason': f'交易次数不足 ({is_metrics.get("total_trades", 0)} < {min_trades})',
+                        'skip_reason': t('err_trades_insufficient',
+                                        actual=is_metrics.get('total_trades', 0),
+                                        min=min_trades),
                     })
 
             except Exception as e:
@@ -624,24 +667,24 @@ class RobustnessLab:
 
         # 生成摘要
         summary_lines = [
-            f'## 参数组合优化报告',
+            f'## {t("combo_report_title")}',
             f'',
-            f'- 总组合数: {total_combos}',
-            f'- 有效组合: {len(valid)}',
-            f'- 跳过(交易不足): {len([r for r in results if r.get("skip")])}',
-            f'- 错误: {len([r for r in results if r.get("error")])}',
-            f'- OOS比例: {oos_ratio*100:.0f}%',
+            f'- {t("combo_report_total")}: {total_combos}',
+            f'- {t("combo_report_valid")}: {len(valid)}',
+            f'- {t("combo_report_skipped")}: {len([r for r in results if r.get("skip")])}',
+            f'- {t("combo_report_errors")}: {len([r for r in results if r.get("error")])}',
+            f'- {t("combo_report_oos_ratio")}: {oos_ratio*100:.0f}%',
         ]
 
         if top10:
             summary_lines.append(f'')
-            summary_lines.append(f'### Top 10 稳定组合')
-            for i, t in enumerate(top10):
-                rec = ' ⭐推荐实盘' if 'recommended' in t.get('flags', []) else ''
+            summary_lines.append(f'### {t("combo_report_top10_header")}')
+            for i, t_entry in enumerate(top10):
+                rec = f' {t("flag_recommended")}' if 'recommended' in t_entry.get('flags', []) else ''
                 summary_lines.append(
-                    f'{i+1}. {t["label"]} | '
-                    f'IS={t.get("is_return",0):+.1f}% OOS={t.get("oos_return",0):+.1f}% '
-                    f'评分={t.get("composite_score",0):.1f}{rec}'
+                    f'{i+1}. {t_entry["label"]} | '
+                    f'IS={t_entry.get("is_return",0):+.1f}% OOS={t_entry.get("oos_return",0):+.1f}% '
+                    f'{t("combo_score")}={t_entry.get("composite_score",0):.1f}{rec}'
                 )
 
         return {
@@ -660,7 +703,7 @@ class RobustnessLab:
     def _run_single_oos(cfg: Dict, df_oos, strategy_class=None) -> Dict:
         """使用OOS数据运行回测（参数与IS相同）"""
         if len(df_oos) < 50:
-            return {'metrics': None, 'error': 'OOS数据不足(少于50根K线)'}
+            return {'metrics': None, 'error': t('err_oos_insufficient')}
 
         cfg_oos = copy.deepcopy(cfg)
         cfg_oos['df'] = df_oos
@@ -743,10 +786,10 @@ class RobustnessLab:
             r['oos_return'] = oos_returns[i]
             r['composite_score'] = round(composite, 1)
             r['score_breakdown'] = {
-                '收益能力': round(return_score, 1),
-                '风险控制': round(risk_score, 1),
-                '稳定性': round(stability_score, 1),
-                '交易活跃度': round(trade_score, 1),
+                t('score_return'): round(return_score, 1),
+                t('score_risk'): round(risk_score, 1),
+                t('score_stability'): round(stability_score, 1),
+                t('score_trade_activity'): round(trade_score, 1),
             }
 
         return results
@@ -800,83 +843,86 @@ class RobustnessLab:
                 flag_icon = '🟢'
 
             rows.append({
-                '排名': i + 1,
-                '标记': flag_icon,
-                '参数组合': c['label'],
-                '总分': c.get('composite_score', 0),
-                'IS收益%': round(is_m.get('total_return', 0), 1),
-                'OOS收益%': round(oos_m.get('total_return', 0), 1) if oos_m else '-',
-                '年化%': round(is_m.get('annual_return', 0), 1),
-                '最大回撤%': round(is_m.get('max_drawdown', 0), 1),
+                t('combo_rank'): i + 1,
+                t('combo_flag'): flag_icon,
+                t('combo_params'): c['label'],
+                t('combo_score'): c.get('composite_score', 0),
+                t('combo_is_return'): round(is_m.get('total_return', 0), 1),
+                t('combo_oos_return'): round(oos_m.get('total_return', 0), 1) if oos_m else '-',
+                f'{t("annual_return")}%': round(is_m.get('annual_return', 0), 1),
+                f'{t("max_drawdown")}%': round(is_m.get('max_drawdown', 0), 1),
                 'Sharpe': round(is_m.get('sharpe_ratio', 0), 2),
-                'Calmar': round(
+                t('calmar'): round(
                     abs(is_m.get('annual_return', 0) / is_m.get('max_drawdown', 0.01))
                     if is_m.get('max_drawdown', 0) > 0.01 else 0, 2),
-                '胜率%': round(is_m.get('win_rate', 0), 1),
-                '交易数': is_m.get('total_trades', 0),
+                f'{t("win_rate")}%': round(is_m.get('win_rate', 0), 1),
+                t('trade_count'): is_m.get('total_trades', 0),
             })
         return pd.DataFrame(rows)
 
     @staticmethod
-    def combo_generate_report(combo_result: Dict) -> str:
-        """生成组合优化自然语言报告"""
+    def combo_generate_report(combo_result: Dict, lang: str = None) -> str:
+        """生成组合优化自然语言报告
+
+        Args:
+            combo_result: 组合优化结果字典
+            lang: 可选语言参数 (zh/en)，若不传则使用当前全局语言
+        """
+        if lang:
+            set_lang(lang)
+
         sc = combo_result.get('scores_detail', {})
         top10 = combo_result.get('top10', [])
 
         lines = [
-            f'## 参数组合优化报告',
+            f'## {t("combo_report_title")}',
             f'',
-            f'- 总组合数: {sc.get("total_combos", "?")}',
-            f'- 有效组合: {sc.get("valid_count", "?")}',
+            f'- {t("combo_report_total")}: {sc.get("total_combos", "?")}',
+            f'- {t("combo_report_valid")}: {sc.get("valid_count", "?")}',
             f'',
         ]
 
         if top10:
-            lines.append('### Top 10 稳定组合')
+            lines.append(f'### {t("combo_report_top10_header")}')
             lines.append('')
-            lines.append('| # | 标记 | 参数 | 总分 | IS% | OOS% | Sharpe | 回撤% |')
-            lines.append('|---|------|------|------|-----|------|--------|-------|')
-            for i, t in enumerate(top10):
-                is_m = t.get('is_metrics', {})
-                oos_m = t.get('oos_metrics') or {}
-                flags = t.get('flags', [])
+            lines.append(t('combo_report_table_header'))
+            lines.append(t('combo_report_separator'))
+            for i, ct in enumerate(top10):
+                is_m = ct.get('is_metrics', {})
+                oos_m = ct.get('oos_metrics') or {}
+                flags = ct.get('flags', [])
                 icon = '⭐' if 'recommended' in flags else ('🔴' if 'overfit_severe' in flags else ('🟢' if 'stable' in flags else ''))
                 lines.append(
-                    f'| {i+1} | {icon} | {t["label"][:40]} | {t.get("composite_score",0):.0f} | '
-                    f'{t.get("is_return",0):+.1f} | {t.get("oos_return",0):+.1f} | '
+                    f'| {i+1} | {icon} | {ct["label"][:40]} | {ct.get("composite_score",0):.0f} | '
+                    f'{ct.get("is_return",0):+.1f} | {ct.get("oos_return",0):+.1f} | '
                     f'{is_m.get("sharpe_ratio",0):.2f} | {is_m.get("max_drawdown",0):.1f} |'
                 )
 
             lines.append('')
-            recs = [t for t in top10 if 'recommended' in t.get('flags', [])]
+            recs = [ct for ct in top10 if 'recommended' in ct.get('flags', [])]
             if recs:
-                lines.append(f'### ⭐ 推荐实盘参数 ({len(recs)}组)')
+                lines.append(t('combo_report_recommended', count=len(recs)))
                 for r in recs:
                     lines.append(f'- {r["label"]} → IS={r.get("is_return",0):+.1f}% OOS={r.get("oos_return",0):+.1f}%')
             else:
-                stable = [t for t in top10 if 'stable' in t.get('flags', [])]
+                stable = [ct for ct in top10 if 'stable' in ct.get('flags', [])]
                 if stable:
-                    lines.append(f'### 🟢 稳定区域 ({len(stable)}组)')
+                    lines.append(t('combo_report_stable', count=len(stable)))
                     for s in stable:
                         lines.append(f'- {s["label"]} → IS={s.get("is_return",0):+.1f}% OOS={s.get("oos_return",0):+.1f}%')
 
-            overfit = [t for t in top10 if 'overfit_severe' in t.get('flags', []) or 'overfit_risk' in t.get('flags', [])]
+            overfit = [ct for ct in top10 if 'overfit_severe' in ct.get('flags', []) or 'overfit_risk' in ct.get('flags', [])]
             if overfit:
                 lines.append(f'')
-                lines.append(f'### 🔴 过拟合风险 ({len(overfit)}组)')
-                lines.append(f'以下组合IS表现优异但OOS显著恶化，可能过拟合：')
+                lines.append(t('combo_report_overfit', count=len(overfit)))
+                lines.append(t('combo_report_overfit_desc'))
                 for o in overfit:
                     lines.append(f'- {o["label"]} → IS={o.get("is_return",0):+.1f}% OOS={o.get("oos_return",0):+.1f}%')
 
         lines.append('')
         lines.append('---')
-        lines.append('*报告由 QuantCode 参数组合优化模块自动生成*')
+        lines.append(f'*{t("combo_report_generated_by")}*')
         return '\n'.join(lines)
-        if verdict == 'robust': return '[ROBUST] 鲁棒'
-        elif verdict == 'overfit_risk' or verdict == 'overfit': return '[OVERFIT] 过拟合风险'
-        elif verdict == 'sensitive': return '[SENSITIVE] 敏感'
-        elif verdict == 'moderate': return '[MODERATE] 中等敏感'
-        return verdict
 
 
 # ================================================================

@@ -25,6 +25,7 @@ from engine_core import (
     DataEngine, StrategyBase, BacktestEngineV2, PerformanceAnalyzer,
     TAKER_FEE, SLIPPAGE, MultiFactorRegime,
 )
+from i18n import t, set_lang, init_lang
 
 # ============================================================
 # 登录
@@ -86,6 +87,9 @@ logged_in = check_login()
 if not logged_in:
     st.stop()
 
+# ── i18n 语言初始化 ──
+init_lang()
+
 # ============================================================
 # 数据新鲜度校验: 最新K线超过1天 → 弹警告
 # ============================================================
@@ -105,6 +109,18 @@ check_data_freshness()
 if st.sidebar.button("🧹 强制清全部缓存", use_container_width=True):
     st.cache_data.clear(); st.cache_resource.clear()
     st.rerun()
+
+# ── 语言切换器 ──
+lang_col1, lang_col2 = st.sidebar.columns([3, 2])
+with lang_col1:
+    st.caption(t("lang_selector"))
+with lang_col2:
+    current_lang_display = "🇨🇳 中文" if st.session_state.lang == "zh" else "🇺🇸 EN"
+    if st.button(current_lang_display, use_container_width=True, key="lang_switcher",
+                 help=f"Click to switch / 点击切换"):
+        st.session_state.lang = "en" if st.session_state.lang == "zh" else "zh"
+        set_lang(st.session_state.lang)
+        st.rerun()
 
 # ============================================================
 # 统一指标元数据 Schema (Schema-Driven UI)
@@ -794,13 +810,13 @@ is_dual_leg = False
 # 配置表单: 所有参数控件包在form里, 勾选/拖动不触发重渲染
 # ============================================================
 with st.sidebar.form(key="config_form", clear_on_submit=False):
-    st.caption("📋 基础设置")
+    st.caption(t("sidebar_title"))
     c1, c2 = st.columns(2)
-    coin = c1.selectbox("标的", ["ETH", "BTC", "SOL"], 0)
-    timeframe = c2.selectbox("K线周期", ["5m", "15m", "1h", "4h", "1d"], 3)
+    coin = c1.selectbox(t("coin_select"), ["ETH", "BTC", "SOL"], 0)
+    timeframe = c2.selectbox(t("timeframe_select"), ["5m", "15m", "1h", "4h", "1d"], 3)
     c1, c2 = st.columns(2)
-    leverage = c1.slider("杠杆", 1, 20, 3, 1)
-    initial_capital = c2.number_input("初始资金", 100, 1000000, 10000, 1000)
+    leverage = c1.slider(t("leverage_label"), 1, 20, 3, 1)
+    initial_capital = c2.number_input(t("capital_label"), 100, 1000000, 10000, 1000)
     st.caption("交易方向控制")
     c1, c2 = st.columns(2)
     trade_mode = c1.selectbox("交易模式", ["双向交易 (做多+做空)", "仅做多 (Only Long)", "仅做空 (Only Short)"], index=0,
@@ -809,7 +825,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         help="牛市禁止做空, 熊市禁止做多, 震荡市双向允许。关闭则不限制方向。")
 
     st.divider(); st.caption("🏗️ 策略模式与参数")
-    strategy_mode = st.selectbox("策略模式", [
+    strategy_mode = st.selectbox(t("strategy_mode_label"), [
         "经典单向策略 (Classic Directional)",
         "Delta中性对冲 (Delta-Neutral Hedging)",
         "动能突破解封 (Momentum Unlocking)",
@@ -1123,7 +1139,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         bull_th = st.slider("牛市判定", 0.10, 0.60, 0.30, 0.05, key="mf_bt")
 
     st.divider()
-    submitted = st.form_submit_button("🚀 确认参数并运行回测", use_container_width=True, type="primary")
+    submitted = st.form_submit_button(t("btn_run_backtest"), use_container_width=True, type="primary")
 
 st.sidebar.divider()
 # 导出 + 刷新 + 登出 (在form外面)
@@ -1240,7 +1256,8 @@ def resample_cached(df_15m, period: str):
 # (旧AI模块已整合到 🤖 翔哥 AI 对话舱 Tab)
 # 主界面头部
 # ============================================================
-st.title("📊 马总量化控制台")
+set_lang(st.session_state.lang)
+st.title(t("app_title"))
 
 # ── 版本标识 (2026-08-11 新增) ──
 _QUANTCODE_VERSION = "v3.2"
@@ -1254,22 +1271,21 @@ try:
     ).strip()
 except Exception:
     _git_hash = "unknown"
-st.caption(f"QuantCode {_QUANTCODE_VERSION} | Commit: `{_git_hash}` | Build: {_QUANTCODE_BUILD}")
+st.caption(t("version_label", version=_QUANTCODE_VERSION, commit=_git_hash, build=_QUANTCODE_BUILD))
 
 # Tab 导航
-tab_names = ["📈 回测看板", "🤖 翔哥 AI 对话舱", "🔬 鲁棒性实验室"]
 if "active_tab" not in st.session_state: st.session_state.active_tab = "回测看板"
 tc1, tc2, tc3 = st.columns([1, 1, 1])
 with tc1:
-    if st.button("📈 回测看板", use_container_width=True,
+    if st.button(t("nav_backtest"), use_container_width=True,
                  type="primary" if "回测" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "回测看板"; st.rerun()
 with tc2:
-    if st.button("🤖 翔哥 AI 对话舱", use_container_width=True,
+    if st.button(t("nav_ai_chat"), use_container_width=True,
                  type="primary" if "AI" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "AI 对话舱"; st.rerun()
 with tc3:
-    if st.button("🔬 鲁棒性实验室", use_container_width=True,
+    if st.button(t("nav_robustness"), use_container_width=True,
                  type="primary" if "鲁棒性" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "鲁棒性实验室"; st.rerun()
 
@@ -1327,6 +1343,7 @@ def _call_unified_api(messages: list, api_key: str, model_name: str, trading_not
 # ============================================================
 if "AI" in st.session_state.active_tab:
     from ai_assistant import build_context, DEFAULT_TRADING_NOTES
+    set_lang(st.session_state.lang)
 
     # 模型预设 (整合所有主流API)
     ALL_MODELS = {
@@ -1445,10 +1462,11 @@ if "AI" in st.session_state.active_tab:
 # Tab 3: 策略鲁棒性分析实验室 (2026-08-11 新增)
 # ============================================================
 if "鲁棒性" in st.session_state.active_tab:
-    from robustness_lab import RobustnessLab, SWEEP_DIMENSIONS
+    from robustness_lab import RobustnessLab, SWEEP_DIMENSIONS, _dim_label
+    set_lang(st.session_state.lang)
 
-    st.title("🔬 策略鲁棒性分析实验室")
-    st.caption("一键参数敏感性测试 — 所有测试调用真实 engine 回测流程，保证 UI参数→engine参数链路一致。")
+    st.title(t("robustness_title"))
+    st.caption(t("robustness_subtitle"))
 
     # ── 前置条件检查 ──
     has_backtest = ("last_result" in st.session_state and
@@ -1456,8 +1474,8 @@ if "鲁棒性" in st.session_state.active_tab:
                     "last_coin" in st.session_state)
 
     if not has_backtest:
-        st.warning("⚠️ 尚未运行回测。请先在【回测看板】中运行一次回测，再进入本实验室。")
-        st.info("操作步骤: 切换到【📈 回测看板】→ 配置参数 → 点击【确认参数并运行回测】→ 回到本页")
+        st.warning(t("warning_no_backtest"))
+        st.info(t("hint_goto_backtest"))
         st.stop()
 
     # ── 基准参数摘要 ──
@@ -1467,35 +1485,35 @@ if "鲁棒性" in st.session_state.active_tab:
     last_tf = st.session_state.last_timeframe
     last_metrics = st.session_state.last_metrics
 
-    with st.expander("📋 基准策略参数", expanded=False):
+    with st.expander(t("robustness_baseline_params"), expanded=False):
         bc1, bc2, bc3, bc4 = st.columns(4)
         with bc1:
-            st.metric("币种", last_coin)
-            st.metric("周期", last_tf)
+            st.metric(t("coin_select"), last_coin)
+            st.metric(t("timeframe_select"), last_tf)
         with bc2:
-            st.metric("杠杆", f"{last_ek.get('leverage', '?')}x")
-            st.metric("初始资金", f"${last_ek.get('initial_capital', '?'):,.0f}")
+            st.metric(t("leverage_label"), f"{last_ek.get('leverage', '?')}{t('leverage_unit')}")
+            st.metric(t("capital_label"), f"${last_ek.get('initial_capital', '?'):,.0f}")
         with bc3:
             st.metric("TP/SL", f"{last_ek.get('tp_pct','?')}%/{last_ek.get('sl_pct','?')}%")
-            st.metric("ATR止损", "开启" if last_ek.get('use_atr_sl') else "关闭")
+            st.metric(t("atr_sl_toggle"), t("yes") if last_ek.get('use_atr_sl') else t("no"))
         with bc4:
-            st.metric("总收益", f"{last_metrics.get('total_return', 0):+.2f}%")
-            st.metric("夏普", f"{last_metrics.get('sharpe_ratio', 0):.3f}")
+            st.metric(t("total_return"), f"{last_metrics.get('total_return', 0):+.2f}%")
+            st.metric(t("sharpe_ratio"), f"{last_metrics.get('sharpe_ratio', 0):.3f}")
 
     # ── 活跃指标摘要 ──
     active_inds = [n for n, c in last_sel.items() if isinstance(c, dict) and c.get('enabled')]
-    st.caption(f"已选指标 ({len(active_inds)}): " + ", ".join(active_inds[:8]) + ("..." if len(active_inds) > 8 else ""))
+    st.caption(f"{t('selected_indicators_label')} ({len(active_inds)}): " + ", ".join(active_inds[:8]) + ("..." if len(active_inds) > 8 else ""))
 
     st.divider()
 
     # ── 维度选择 ──
-    st.subheader("📐 测试维度选择")
-    st.caption("选择需要扫描的参数维度。每维度独立测试，保持其他参数为基准值。全选共约 21 次回测。")
+    st.subheader(t("robustness_dim_select"))
+    st.caption(t("robustness_dim_desc"))
 
     dim_options = list(SWEEP_DIMENSIONS.keys())
-    dim_labels = {k: v['label'] for k, v in SWEEP_DIMENSIONS.items()}
+    dim_labels = {k: _dim_label(k) for k, v in SWEEP_DIMENSIONS.items()}
     dim_labels_with_count = {
-        k: f"{v['label']} ({len(v['values'])}组)" for k, v in SWEEP_DIMENSIONS.items()
+        k: f"{_dim_label(k)} ({len(v['values'])})" for k, v in SWEEP_DIMENSIONS.items()
     }
 
     dc1, dc2, dc3, dc4, dc5 = st.columns(5)
@@ -1512,21 +1530,21 @@ if "鲁棒性" in st.session_state.active_tab:
         if st.checkbox(dim_labels_with_count['volume'], True, key="dim_vol"): selected_dims.append('volume')
 
     total_runs = sum(len(SWEEP_DIMENSIONS[d]['values']) for d in selected_dims)
-    st.caption(f"预计运行 **{total_runs}** 次完整回测，约需 **{total_runs * 3}~{total_runs * 5}** 秒")
+    st.caption(t("robustness_est_time", count=total_runs, min=total_runs * 3, max=total_runs * 5))
 
     # ── 运行按钮 ──
     st.divider()
     run_col1, run_col2 = st.columns([2, 1])
     with run_col1:
-        run_lab = st.button("🔬 开始鲁棒性测试", use_container_width=True, type="primary",
+        run_lab = st.button(t("btn_start_robustness"), use_container_width=True, type="primary",
                             disabled=len(selected_dims) == 0)
     with run_col2:
-        st.caption("💡 测试期间请勿切换页面")
+        st.caption(t("hint_robustness_tip"))
 
     if run_lab:
         # 构造 base_config
         # 重新加载数据
-        with st.spinner("加载数据..."):
+        with st.spinner(t("loading_data")):
             de = DataEngine()
             dfs = de.get_multi_timeframe(last_coin)
             df_raw = dfs.get(last_tf, dfs['4h'])
@@ -1545,9 +1563,9 @@ if "鲁棒性" in st.session_state.active_tab:
                     end_date = pd.Timestamp(dr[1])
                     df_raw = df_raw.loc[start_date:end_date]
                 except Exception as e:
-                    st.warning(f"日期过滤失败: {e}，使用全部数据")
+                    st.warning(t("warning_date_filter_failed", error=e))
             if df_raw.empty:
-                st.error("数据加载为空，请检查日期范围。")
+                st.error(t("error_data_empty"))
                 st.stop()
 
         # 构造 mf_params
@@ -1570,7 +1588,7 @@ if "鲁棒性" in st.session_state.active_tab:
         # 运行扫描
         all_results = {}
         st.markdown("---")
-        st.subheader("🔄 扫描进度")
+        st.subheader(t("robustness_scan_progress"))
 
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -1579,14 +1597,13 @@ if "鲁棒性" in st.session_state.active_tab:
 
         # DEBUG: 显示当前 run_sweep 函数签名
         import inspect as _inspect
-        with st.expander("🔧 调试信息", expanded=False):
-            st.code(f"run_sweep 签名: {_inspect.signature(RobustnessLab.run_sweep)}\n"
-                    f"DynamicStrategy 类型: {type(DynamicStrategy)}\n"
-                    f"Git commit: {_git_hash}", language=None)
+        with st.expander(t("debug_info"), expanded=False):
+            st.code(t("debug_signature", sig=str(_inspect.signature(RobustnessLab.run_sweep))) + "\n"
+                    + t("debug_dynamic_type", type=str(type(DynamicStrategy))) + "\n"
+                    + t("debug_git_commit", hash=_git_hash), language=None)
 
         for di, dim in enumerate(selected_dims):
-            dim_def = SWEEP_DIMENSIONS[dim]
-            st.caption(f"正在测试: **{dim_def['label']}** ({di+1}/{len(selected_dims)})")
+            st.caption(t("scanning_progress", label=_dim_label(dim), current=di+1, total=len(selected_dims)))
 
             def make_progress(dim_label):
                 def cb(cur, total, label):
@@ -1597,11 +1614,11 @@ if "鲁棒性" in st.session_state.active_tab:
 
             try:
                 sweeps = RobustnessLab.run_sweep(base_config, dim,
-                                                       progress_callback=make_progress(dim_def['label']),
+                                                       progress_callback=make_progress(_dim_label(dim)),
                                                        strategy_class=DynamicStrategy)
                 all_results[dim] = sweeps
             except TypeError as te:
-                st.error(f"❌ TypeError 调用 run_sweep 失败!")
+                st.error(t("err_type_error_call"))
                 st.code(f"维度: {dim}\n"
                         f"错误: {te}\n"
                         f"run_sweep 签名: {_inspect.signature(RobustnessLab.run_sweep)}\n"
@@ -1611,13 +1628,13 @@ if "鲁棒性" in st.session_state.active_tab:
                 st.code(_tb.format_exc())
                 all_results[dim] = [{'label': 'ERROR', 'error': str(te), 'metrics': None}]
             except Exception as e2:
-                st.error(f"❌ 异常调用 run_sweep: {type(e2).__name__}: {e2}")
+                st.error(t("err_unexpected", type=type(e2).__name__, msg=e2))
                 import traceback as _tb
                 st.code(_tb.format_exc())
                 all_results[dim] = [{'label': 'ERROR', 'error': str(e2), 'metrics': None}]
 
         progress_bar.progress(1.0)
-        status_text.caption("✅ 扫描完成！")
+        status_text.caption(t("scan_complete"))
 
         # 稳定性评分
         stability = RobustnessLab.stability_score(all_results)
@@ -1630,19 +1647,19 @@ if "鲁棒性" in st.session_state.active_tab:
 
         # ── 结果展示 ──
         st.markdown("---")
-        st.subheader("📊 结果分析")
+        st.subheader(t("robustness_result_analysis"))
 
         # 综合评分卡片 — 安全访问
         overall = stability.get('overall', 'unknown')
-        stability_summary = stability.get('summary', '')
+        stability_summary = RobustnessLab._build_summary(overall, stability.get('summary_dims', []))
         if overall == 'robust':
-            st.success(f"✅ **综合评级: 策略鲁棒** — {stability_summary}")
+            st.success(f"✅ **{t('verdict_robust')}** — {stability_summary}")
         elif overall in ('overfit_risk', 'overfit'):
-            st.error(f"⚠️ **综合评级: 过拟合风险** — {stability_summary}")
+            st.error(f"⚠️ **{t('verdict_overfit')}** — {stability_summary}")
         elif overall == 'sensitive':
-            st.warning(f"⚡ **综合评级: 参数敏感** — {stability_summary}")
+            st.warning(f"⚡ **{t('verdict_sensitive')}** — {stability_summary}")
         else:
-            st.info(f"🔶 **综合评级: 中等敏感** — {stability_summary}")
+            st.info(f"🔶 **{t('verdict_moderate')}** — {stability_summary}")
 
         # 每维度结果
         for dim in selected_dims:
@@ -1650,12 +1667,12 @@ if "鲁棒性" in st.session_state.active_tab:
             sweeps = all_results[dim]
             ds = (stability.get('dim_scores') or {}).get(dim, {}) if isinstance(stability.get('dim_scores'), dict) else {}
 
-            with st.expander(f"📐 {dim_def['label']} — {ds.get('verdict','?')} | "
-                            f"最优={ds.get('best','?')}({ds.get('best_return',0):+.1f}%) | "
+            with st.expander(t("robustness_dimension_label", label=_dim_label(dim)) + f" — {ds.get('verdict','?')} | "
+                            f"{t('robustness_best_label')}={ds.get('best','?')}({ds.get('best_return',0):+.1f}%) | "
                             f"CV={ds.get('cv',0):.3f}", expanded=True):
                 # 参数收益矩阵
                 mat = RobustnessLab.format_matrix(dim, sweeps)
-                st.dataframe(mat.set_index('参数'), use_container_width=True)
+                st.dataframe(mat.set_index(t('param_label')), use_container_width=True)
 
                 # 如果存在错误，展示详细traceback
                 errors_in_dim = [s for s in sweeps if s.get('error')]
@@ -1668,100 +1685,96 @@ if "鲁棒性" in st.session_state.active_tab:
                 returns = [s['total_return'] for s in sweeps if not s.get('error')]
                 labels = [s['label'] for s in sweeps if not s.get('error')]
                 if len(returns) >= 2:
-                    chart_data = pd.DataFrame({'收益%': returns}, index=labels)
+                    chart_data = pd.DataFrame({f'{t("total_return")}%': returns}, index=labels)
                     st.line_chart(chart_data, use_container_width=True, height=200)
 
                 # 稳定性指标
                 dsc1, dsc2, dsc3 = st.columns(3)
                 with dsc1:
-                    st.metric("变异系数(CV)", f"{ds.get('cv', 0):.3f}",
-                             delta="越小越稳定" if ds.get('cv', 0) < 0.3 else "敏感")
+                    st.metric(t("robustness_stability_cv"), f"{ds.get('cv', 0):.3f}",
+                             delta="稳定" if ds.get('cv', 0) < 0.3 else "敏感")
                 with dsc2:
-                    st.metric("收益波动范围", f"{ds.get('range_pct', 0):.1f}%")
+                    st.metric(t("robustness_stability_range"), f"{ds.get('range_pct', 0):.1f}%")
                 with dsc3:
                     verdict = ds.get('verdict', '?')
-                    v_map = {'robust': '✅ 鲁棒', 'overfit': '⚠️ 过拟合风险',
-                             'sensitive': '⚡ 敏感', 'moderate': '🔶 中等'}
-                    st.metric("评级", v_map.get(verdict, verdict))
+                    v_map = {'robust': '✅ ' + t('verdict_robust'), 'overfit': '⚠️ ' + t('verdict_overfit'),
+                             'sensitive': '⚡ ' + t('verdict_sensitive'), 'moderate': '🔶 ' + t('verdict_moderate')}
+                    st.metric(t("robustness_rating"), v_map.get(verdict, verdict))
 
         # 完整报告
-        with st.expander("📝 完整鲁棒性报告", expanded=False):
+        with st.expander(t("robustness_full_report"), expanded=False):
             report = RobustnessLab.generate_report(all_results, stability)
             st.markdown(report)
 
-        st.success("🎉 鲁棒性测试完成！可通过上方折叠面板查看各维度详细结果。")
+        st.success(t("success_robustness_done"))
 
         # 缓存结果
         st.session_state.lab_results = {'all_results': all_results, 'stability': stability}
     else:
         # 未运行: 检查是否有缓存结果
         if 'lab_results' in st.session_state:
-            st.info("📋 显示上次测试结果（缓存在内存中，刷新页面会丢失）")
+            st.info(t("info_cached_result"))
             lr = st.session_state.lab_results
             all_results = lr.get('all_results', {})
             stability = lr.get('stability', {})
 
             overall = stability.get('overall', 'unknown')
-            stability_summary = stability.get('summary', '')
+            stability_summary = RobustnessLab._build_summary(overall, stability.get('summary_dims', []))
             if overall == 'robust':
-                st.success(f"✅ **综合评级: 策略鲁棒** — {stability_summary}")
+                st.success(f"✅ **{t('verdict_robust')}** — {stability_summary}")
             elif overall in ('overfit_risk', 'overfit'):
-                st.error(f"⚠️ **综合评级: 过拟合风险** — {stability_summary}")
+                st.error(f"⚠️ **{t('verdict_overfit')}** — {stability_summary}")
             else:
-                st.warning(f"⚡/🔶 **综合评级: 敏感** — {stability_summary}")
+                st.warning(f"⚡/🔶 **{t('verdict_sensitive')}** — {stability_summary}")
 
             for dim in all_results.keys():
                 dim_def = SWEEP_DIMENSIONS.get(dim, {})
                 sweeps = all_results.get(dim, [])
                 ds = stability.get('dim_scores', {}).get(dim, {}) if isinstance(stability.get('dim_scores'), dict) else {}
-                with st.expander(f"📐 {dim_def.get('label', dim)} — {ds.get('verdict','?')}", expanded=False):
+                with st.expander(f"📐 {_dim_label(dim)} — {ds.get('verdict','?')}", expanded=False):
                     mat = RobustnessLab.format_matrix(dim, sweeps)
-                    st.dataframe(mat.set_index('参数'), use_container_width=True)
+                    st.dataframe(mat.set_index(t('param_label')), use_container_width=True)
 
-            with st.expander("📝 完整报告", expanded=False):
+            with st.expander(t("robustness_full_report"), expanded=False):
                 st.markdown(RobustnessLab.generate_report(all_results, stability))
         else:
-            st.info("👆 选择测试维度后，点击上方按钮开始鲁棒性分析。")
+            st.info(t("hint_select_dims"))
 
     # ── 参数组合优化 (独立于单维度扫描) ──
     if "鲁棒性" in st.session_state.active_tab:
         from robustness_lab import PARAM_COMBO_GRID
 
         st.divider()
-        st.subheader("🧬 参数组合优化")
-        st.caption(
-            "单参数最优组合后收益可能下降，说明参数存在**交互影响**。"
-            "本模块对 EMA、Fibonacci、成交量、杠杆进行多参数组合网格扫描，"
-            "通过 IS/OOS 双段验证寻找长期可复制的稳定参数区域。"
-        )
+        st.subheader(t("combo_title"))
+        st.caption(t("combo_subtitle"))
 
         has_backtest_for_combo = ("last_result" in st.session_state and
                                    "last_engine_kwargs" in st.session_state and
                                    "last_coin" in st.session_state)
 
         if not has_backtest_for_combo:
-            st.warning("⚠️ 请先在回测看板运行一次回测。")
+            st.warning(t("warning_no_backtest"))
         else:
             combo_c1, combo_c2, combo_c3 = st.columns(3)
             with combo_c1:
-                oos_ratio = st.slider("OOS 数据比例", 0.1, 0.5, 0.3, 0.05,
-                                      help="最后N%的数据作为样本外验证集")
+                oos_ratio = st.slider(t("combo_oos_ratio"), 0.1, 0.5, 0.3, 0.05,
+                                      help=t("combo_oos_help"))
             with combo_c2:
-                min_trades = st.number_input("最少交易次数", 3, 20, 5,
-                                             help="低于此交易次数的组合将被跳过")
+                min_trades = st.number_input(t("combo_min_trades"), 3, 20, 5,
+                                             help=t("combo_min_trades_help"))
             with combo_c3:
                 total_combos_preview = 1
                 for d in PARAM_COMBO_GRID:
                     total_combos_preview *= len(PARAM_COMBO_GRID[d]['values'])
-                st.metric("组合总数", total_combos_preview,
-                          delta=f"约{total_combos_preview * 2 * 4}~{total_combos_preview * 2 * 6}秒")
+                st.metric(t("combo_total_combos"), total_combos_preview,
+                          delta=t("combo_est_time", min=total_combos_preview * 2 * 4, max=total_combos_preview * 2 * 6))
 
-            run_combo = st.button("🧬 开始组合优化扫描", use_container_width=True, type="primary",
+            run_combo = st.button(t("btn_start_combo"), use_container_width=True, type="primary",
                                   key="run_combo_btn")
 
             if run_combo:
                 # 加载数据
-                with st.spinner("加载数据..."):
+                with st.spinner(t("loading_data")):
                     de2 = DataEngine()
                     dfs2 = de2.get_multi_timeframe(st.session_state.last_coin)
                     tf2 = st.session_state.last_timeframe
@@ -1814,10 +1827,10 @@ if "鲁棒性" in st.session_state.active_tab:
                     )
 
                     combo_progress.progress(1.0)
-                    combo_status.caption("✅ 组合优化完成！")
+                    combo_status.caption(t("combo_complete"))
 
                     st.markdown("---")
-                    st.subheader("📊 组合优化结果")
+                    st.subheader(t("combo_result_analysis"))
 
                     top10 = combo_result.get('top10', [])
                     all_combo = combo_result.get('combinations', [])
@@ -1826,70 +1839,58 @@ if "鲁棒性" in st.session_state.active_tab:
                         # 统计
                         tc1, tc2, tc3, tc4 = st.columns(4)
                         with tc1:
-                            st.metric("扫描组合", combo_result.get('total_combos', '?'))
+                            st.metric(t("combo_scanned"), combo_result.get('total_combos', '?'))
                         with tc2:
-                            st.metric("有效组合", len(all_combo))
+                            st.metric(t("combo_valid"), len(all_combo))
                         with tc3:
-                            rec_count = len([t for t in top10 if 'recommended' in t.get('flags', [])])
-                            st.metric("⭐推荐实盘", rec_count)
+                            rec_count = len([ct for ct in top10 if 'recommended' in ct.get('flags', [])])
+                            st.metric(f"⭐{t('combo_recommended')}", rec_count)
                         with tc4:
-                            stable_count = len([t for t in top10 if 'stable' in t.get('flags', [])])
-                            st.metric("🟢稳定区域", stable_count)
+                            stable_count = len([ct for ct in top10 if 'stable' in ct.get('flags', [])])
+                            st.metric(f"🟢{t('combo_stable_region')}", stable_count)
 
                         # Top 10 表格
-                        st.markdown("### 🏆 Top 10 稳定组合")
+                        st.markdown(f"### {t('combo_top10_title')}")
                         table_df = RobustnessLab.combo_format_table(all_combo, top_n=10)
-                        st.dataframe(table_df.set_index('排名'), use_container_width=True,
+                        st.dataframe(table_df.set_index(t('combo_rank')), use_container_width=True,
                                      column_config={
-                                         '标记': st.column_config.TextColumn('标记', width='small'),
-                                         '总分': st.column_config.ProgressColumn('总分', min_value=0, max_value=100, format='%.0f'),
+                                         t('combo_flag'): st.column_config.TextColumn(t('combo_flag'), width='small'),
+                                         t('combo_score'): st.column_config.ProgressColumn(t('combo_score'), min_value=0, max_value=100, format='%.0f'),
                                      })
 
                         # 评分维度说明
-                        with st.expander("📐 评分规则说明", expanded=False):
-                            st.markdown("""
-                            | 维度 | 权重 | 说明 |
-                            |------|------|------|
-                            | 收益能力 | 40% | IS收益 + OOS收益 标准化 |
-                            | 风险控制 | 30% | 最大回撤(低) + Sharpe(高) + Calmar(高) |
-                            | 稳定性 | 20% | IS/OOS收益一致性 + 胜率稳定性 |
-                            | 交易活跃度 | 10% | 交易次数适中(避免过拟合) |
-                            """)
+                        with st.expander(t("combo_scoring_rules"), expanded=False):
+                            st.markdown(t("combo_scoring_table"))
 
                         # 标记图例
-                        with st.expander("🏷️ 标记说明", expanded=False):
-                            st.markdown("""
-                            - ⭐ **推荐实盘**: 综合评分≥70 + 稳定区域 + OOS为正
-                            - 🟢 **稳定区域**: IS和OOS均为正且差异<30%
-                            - 🟠 **过拟合嫌疑**: IS收益 > OOS收益 × 2
-                            - 🔴 **严重过拟合**: IS为正但OOS为负
-                            """)
+                        with st.expander(t("combo_flag_legend"), expanded=False):
+                            st.markdown(t("combo_flag_legend_text"))
 
                         # 收益对比图
-                        with st.expander("📈 IS vs OOS 收益对比 (Top10)", expanded=True):
+                        with st.expander(t("combo_is_oos_chart"), expanded=True):
                             if top10:
-                                chart_is = [t.get('is_return', 0) for t in top10]
-                                chart_oos = [t.get('oos_return', 0) for t in top10]
-                                chart_labels = [t['label'][:30] for t in top10]
+                                chart_is = [ct.get('is_return', 0) for ct in top10]
+                                chart_oos = [ct.get('oos_return', 0) for ct in top10]
+                                chart_labels = [ct['label'][:30] for ct in top10]
                                 chart_df = pd.DataFrame({
-                                    'IS收益%': chart_is,
-                                    'OOS收益%': chart_oos,
+                                    f'IS{t("total_return")}%': chart_is,
+                                    f'OOS{t("total_return")}%': chart_oos,
                                 }, index=chart_labels)
                                 st.bar_chart(chart_df, use_container_width=True, height=300)
 
                         # 完整报告
-                        with st.expander("📝 完整组合优化报告", expanded=False):
+                        with st.expander(t("combo_full_report"), expanded=False):
                             report = RobustnessLab.combo_generate_report(combo_result)
                             st.markdown(report)
 
                     else:
-                        st.warning("⚠️ 没有找到有效的参数组合。请检查: 1) 数据是否足够 2) 交易次数阈值是否过高")
+                        st.warning(t("combo_no_valid"))
 
                     # 缓存
                     st.session_state.combo_result = combo_result
 
                 except Exception as combo_err:
-                    st.error(f"❌ 组合优化异常: {type(combo_err).__name__}: {combo_err}")
+                    st.error(t("err_unexpected", type=type(combo_err).__name__, msg=combo_err))
                     import traceback as _tb2
                     st.code(_tb2.format_exc())
 
@@ -1898,10 +1899,10 @@ if "鲁棒性" in st.session_state.active_tab:
                 cr = st.session_state.combo_result
                 top10_cached = cr.get('top10', [])
                 if top10_cached:
-                    st.info("📋 显示上次组合优化结果（缓存在会话中）")
+                    st.info(t("info_cached_result"))
                     table_df2 = RobustnessLab.combo_format_table(cr.get('combinations', []), top_n=10)
-                    st.dataframe(table_df2.set_index('排名'), use_container_width=True)
-                    st.caption("💡 点击上方「开始组合优化扫描」可重新运行")
+                    st.dataframe(table_df2.set_index(t('combo_rank')), use_container_width=True)
+                    st.caption(t("hint_rerun_combo"))
 
     st.stop()
 
@@ -1909,8 +1910,9 @@ if "鲁棒性" in st.session_state.active_tab:
 # ============================================================
 # Tab 1: 回测看板
 # ============================================================
+set_lang(st.session_state.lang)
 p1, p2, p3, p4 = st.columns(4)
-p1.metric("标的", coin); p2.metric("周期", timeframe); p3.metric("杠杆", f"{leverage}x"); p4.metric("资金", f"${initial_capital:,}")
+p1.metric(t("coin_select"), coin); p2.metric(t("timeframe_select"), timeframe); p3.metric(t("leverage_label"), f"{leverage}{t('leverage_unit')}"); p4.metric(t("capital_label"), f"${initial_capital:,}")
 
 # 已选指标摘要
 active_inds = [n for n, c in st.session_state.selected_indicators.items() if isinstance(c, dict) and c.get("enabled")]
