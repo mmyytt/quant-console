@@ -1273,7 +1273,7 @@ st.caption(t("version_label", version=_QUANTCODE_VERSION, commit=_git_hash, buil
 
 # Tab 导航
 if "active_tab" not in st.session_state: st.session_state.active_tab = "回测看板"
-tc1, tc2, tc3 = st.columns([1, 1, 1])
+tc1, tc2, tc3, tc4 = st.columns([1, 1, 1, 1])
 with tc1:
     if st.button(t("nav_backtest"), use_container_width=True,
                  type="primary" if "回测" in st.session_state.active_tab else "secondary"):
@@ -1286,6 +1286,10 @@ with tc3:
     if st.button(t("nav_robustness"), use_container_width=True,
                  type="primary" if "鲁棒性" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "鲁棒性实验室"; st.rerun()
+with tc4:
+    if st.button(t("nav_live_trading"), use_container_width=True,
+                 type="primary" if "交易中心" in st.session_state.active_tab else "secondary"):
+        st.session_state.active_tab = "交易中心"; st.rerun()
 
 st.divider()
 
@@ -1449,6 +1453,16 @@ if "AI" in st.session_state.active_tab:
         if st.button(t("btn_clear_chat"), use_container_width=True):
             st.session_state.ai_chat_history = []; st.rerun()
 
+    st.stop()
+
+
+# ============================================================
+# Tab 3.5: 交易中心 Live Trading Dashboard (2026-08-13 新增)
+# ============================================================
+if "交易中心" in st.session_state.active_tab:
+    from live_trading.trading_dashboard import render as render_live_trading
+    set_lang(st.session_state.lang)
+    render_live_trading()
     st.stop()
 
 

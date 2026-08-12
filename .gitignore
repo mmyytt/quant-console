@@ -11,3 +11,20 @@ backtest_result.json
 *.csv
 tmp/
 _tmp_*
+
+# 交易日志与敏感运行时文件
+*.log
+trade_log.txt
+
+# 遗留实验脚本（含历史硬编码凭证，禁止提交）
+crash_bounce.py
+dashboard.py
+engine_v6.py
+test_api.py
+watch.py
+watch_rotation.py
+监测器.py
+okx_trader.py
+auto_trader.py
+auto_trader.sh
+server.py
