@@ -2191,7 +2191,8 @@ if submitted:
     c[4].metric(t("profit_factor"), f"{metrics.get('profit_factor',0):.2f}" if metrics.get('profit_factor') != float('inf') else "inf")
     c[5].metric(t("metric_trades_short"), metrics.get('total_trades', 0))
     # 新增风险指标
-    st.caption(t("metrics_caption", sortino=metrics.get('sortino_ratio',0), calmar=metrics.get('calmar_ratio',0),
+    st.caption(t("metrics_caption", sharpe=metrics.get('sharpe_ratio',0), sortino=metrics.get('sortino_ratio',0),
+                 calmar=metrics.get('calmar_ratio',0),
                  losses=metrics.get('max_consecutive_losses',0), recovery=metrics.get('recovery_factor',0)))
     # 用真实时间戳算回测时长 (不依赖K线数)
     ec = result.get('equity_curve', [])
@@ -2345,11 +2346,11 @@ if submitted:
     closed = [t for t in trades_list if t.get('reason') in ('TP', 'SL', 'EOD')]
     ts_start = str(df_show.index[0]); ts_end = str(df_show.index[-1])
     buy_t, buy_p = [], []; sell_t, sell_p = [], []
-    for t in closed:
-        ot = t.get('open_time', '')
+    for tr in closed:
+        ot = tr.get('open_time', '')
         if ts_start <= ot <= ts_end:
-            if t['side'] == 'LONG': buy_t.append(ot); buy_p.append(t['entry'])
-            else: sell_t.append(ot); sell_p.append(t['entry'])
+            if tr['side'] == 'LONG': buy_t.append(ot); buy_p.append(tr['entry'])
+            else: sell_t.append(ot); sell_p.append(tr['entry'])
     if buy_t:
         fig_kl.add_trace(go.Scattergl(x=buy_t, y=buy_p, mode='markers',
                                      marker=dict(symbol='triangle-up', size=12, color='#22c55e'),
@@ -2601,25 +2602,33 @@ if submitted:
         st.subheader(t("strategy_summary_title"))
         summary = PerformanceAnalyzer.generate_strategy_summary(result, metrics, audit)
         with st.expander(t("auto_summary_expander"), expanded=True):
+            # 语言无关行样式匹配：用翻译模板前缀定位，杜绝硬编码中文导致英文失效
+            def _sp(key):
+                tpl = t(key)
+                i = tpl.find('{')
+                return (tpl if i == -1 else tpl[:i]).rstrip()
+            _styles = [
+                (_sp('summary_strategy_type'), 'bold'),
+                (_sp('summary_return_feature'), '📈'),
+                (_sp('summary_frequency'), '⏱️'),
+                (_sp('summary_return_source'), '📊'),
+                (_sp('summary_return_judge'), 'caption'),
+                (_sp('summary_concentration'), '🎯'),
+                (_sp('summary_extreme_dependent'), '⚠️'),
+                (_sp('summary_extreme_stable'), '⚠️'),
+                (_sp('summary_risk_feature'), '🛡️'),
+                (_sp('summary_suggestion_label'), 'warn'),
+            ]
             for line in summary.split('\n'):
-                if line.startswith('策略类型'):
+                style = next((s for p, s in _styles if line.startswith(p)), None)
+                if style == 'bold':
                     st.markdown(f"**{line}**")
-                elif line.startswith('收益特征'):
-                    st.markdown(f"📈 {line}")
-                elif line.startswith('交易频率'):
-                    st.markdown(f"⏱️ {line}")
-                elif line.startswith('收益来源'):
-                    st.markdown(f"📊 {line}")
-                elif line.startswith('收益来源判断'):
+                elif style == 'caption':
                     st.caption(f"   {line}")
-                elif line.startswith('收益集中度'):
-                    st.markdown(f"🎯 {line}")
-                elif line.startswith('极端行情依赖'):
-                    st.markdown(f"⚠️ {line}")
-                elif line.startswith('风险特征'):
-                    st.markdown(f"🛡️ {line}")
-                elif line.startswith('优化建议'):
+                elif style == 'warn':
                     st.warning(f"💡 {line}")
+                elif style:
+                    st.markdown(f"{style} {line}")
                 else:
                     st.text(line)
 
@@ -2661,10 +2670,10 @@ if submitted:
     # 交易记录
     if closed:
         st.subheader(t("recent_trades_title"))
-        rows = [{t("col_time"): t.get('close_time','')[:16], t("col_coin"): t.get('coin',coin),
-                 t("col_side"): t.get('side','?'), t("col_entry"): f"${t.get('entry',0):.2f}",
-                 t("col_exit"): f"${t.get('exit',0):.2f}", t("col_reason"): t.get('reason','?'),
-                 t("col_pnl_pct"): f"{t.get('pnl_pct',0):+.2f}%"} for t in closed[-15:]]
+        rows = [{t("col_time"): tr.get('close_time','')[:16], t("col_coin"): tr.get('coin',coin),
+                 t("col_side"): tr.get('side','?'), t("col_entry"): f"${tr.get('entry',0):.2f}",
+                 t("col_exit"): f"${tr.get('exit',0):.2f}", t("col_reason"): tr.get('reason','?'),
+                 t("col_pnl_pct"): f"{tr.get('pnl_pct',0):+.2f}%"} for tr in closed[-15:]]
         st.dataframe(pd.DataFrame(rows[::-1]), use_container_width=True, height=300)
 
     # === AI 量化审计分析 ===

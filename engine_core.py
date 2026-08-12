@@ -1794,10 +1794,10 @@ class PerformanceAnalyzer:
                 # 构建调整后的权益曲线: 在每笔被剔除交易的平仓时间点扣减其PnL
                 # idx -> 累计扣减金额
                 adjustments = {}  # {equity_curve_index: cumulative_deduction}
-                for t in removed_trades:
+                for tr in removed_trades:
                     try:
-                        close_dt = pd.to_datetime(t['close_time'])
-                        pnl = t['pnl']
+                        close_dt = pd.to_datetime(tr['close_time'])
+                        pnl = tr['pnl']
                         # 找到权益曲线中 >= close_time 的第一个时间点
                         for j, ets in enumerate(eq_ts_list):
                             if isinstance(ets, (int, float)):
@@ -1883,9 +1883,9 @@ class PerformanceAnalyzer:
 
             # 持仓时间 (小时)
             hold_hours = []
-            for t in closed:
-                ot = PerformanceAnalyzer._parse_dt(t.get('open_time', ''))
-                ct = PerformanceAnalyzer._parse_dt(t.get('close_time', ''))
+            for tr in closed:
+                ot = PerformanceAnalyzer._parse_dt(tr.get('open_time', ''))
+                ct = PerformanceAnalyzer._parse_dt(tr.get('close_time', ''))
                 if ot and ct:
                     hold_hours.append((ct - ot).total_seconds() / 3600)
             stats['avg_hold_hours'] = round(np.mean(hold_hours), 1) if hold_hours else 0
@@ -2141,10 +2141,10 @@ class PerformanceAnalyzer:
             print(f"\n  {'─' * 45}")
             print(f"  [最近交易]")
             print(f"  {'─' * 45}")
-            for t in reversed(closed):
-                m = '+' if t['pnl'] >= 0 else ''
-                print(f"  {t['close_time'][:16]} | {t['side']:5s} | "
-                      f"{t['reason']:3s} | {m}{t['pnl']:.2f} ({t['pnl_pct']:+.2f}%)")
+            for tr in reversed(closed):
+                m = '+' if tr['pnl'] >= 0 else ''
+                print(f"  {tr['close_time'][:16]} | {tr['side']:5s} | "
+                      f"{tr['reason']:3s} | {m}{tr['pnl']:.2f} ({tr['pnl_pct']:+.2f}%)")
 
         print(f"\n  {'=' * 60}\n")
 
