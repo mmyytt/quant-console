@@ -4,6 +4,11 @@
 QuantCode i18n 国际化语言管理模块
 ===================================
 统一管理所有 UI 文案、报告文本的中英文翻译。
+
+版本: i18n-v1.1 (2026-08-13)
+验证: 10 个导出名齐全 (t / set_lang / get_lang / init_lang /
+      INDICATOR_I18N / CATEGORY_I18N / PARAM_LABEL_I18N / PARAM_HELP_I18N /
+      of_risk_label / trend_dep_label)，无 ImportError。
 """
 
 try:
