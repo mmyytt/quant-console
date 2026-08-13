@@ -73,11 +73,11 @@ def render():
 
     # ---- 连接测试 ----
     col_test, col_refresh = st.columns(2)
-    if col_test.button(t("lt_test_connection"), use_container_width=True):
+    if col_test.button(t("lt_test_connection"), width="stretch"):
         with st.spinner(t("lt_refresh")):
             st.session_state[f"lt_conn_{selected_id}"] = connector.test_connection()
 
-    if col_refresh.button(t("lt_refresh"), use_container_width=True):
+    if col_refresh.button(t("lt_refresh"), width="stretch"):
         with st.spinner(t("lt_refresh")):
             st.session_state[f"lt_snap_{selected_id}"] = monitor.get_snapshot(connector)
 
@@ -119,7 +119,7 @@ def render():
             t("lt_current_price"): [f"{p['current_price']:,.4f}" for p in positions],
             t("lt_upl"): [f"{p['unrealized_pnl']:+,.4f}" for p in positions],
         })
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df, width="stretch", hide_index=True)
         # 汇总未实现盈亏
         total_upl = snapshot["total_unrealized_pnl"]
         st.caption(
