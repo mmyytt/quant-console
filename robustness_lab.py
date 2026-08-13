@@ -718,11 +718,12 @@ class RobustnessLab:
         """
         综合评分: 收益40% + 风险30% + 稳定性20% + 交易10%
 
-        评分规则:
-        - 收益能力 (0-40分): IS收益 + OOS收益 标准化后加权
-        - 风险控制 (0-30分): 最大回撤(低) + Sharpe(高) + Calmar(高)
-        - 稳定性 (0-20分): IS/OOS收益一致性 + 胜率稳定性
+        评分规则 (P1-6: 全部 IS-only, 禁止用 OOS 结果选参):
+        - 收益能力 (0-40分): IS收益 标准化
+        - 风险控制 (0-30分): 最大回撤(低) + Sharpe(高) + Calmar(高) (均IS)
+        - 稳定性 (0-20分): IS胜率
         - 交易活跃度 (0-10分): 交易次数适中(非过拟合的极多或极少)
+        OOS 指标仅作独立展示字段与 overfit 标记, 不参与排序。
         """
         if not results:
             return results
@@ -752,32 +753,17 @@ class RobustnessLab:
             return [1.0 - n if invert else n for n in normed]
 
         n_is_ret = normalize(is_returns)
-        n_oos_ret = normalize(oos_returns)
         n_dd = normalize(max_dds, invert=True)      # 回撤越小越好
         n_sharpe = normalize(sharpes)
         n_calmar = normalize(calmar_vals)
         n_trades = normalize(trade_counts)
         n_wr = normalize(win_rates)
 
-        # OOS/IS 收益比 (接近1最好)
-        oos_is_ratios = []
-        for i in range(len(results)):
-            is_r = is_returns[i]
-            oos_r = oos_returns[i]
-            if is_r > 0.5 and oos_r > 0.5:
-                ratio = min(is_r, oos_r) / max(is_r, oos_r) if max(is_r, oos_r) > 0.01 else 0
-            elif is_r > 0.5 and oos_r < -0.5:
-                ratio = 0  # IS正OOS负 → 严重过拟合
-            else:
-                ratio = 0.3  # 中性
-            oos_is_ratios.append(ratio)
-        n_oos_is = normalize(oos_is_ratios)
-
-        # 综合评分
+        # 综合评分 (P1-6: IS-only, OOS 不参与选参排序)
         for i, r in enumerate(results):
-            return_score = (n_is_ret[i] * 0.5 + n_oos_ret[i] * 0.5) * 40
+            return_score = n_is_ret[i] * 40
             risk_score = (n_dd[i] * 0.35 + n_sharpe[i] * 0.35 + n_calmar[i] * 0.3) * 30
-            stability_score = (n_oos_is[i] * 0.6 + n_wr[i] * 0.4) * 20
+            stability_score = n_wr[i] * 20
             trade_score = n_trades[i] * 10
 
             composite = return_score + risk_score + stability_score + trade_score

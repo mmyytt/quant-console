@@ -16,12 +16,13 @@
 """
 import pandas as pd
 import numpy as np
-import os, warnings
+import os, warnings, inspect
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Union
 from abc import ABC, abstractmethod
 
 from i18n import t
+from future_leak_detector import FutureLeakDetector
 
 warnings.filterwarnings("ignore")
 
@@ -55,6 +56,16 @@ def ensure_data_ready(coin: str = "ETH"):
     except Exception as e:
         print(f"[DataEngine] Data download failed: {e}")
         return False
+
+
+def _load_funding_series(coin: str) -> pd.Series:
+    """加载 OKX SWAP 真实资金费率 (P2-1/P2-2), 失败返回空 Series (funding=0)。"""
+    try:
+        from data_loader import fetch_funding_history
+        return fetch_funding_history(coin)
+    except Exception as e:
+        print(f"[Funding] {coin}: load failed ({type(e).__name__}: {e}), funding=0")
+        return pd.Series(dtype=float)
 
 # 交易成本
 TAKER_FEE = 0.0005    # 手续费 0.05%
@@ -131,7 +142,7 @@ class MultiFactorRegime:
         对 DataFrame 的每一行评估牛熊状态。
 
         Args:
-            df: OHLCV (必须使用 shift(1) 防止未来函数)
+            df: OHLCV (原始K线; 函数内部统一 shift(1) 防止未来函数, 调用方无需预处理)
             funding_rate: 可选, 资金费率序列 (每8小时一次, 向前填充)
 
         Returns:
@@ -139,7 +150,12 @@ class MultiFactorRegime:
                        ema_score, adx_score, funding_score
         """
         df = df.copy()
-        close = df['close']; high = df['high']; low = df['low']
+        # P1-1 修复: 统一 shift(1), 所有输入指标只能用 bar i-1 或更早数据。
+        # 原实现用当前K线 close/high/low 计算 regime, 构成 1 根K线前视偏差
+        # (信号用 t-1 数据, 撮合用 t 开盘价, 但 regime 却偷看了 t 收盘价)。
+        close = df['close'].shift(1)
+        high = df['high'].shift(1)
+        low = df['low'].shift(1)
 
         # === Factor 1: EMA 斜率 ===
         ema = close.ewm(span=self.ema_span, adjust=False).mean()
@@ -399,7 +415,7 @@ class MACrossStrategy(StrategyBase):
         self.regime_span = regime_span
         self.regime_lookback = regime_lookback
 
-    def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+    def generate_signals(self, df: pd.DataFrame, funding_rate: pd.Series = None) -> pd.DataFrame:
         df = df.copy()
         close = df['close']; vol = df['vol']
 
@@ -424,7 +440,7 @@ class MACrossStrategy(StrategyBase):
             adx_threshold=25,
             ema_weight=0.40, adx_weight=0.35, funding_weight=0.25,
         )
-        df = regime_filter.evaluate(df)
+        df = regime_filter.evaluate(df, funding_rate=funding_rate)
         df['regime'] = df['regime_mf']          # 用多因子结果
         df['br'] = df['br_mf']                   # 用多因子空头比例
 
@@ -634,6 +650,8 @@ class BacktestEngineV2:
         self._use_atr_sl = use_atr_sl
         self._atr_period = atr_period
         self._atr_mult = atr_mult
+        # P2-1: 是否加载 OKX 真实资金费率 (测试可关闭避免网络依赖)
+        self._use_real_funding = True
         # 杠杆上限保护 (交易所最高125x)
         if self.leverage > 125:
             raise ValueError(t('leverage_limit_error', lev=self.leverage))
@@ -646,6 +664,7 @@ class BacktestEngineV2:
         self.cooldown: Dict[str, int] = {}      # coin -> bar when cooldown expires
         self.lock_until: int = -1               # bar index when circuit breaker expires
         self.losestreak: int = 0
+        self._leak_warnings: List[Dict] = []    # 未来函数扫描结果 (只读诊断)
 
     # ================================================================
     # 主回测循环
@@ -674,7 +693,8 @@ class BacktestEngineV2:
             self._pyr_init_pct = sel.get('_pyr_init_pct', 30)
             self._pyr_trigger_pct = sel.get('_pyr_trigger_pct', 2.0)
             self._pyr_add_pct = sel.get('_pyr_add_pct', 0.5)
-            self._pyr_max = sel.get('_pyr_max', 3)
+            # P3-5: max_pyramid 构造参数作为 _pyr_max 的回退默认值 (接线, 消除死参数)
+            self._pyr_max = sel.get('_pyr_max', getattr(self, 'max_pyramid', 3))
             self._pyr_trail = sel.get('_pyr_trail', False)
             self._pos_mode = sel.get('_pos_mode', 'fixed_capital')
             self._risk_pct = sel.get('_risk_per_trade', 1.0) / 100.0
@@ -699,12 +719,29 @@ class BacktestEngineV2:
 
         # 1. 对每个币种计算信号 (对冲模式跳过, 不需要指标)
         coins = list(dfs.keys())
+        # P2-1/P3-1: 预加载各币真实 funding (失败 → 空 Series, funding_score=0)
+        if getattr(self, '_use_real_funding', True):
+            for coin in coins:
+                self._funding_series[coin] = _load_funding_series(coin)
         dfs_with_sigs = {}
         for coin in coins:
             df = dfs[coin].copy()
             if self.strategy_mode != "hedging":  # 解锁模式仍需指标(EMA/RSI检测)
-                df = strategy.generate_signals(df)
+                fr = self._funding_series.get(coin)
+                if fr is not None and len(fr) > 0 and \
+                   'funding_rate' in inspect.signature(strategy.generate_signals).parameters:
+                    df = strategy.generate_signals(df, funding_rate=fr)
+                else:
+                    df = strategy.generate_signals(df)
             dfs_with_sigs[coin] = df
+
+        # 1.4. P1-1 新增: 未来函数扫描 (只读诊断, 非阻塞, 结果进 result['leak_warnings'])
+        self._leak_warnings = []
+        _detector = FutureLeakDetector()
+        for coin in coins:
+            self._leak_warnings.extend(_detector.scan(dfs_with_sigs[coin], raw_df=dfs[coin]))
+        if self._leak_warnings:
+            print(FutureLeakDetector.report(self._leak_warnings))
 
         # 1.5. P0新增: 预计算 ATR(14) — 全序列计算, shift(1)防未来函数, 用于入场时止损定价
         for coin in coins:
@@ -739,6 +776,17 @@ class BacktestEngineV2:
             dfs_with_sigs[coin] = aligned
         common_index = primary_index
 
+        # P2-1/P2-2: 将 funding 结算时间戳映射到 bar 索引 (真实结算, 不再 i % 2)
+        for coin in coins:
+            fr = self._funding_series.get(coin)
+            settle = {}
+            if fr is not None and len(fr) > 0:
+                for fts, rate in fr.items():
+                    pos_idx = common_index.searchsorted(fts, side='right') - 1
+                    if 0 <= pos_idx < len(common_index):
+                        settle[pos_idx] = settle.get(pos_idx, 0.0) + float(rate)
+            self._funding_settle[coin] = settle
+
         # 3. 逐根遍历
         # 需求4: 回测前输出风险配置报告
         self._print_risk_report()
@@ -749,10 +797,8 @@ class BacktestEngineV2:
             if self.strategy_mode in ("hedging", "unlocking"):
                 self._hedge_state_machine(ts, dfs_with_sigs, coins, i)
 
-            # ---- 检查持仓 TP/SL ----
-            self._check_positions(ts, dfs_with_sigs, i)
-
             # ---- 开仓: 轮动选币 (对冲LOCKED状态下彻底屏蔽!) ----
+            # P1-2 修复: 开仓提前到 TP/SL 检查之前, 使新仓当根即用 high/low 评估 TP/SL/爆仓
             hedge_blocked = (self.strategy_mode in ("hedging", "unlocking") and
                              self._hedge_state in ("LOCKED", "UNLOCKED"))
             just_closed = (i == self._last_closed_bar)
@@ -760,20 +806,16 @@ class BacktestEngineV2:
                len(self.positions) < self.max_positions:
                 self._try_rotate_entry(ts, dfs_with_sigs, coins, i)
 
+            # ---- 检查持仓 TP/SL (含刚开的新仓, 同K线 SL 优先) ----
+            self._check_positions(ts, dfs_with_sigs, i)
+
             # 破产熔断
             if self.equity <= 0:
                 self.equity = 0.0
                 break
 
-            # ---- 资金费率结算 (每8h, 模拟永续合约) ----
-            if self.leverage > 1 and i % 2 == 0:  # 4H周期: 每2根=8h
-                for pos in self.positions:
-                    if pos.get('leg') == 'SPOT': continue  # 现货不收资金费
-                    funding_fee = pos['notional'] * 0.0001  # 默认0.01%费率
-                    if pos['side'] == 'LONG':
-                        self.equity -= funding_fee
-                    else:  # SHORT: 做空收资金费(牛市通常为正)
-                        self.equity += funding_fee * 0.5  # 保守估计
+            # ---- 资金费率结算 (OKX 真实费率, 按结算时间戳) ----
+            self._settle_funding(i)
 
             # ---- 金字塔加仓检测 (经典模式) ----
             if self._enable_pyramiding and self._pyramid_count > 0 and \
@@ -800,7 +842,37 @@ class BacktestEngineV2:
             last_close = float(dfs_with_sigs[coin]['close'].iloc[-1])
             self._close(pos, last_close, 'EOD', dfs_with_sigs[coin].index[-1])
 
+        # P2-4: 期末强平后追加最终结算点, 使 equity_array[-1] = 已实现终值
+        if self.equity_curve:
+            self.equity_curve.append({
+                'timestamp': self.equity_curve[-1]['timestamp'],
+                'equity': round(self.equity, 2),
+            })
+
         return self._build_result(strategy, coins, common_index)
+
+    # ================================================================
+    # 内部: 资金费率结算 (OKX 真实费率, 按结算时间戳对齐)
+    # ================================================================
+    def _settle_funding(self, i: int):
+        """按结算时间戳结算资金费 (P2-1/P2-2)。
+
+        方向: LONG fee = -notional×fr, SHORT fee = +notional×fr (fr 可正可负)。
+        现货腿不收资金费。杠杆 <= 1 (现货) 时不结算。
+        """
+        if self.leverage <= 1:
+            return
+        for pos in self.positions:
+            if pos.get('leg') == 'SPOT':
+                continue
+            coin = pos['coin']
+            rate = self._funding_settle.get(coin, {}).get(i, 0.0)
+            if rate:
+                fee = pos['notional'] * rate
+                if pos['side'] == 'LONG':
+                    self.equity -= fee
+                else:
+                    self.equity += fee
 
     # ================================================================
     # 内部: 平仓检查
@@ -993,24 +1065,15 @@ class BacktestEngineV2:
                            existing_notional=total_notional)
                 self._pyramid_count += 1
 
-                # 加权均价: Σ(notional_i * entry_i) / Σ(notional_i)
+                # P1-5: 每个 leg 独立保留自己的 entry/tp/sl, 不再覆盖同向 leg。
+                # 加权均价仅作展示字段 (new_avg), 不写入任何 leg 的 entry。
                 total_n = total_notional + add_notional
                 new_avg = (total_notional * avg_entry + add_notional * px) / max(total_n, 1)
-                for p in same_side + self.positions[-1:]:  # 包括刚开的
-                    if p['side'] == side and p['coin'] == coin:
-                        p['entry'] = new_avg
-                        # P0: TP/SL 重算也尊重 tp_mode
-                        if self.tp_mode == 'price_pct':
-                            p['tp_price'] = new_avg * (1 + self.tp_pct) if side == 'LONG' else \
-                                            new_avg * (1 - self.tp_pct)
-                        else:
-                            p['tp_price'] = new_avg * (1 + self.tp_pct / lev) if side == 'LONG' else \
-                                            new_avg * (1 - self.tp_pct / lev)
-                # 保本止损: 均价即新的止损线
+                # 保本止损: 每个 leg 移到自身入场价(保本), 而非合并均价
                 if self._pyr_trail:
-                    for p in same_side + self.positions[-1:]:
+                    for p in self.positions:
                         if p['side'] == side and p['coin'] == coin:
-                            p['sl_price'] = new_avg
+                            p['sl_price'] = p['entry']
                 if self.verbose:
                     print(f"[PYR] {ts} | {coin} {side} +{self._pyr_add_pct*100:.0f}% | "
                           f"avg={new_avg:.2f} | n={self._pyramid_count}/{self._pyr_max}")
@@ -1199,11 +1262,15 @@ class BacktestEngineV2:
 
         # Step 3: 仓位计算
         if use_fixed_risk:
-            # === Fixed Risk: risk_budget = equity × risk_pct × regime_mult × init_alloc ===
-            risk_budget = self.equity * risk_pct * regime_mult * init_alloc
+            # === Fixed Risk: risk_budget = equity × risk_pct × regime_mult ===
+            # P1-3 职责分离: risk_pct=单笔最大风险比例; regime_mult=市场环境乘数。
+            # init_alloc 仅用于 Fixed Capital / Dynamic Stop 的资金投入比例,
+            # 不再二次缩放 Fixed Risk 的风险预算 (否则实际风险 = 风险% × 建仓%)。
+            risk_budget = self.equity * risk_pct * regime_mult
             position_units = risk_budget / max(sl_distance, 1e-6)
             notional = position_units * fill_price
             margin = notional / lev
+            actual_risk = position_units * sl_distance  # P1-3: 实际风险 = 数量 × 止损距离
 
             if self.verbose:
                 # 需求4: Fixed Risk 实时解释模块 — 每笔开仓展示完整计算链
@@ -1215,9 +1282,9 @@ class BacktestEngineV2:
                 print(f"  账户权益:        ${self.equity:>12,.2f}")
                 print(f"  风险占比:        {risk_pct*100:>12.1f}%")
                 print(f"  市场乘数:        {regime_mult*100:>12.0f}% ({regime})")
-                print(f"  建仓比例:        {init_alloc*100:>12.0f}%")
                 print(f"  {'-'*38}")
-                print(f"  风险预算:        ${risk_budget:>12,.2f}  (=权益x风险%x乘数x建仓%)")
+                print(f"  风险预算:        ${risk_budget:>12,.2f}  (=权益x风险%x乘数)")
+                print(f"  实际风险:        ${actual_risk:>12,.2f}  (=数量x止损距离)")
                 print(f"  {'-'*38}")
                 print(f"  止损来源:        {stop_source:>12s}")
                 print(f"  止损距离:        ${sl_distance:>12,.2f} /ETH  ({sl_pct_display:.2f}%价格)")
@@ -1226,12 +1293,11 @@ class BacktestEngineV2:
                 print(f"  名义仓位:        ${notional:>12,.2f}  (=数量x价格)")
                 print(f"  占用保证金:      ${margin:>12,.2f}  (=名义仓位/杠杆)")
                 print(f"  保证金占比:      {margin/self.equity*100:>12.1f}% 权益")
-                print(f"  {'-'*38}")
-                print(f"  止损触发亏损:    ${position_units*sl_distance:>12,.2f}  (≈风险预算)")
                 print(f"  {'='*56}\n")
                 print(f"[TRADE LOG] Fixed Risk: Equity=${self.equity:.0f} | "
-                      f"Regime={regime}(x{regime_mult:.0%}) | InitAlloc={init_alloc:.0%} | "
-                      f"RiskBudget=${risk_budget:.2f} | SL_dist=${sl_distance:.2f} | "
+                      f"Regime={regime}(x{regime_mult:.0%}) | "
+                      f"RiskBudget=${risk_budget:.2f} | ActualRisk=${actual_risk:.2f} | "
+                      f"SL_dist=${sl_distance:.2f} | "
                       f"Units={position_units:.4f} | Notional=${notional:.0f} | "
                       f"Margin=${margin:.0f} ({margin/self.equity*100:.0f}%)")
         else:
@@ -1267,14 +1333,15 @@ class BacktestEngineV2:
             margin = self.equity
             notional = margin * lev
 
-        # 4b: 累计名义仓位上限 (已有持仓 + 本次新增)
+        # 4b: 组合级名义仓位上限 (全组合累计, 而非同币累计)
         max_notional = self.equity * self.max_notional_pct
-        total_notional = existing_notional + notional
+        portfolio_notional = sum(p['notional'] for p in self.positions)
+        total_notional = portfolio_notional + notional
         if total_notional > max_notional:
-            notional = max(0, max_notional - existing_notional)
+            notional = max(0, max_notional - portfolio_notional)
             margin = notional / lev
             if self.verbose:
-                print(f"[RISK CAP] 累计名义{total_notional:.0f}超上限{max_notional:.0f}, "
+                print(f"[RISK CAP] 组合名义{total_notional:.0f}超上限{max_notional:.0f}, "
                       f"缩减至本次新增={notional:.0f}")
 
         # Step 5: TP 价格计算 (不参与仓位公式, 仅用于止盈触发)
@@ -1302,6 +1369,7 @@ class BacktestEngineV2:
 
         pos = {
             'coin': coin, 'side': side, 'entry': fill_price,
+            'qty': notional / fill_price if fill_price > 0 else 0.0,  # P1-5: 独立 leg 数量
             'margin': margin, 'notional': notional,
             'alloc': alloc, 'regime': regime,
             'resonance_score': resonance_score,
@@ -1332,11 +1400,15 @@ class BacktestEngineV2:
         else:
             margin_pnl_pct = (ep - price) / ep * lev
 
-        # 爆仓判定: 浮亏超过保证金 → 强制归零
+        # 爆仓判定: 触及强平价 → 按维持保证金结算 (保留 mmr, 不再强制归零)
         if margin_pnl_pct <= -1.0:
-            margin_pnl_pct = -1.0
             reason = 'LIQUIDATED'
-            price = ep * (1 - 1.0/lev) if side == 'LONG' else ep * (1 + 1.0/lev)
+            mmr = pos.get('mmr', 0.005)
+            price = ep * (1 - 1.0/lev + mmr) if side == 'LONG' else ep * (1 + 1.0/lev - mmr)
+            if side == 'LONG':
+                margin_pnl_pct = (price - ep) / ep * lev
+            else:
+                margin_pnl_pct = (ep - price) / ep * lev
 
         pnl_usd = margin * margin_pnl_pct
 
@@ -1392,10 +1464,9 @@ class BacktestEngineV2:
         self._pyramid_count = 0
         self._last_closed_bar = -1  # 防同Bar重开
         self._last_entry_price = 0
-
-    def _count_positions_before(self, bar_idx):
-        """数一下指定 bar 之前的持仓数 (用于检测 just_closed)"""
-        return len(self.positions)
+        self._leak_warnings = []
+        self._funding_settle = {}   # P2-1: {coin: {bar_idx: funding_rate}}
+        self._funding_series = {}   # P2-1: {coin: raw funding Series}
 
     def _print_risk_report(self):
         """需求4: 回测前输出风险配置报告，明确各参数生效状态与覆盖关系"""
@@ -1437,7 +1508,7 @@ class BacktestEngineV2:
         )
         if use_fixed_risk:
             effective_risk = (
-                f"单笔风险预算 = 权益 × {risk_pct*100:.1f}% × 市场乘数 × {init_alloc}%"
+                f"单笔风险预算 = 权益 × {risk_pct*100:.1f}% × 市场乘数"
             )
         elif use_dynamic_stop:
             effective_risk = (
@@ -1468,21 +1539,24 @@ class BacktestEngineV2:
     def _calc_total_equity(self, dfs, ts) -> float:
         """按已确认价格估算总权益 (含对冲腿浮动盈亏)"""
         total = self.equity
-        coin = list(dfs.keys())[0] if dfs else None
-        px = float(dfs[coin].loc[ts]['open']) if coin else 0
+        coin0 = list(dfs.keys())[0] if dfs else None
+        px0 = float(dfs[coin0].loc[ts]['open']) if coin0 else 0
         for pos in self.positions:
+            # P1-4: 每个仓位用各自 symbol 的价格, 而非 coins[0] 统一价
+            c = pos['coin']
+            px = float(dfs[c].loc[ts]['open']) if c in dfs else px0
             if pos['side'] == 'LONG':
                 float_pnl = (px - pos['entry']) / pos['entry'] * self.leverage
             else:
                 float_pnl = (pos['entry'] - px) / pos['entry'] * self.leverage
             total += pos['margin'] * float_pnl
-        # 对冲腿浮动盈亏
+        # 对冲腿浮动盈亏 (固定在 coins[0])
         if self._spot_leg is not None:
             spot_ep = self._spot_leg['entry']; spot_mg = self._spot_leg['margin']
-            total += spot_mg * (px - spot_ep) / spot_ep if spot_ep > 0 else 0
+            total += spot_mg * (px0 - spot_ep) / spot_ep if spot_ep > 0 else 0
         if self._short_leg is not None:
             short_ep = self._short_leg['entry']; short_mg = self._short_leg['margin']
-            total += short_mg * (short_ep - px) / short_ep * self.leverage if short_ep > 0 else 0
+            total += short_mg * (short_ep - px0) / short_ep * self.leverage if short_ep > 0 else 0
         return max(total, 0.0)
 
     def _build_result(self, strategy, coins, index) -> Dict:
@@ -1503,6 +1577,7 @@ class BacktestEngineV2:
             'data_bars': len(index),
             'data_start': str(index[0]) if len(index) > 0 else '',
             'data_end': str(index[-1]) if len(index) > 0 else '',
+            'leak_warnings': self._leak_warnings,
         }
 
 
@@ -1552,14 +1627,17 @@ class PerformanceAnalyzer:
             years = max(total_days / 365.25, 1 / 365.25)
         except:
             years = len(equity_arr) * 4 / (365 * 24)
-        if years > 0 and initial > 0 and final > 0 and not np.isnan(final):
+        if years >= 1.0 and initial > 0 and final > 0 and not np.isnan(final):
             ratio = final / initial
             if 0 < ratio < 1e12:
                 metrics['annual_return'] = round((ratio ** (1 / years) - 1) * 100, 2)
             else:
                 metrics['annual_return'] = -100.0
+        elif years < 1.0:
+            metrics['annual_return'] = None  # P2-6: 短周期(<1年) CAGR 无意义
         else:
             metrics['annual_return'] = -100.0
+        metrics['annual_return_label'] = 'N/A' if metrics['annual_return'] is None else f"{metrics['annual_return']:.2f}%"
         metrics['years'] = round(years, 2)
 
         # ---- 最大回撤 ----
@@ -1601,10 +1679,21 @@ class PerformanceAnalyzer:
                 metrics['avg_win'] = round(np.mean([t['pnl'] for t in wins]), 2) if wins else 0
                 metrics['avg_loss'] = round(np.mean([t['pnl'] for t in losses]), 2) if losses else 0
 
-                if metrics['avg_loss'] != 0:
-                    metrics['profit_factor'] = round(abs(metrics['avg_win'] / metrics['avg_loss']), 2)
+                # P3-4: 真 Profit Factor = Σ赢 / |Σ亏|; 平均盈亏比另存 payoff_ratio
+                # 无亏损时用 999.0 哨兵值 (与年度表一致, 避免 inf 被最终NaN清理归零)
+                total_win_pnl = sum(t['pnl'] for t in wins)
+                total_loss_pnl = abs(sum(t['pnl'] for t in losses))
+                if total_loss_pnl > 0:
+                    metrics['profit_factor'] = round(total_win_pnl / total_loss_pnl, 2)
+                elif total_win_pnl > 0:
+                    metrics['profit_factor'] = 999.0
                 else:
-                    metrics['profit_factor'] = float('inf')
+                    metrics['profit_factor'] = 0.0
+
+                if metrics['avg_loss'] != 0:
+                    metrics['payoff_ratio'] = round(abs(metrics['avg_win'] / metrics['avg_loss']), 2)
+                else:
+                    metrics['payoff_ratio'] = 999.0 if metrics['avg_win'] > 0 else 0.0
 
                 metrics['total_pnl'] = round(sum(t['pnl'] for t in closed), 2)
             else:
@@ -1628,8 +1717,9 @@ class PerformanceAnalyzer:
 
             # ---- Calmar比率 (年化收益/最大回撤) ----
             dd_val = metrics.get('max_drawdown', 1.0)
-            if dd_val > 0 and metrics.get('annual_return', 0) > -100:
-                metrics['calmar_ratio'] = round(metrics['annual_return'] / dd_val, 3)
+            ar = metrics.get('annual_return')
+            if dd_val > 0 and ar is not None and ar > -100:
+                metrics['calmar_ratio'] = round(ar / dd_val, 3)
             else:
                 metrics['calmar_ratio'] = 0.0
 
@@ -1714,9 +1804,10 @@ class PerformanceAnalyzer:
                 yr_wr = yr_wins / yr_trades * 100 if yr_trades > 0 else 0
                 yr_wins_pnl = grp[grp['pnl'] > 0]['pnl']
                 yr_loss_pnl = grp[grp['pnl'] <= 0]['pnl']
-                avg_w = yr_wins_pnl.mean() if len(yr_wins_pnl) > 0 else 0
-                avg_l = abs(yr_loss_pnl.mean()) if len(yr_loss_pnl) > 0 else 0
-                pf = abs(avg_w / avg_l) if avg_l != 0 else (float('inf') if avg_w > 0 else 0)
+                sum_w = yr_wins_pnl.sum()
+                sum_l = abs(yr_loss_pnl.sum())
+                # P3-4: 年度 profit_factor 同样用真 Profit Factor = Σ赢 / |Σ亏|
+                pf = (sum_w / sum_l) if sum_l > 0 else (float('inf') if sum_w > 0 else 0)
 
                 # 年度最大回撤 (从权益曲线截取该年区间)
                 yr_dates = pd.to_datetime(grp['close_time'])
@@ -2118,7 +2209,10 @@ class PerformanceAnalyzer:
         tr = metrics['total_return']
         ar = metrics['annual_return']
         print(f"  总收益率:   {tr:+.2f}%")
-        print(f"  年化收益:   {ar:+.2f}%")
+        if ar is None:
+            print(f"  年化收益:   N/A (样本<1年)")
+        else:
+            print(f"  年化收益:   {ar:+.2f}%")
         print(f"  最大回撤:   {metrics['max_drawdown']:.2f}%")
         print(f"  夏普比率:   {metrics['sharpe_ratio']:.3f}")
 
@@ -2129,7 +2223,8 @@ class PerformanceAnalyzer:
         print(f"  胜率:       {metrics.get('win_rate', 0):.1f}%")
         print(f"  平均盈利:   ${metrics.get('avg_win', 0):+.2f}")
         print(f"  平均亏损:   ${metrics.get('avg_loss', 0):+.2f}")
-        print(f"  盈亏比:     {metrics.get('profit_factor', 0):.2f}")
+        print(f"  Profit Factor: {metrics.get('profit_factor', 0):.2f}")
+        print(f"  盈亏比:     {metrics.get('payoff_ratio', 0):.2f}")
         print(f"  累计盈亏:   ${metrics.get('total_pnl', 0):+.2f}")
 
         # 最近交易
@@ -2425,7 +2520,9 @@ def walk_forward_validation(strategy, coin: str, timeframe: str = '4h',
     if 'train' in results and 'test' in results:
         train_ann = results['train']['annual_return']
         test_ann = results['test']['annual_return']
-        if train_ann > 0 and test_ann > 0:
+        if train_ann is None or test_ann is None:
+            robustness = 0  # P2-6: 短周期无 CAGR
+        elif train_ann > 0 and test_ann > 0:
             robustness = min(test_ann / max(train_ann, 1), 2.0) * 100
         elif test_ann > 0:
             robustness = 80
@@ -2445,6 +2542,8 @@ def generate_audit_report(result: dict, metrics: dict, coin: str, timeframe: str
     liq_count = sum(1 for t in closed if t.get('reason', '') == 'LIQUIDATED')
     total_fees = sum(abs(t.get('pnl', 0)) * 0.0005 * 2 for t in closed if t.get('pnl'))
     funding_cost_est = len(result.get('equity_curve', [])) / 2 * 0.0001 * 10000  # 粗略估算
+    ar = m.get('annual_return')
+    ar_str = 'N/A' if ar is None else f"{ar:+.1f}%"
 
     lines = [
         "=" * 50, "  BACKTEST AUDIT REPORT", "=" * 50,
@@ -2455,7 +2554,7 @@ def generate_audit_report(result: dict, metrics: dict, coin: str, timeframe: str
         "",
         f"  --- Returns ---",
         f"  Total Return: {m.get('total_return',0):+.1f}%",
-        f"  Annual Return: {m.get('annual_return',0):+.1f}%",
+        f"  Annual Return: {ar_str}",
         f"  Sortino Ratio: {m.get('sortino_ratio',0):.3f}",
         f"  Calmar Ratio: {m.get('calmar_ratio',0):.3f}",
         f"  Recovery Factor: {m.get('recovery_factor',0):.2f}",

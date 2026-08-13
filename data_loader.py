@@ -170,6 +170,84 @@ def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
     return {"source": "failed", "df": None, "last_ts": None}
 
 
+def fetch_funding_history(coin: str, use_cache: bool = True) -> pd.Series:
+    """
+    拉取 OKX 永续合约真实历史资金费率 (公开只读, 无需凭证)。
+
+    P2-1/P2-2: 用 SWAP 合约 instId (`{coin}-USDT-SWAP`) 的 fundingRate,
+    替代引擎内硬编码 0.01% 费率。SWAP 上线前的区间无数据 → funding=0。
+
+    Args:
+        coin: ETH/BTC/SOL
+        use_cache: 优先读本地 parquet 缓存
+    Returns:
+        pd.Series: index=fundingTime (datetime), values=fundingRate (小数)
+    """
+    info = COINS.get(coin)
+    if not info:
+        return pd.Series(dtype=float)
+    swap_inst = info["okx"] + "-SWAP"  # 如 "ETH-USDT-SWAP"
+
+    os.makedirs(DATA_DIR, exist_ok=True)
+    pq_path = os.path.join(DATA_DIR, f"{coin}_funding.parquet")
+
+    # 1. 本地缓存优先
+    if use_cache and os.path.exists(pq_path) and os.path.getsize(pq_path) > 0:
+        try:
+            cached = pd.read_parquet(pq_path)
+            if isinstance(cached, pd.DataFrame):
+                cached = cached.iloc[:, 0]
+            cached.index = pd.to_datetime(cached.index)
+            print(f"[Funding] {coin}: cache {len(cached)} rates, {cached.index[0]} ~ {cached.index[-1]}")
+            return cached.sort_index()
+        except Exception as e:
+            print(f"[Funding] {coin}: cache read failed ({e}), re-fetch")
+
+    # 2. OKX 分页拉取 (response 最新在前, 用 before 翻到更旧)
+    rows = []
+    for okx_base in ["https://www.okx.com", "https://aws.okx.com"]:
+        try:
+            rows = []
+            before = ""
+            for _ in range(2000):  # 最多 2000 页 (20万条, 足够覆盖全历史)
+                url = f"{okx_base}/api/v5/public/funding-rate-history?instId={swap_inst}&limit=100"
+                if before:
+                    url += f"&before={before}"
+                r = requests.get(url, timeout=20, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Accept": "application/json",
+                })
+                if r.status_code != 200:
+                    break
+                data = r.json()
+                if data.get("code") != "0" or not data.get("data"):
+                    break
+                batch = data["data"]
+                for x in batch:
+                    rows.append({"ts": int(x["fundingTime"]), "rate": float(x["fundingRate"])})
+                if len(batch) < 100:
+                    break
+                before = batch[-1]["fundingTime"]
+            if rows:
+                break
+        except Exception as e:
+            print(f"[Funding] {okx_base} EXCEPTION: {type(e).__name__}: {e}")
+
+    if not rows:
+        print(f"[Funding] {coin}: no funding data (SWAP 可能未上线或网络失败)")
+        return pd.Series(dtype=float)
+
+    df = pd.DataFrame(rows).drop_duplicates("ts")
+    s = pd.Series(df["rate"].values,
+                  index=pd.to_datetime(df["ts"], unit="ms")).sort_index()
+    try:
+        s.to_frame("fundingRate").to_parquet(pq_path)
+    except Exception as e:
+        print(f"[Funding] {coin}: cache write failed ({e})")
+    print(f"[Funding] {coin}: {len(s)} rates, {s.index[0]} ~ {s.index[-1]}")
+    return s
+
+
 def ensure_data(coin: str) -> str:
     """
     确保数据存在且更新。

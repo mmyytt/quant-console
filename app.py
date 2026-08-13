@@ -34,7 +34,25 @@ from i18n import (
 # ============================================================
 # 登录
 # ============================================================
-AUTH_CONFIG = {"enabled": True, "users": {"xiangge": "quant2024", "admin": "admin123"}}
+def _parse_auth_users(raw: str) -> dict:
+    """解析登录用户配置，格式 'user:pass,user2:pass2'。"""
+    users = {}
+    if raw:
+        for pair in str(raw).split(","):
+            if ":" in pair:
+                u, p = pair.split(":", 1)
+                users[u.strip()] = p.strip()
+    return users
+
+# 登录用户从环境变量读取（本地 .env / Streamlit Cloud Secrets），禁止在代码中硬编码明文密码
+_AUTH_RAW = os.environ.get("APP_USERS", "")
+try:
+    _SECRET_USERS = st.secrets.get("APP_USERS", "")
+    if _SECRET_USERS:
+        _AUTH_RAW = _SECRET_USERS
+except Exception:
+    pass
+AUTH_CONFIG = {"enabled": True, "users": _parse_auth_users(_AUTH_RAW)}
 
 def check_login():
     if not AUTH_CONFIG["enabled"]: return True
@@ -931,14 +949,19 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
         # ── 仓位模式 ──
         st.caption(t("pos_mode_caption"))
-        _pos_mode_options = ["固定资金比例 (Fixed Capital)", "固定风险比例 (Fixed Risk)"]
+        _pos_mode_options = ["固定资金比例 (Fixed Capital)", "固定风险比例 (Fixed Risk)", "动态止损 (Dynamic Stop)"]
         pos_mode = st.radio(t("pos_mode_label"), _pos_mode_options,
             index=0, horizontal=True,
-            format_func=lambda x: t("pos_mode_fixed_capital_opt") if "Capital" in x else t("pos_mode_fixed_risk_opt"))
+            format_func=lambda x: (t("pos_mode_dynamic_stop_opt") if "Dynamic" in x
+                                   else t("pos_mode_fixed_capital_opt") if "Capital" in x
+                                   else t("pos_mode_fixed_risk_opt")))
         use_fixed_risk = "Risk" in pos_mode
+        use_dynamic_stop = "Dynamic" in pos_mode  # P3-6: 暴露动态止损仓位模式
 
         if use_fixed_risk:
             st.info(t("fixed_risk_info"))
+        elif use_dynamic_stop:
+            st.info(t("dynamic_stop_info"))
         else:
             st.info(t("fixed_capital_info"))
 
@@ -1004,11 +1027,11 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         # ── 风险参数 ──
         st.caption(t("risk_params_caption"))
         c1, c2 = st.columns(2)
-        if use_fixed_risk:
+        if use_fixed_risk or use_dynamic_stop:
             risk_per_trade = c1.number_input(t("risk_per_trade_pct"), 0.1, 30.0, 1.0, 0.5,
                 help=t("risk_help", equity=f"{initial_capital:,.0f}", max_loss=f"{initial_capital*0.01:,.0f}"))
-            # 收敛警告
-            if abs(risk_per_trade - sl_pct) < 0.05:
+            # 收敛警告 (仅 Fixed Risk: 风险% 与 止损% 撞车才有意义)
+            if use_fixed_risk and abs(risk_per_trade - sl_pct) < 0.05:
                 st.warning(t("risk_converge_warning", risk=risk_per_trade, sl=sl_pct,
                              suggested=f"{max(0.1, sl_pct*0.4):.1f}"))
         else:
@@ -1041,6 +1064,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         bull_a = 100.0; range_a = 50.0; bear_a = 30.0
         lock_streak_val = 3; lock_days = 2; risk_per_trade = 1.0
         use_atr_stop = False; atr_period_val = 14; atr_mult_val = 2.0
+        use_fixed_risk = False; use_dynamic_stop = False  # P3-6: 双端模式无仓位模式, 给默认值
 
     oos_enabled = st.checkbox(t("oos_toggle"), False)
     oos_ratio = st.slider(t("train_pct"), 50, 90, 70, 5, disabled=not oos_enabled)
@@ -1213,7 +1237,7 @@ with st.sidebar.expander(t("preset_manager"), expanded=False):
                 "bull_a": bull_a, "range_a": range_a, "bear_a": bear_a,
                 "indicators": st.session_state.selected_indicators,
                 "strategy_mode": strat_mode_key,
-                "pos_mode": "fixed_risk" if use_fixed_risk else "fixed_capital",
+                "pos_mode": "fixed_risk" if use_fixed_risk else ("dynamic_stop" if use_dynamic_stop else "fixed_capital"),
                 "risk_per_trade": risk_per_trade,
                 "hedge_ratio": hedge_ratio,
             },
@@ -1940,6 +1964,8 @@ if submitted:
                 st.caption(t("risk_position_mode"))
                 if use_fixed_risk:
                     st.markdown(t("fixed_risk_desc"))
+                elif use_dynamic_stop:
+                    st.markdown(t("dynamic_stop_desc"))
                 else:
                     st.markdown(t("fixed_capital_desc"))
 
@@ -1947,7 +1973,7 @@ if submitted:
                 st.markdown(f"**{leverage}x**")
 
                 st.caption(t("risk_per_trade_caption"))
-                if use_fixed_risk:
+                if use_fixed_risk or use_dynamic_stop:
                     max_loss = initial_capital * risk_per_trade / 100
                     st.markdown(t("risk_pct_approx", pct=risk_per_trade, loss=max_loss))
                 else:
@@ -2060,7 +2086,7 @@ if submitted:
         st.session_state.selected_indicators["_spot_sl"] = spot_sl if 'spot_sl' in dir() else 2.0
         st.session_state.selected_indicators["_short_sl"] = short_sl if 'short_sl' in dir() else 3.0
 
-        st.session_state.selected_indicators["_pos_mode"] = "fixed_risk" if use_fixed_risk else "fixed_capital"
+        st.session_state.selected_indicators["_pos_mode"] = "fixed_risk" if use_fixed_risk else ("dynamic_stop" if use_dynamic_stop else "fixed_capital")
         st.session_state.selected_indicators["_risk_per_trade"] = risk_per_trade
         # 闭环重构: 牛/震/熊宏观系数从UI覆盖引擎默认值
         st.session_state.selected_indicators["_bull_alloc"] = bull_a if 'bull_a' in dir() else 1.0
