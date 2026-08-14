@@ -63,7 +63,7 @@ def check_login():
     _, c, _ = st.columns([1, 2, 1])
     with c:
         u = st.text_input(t("login_username"), key="lu"); p = st.text_input(t("login_password"), type="password", key="lp")
-        if st.button(t("login_btn"), use_container_width=True, type="primary"):
+        if st.button(t("login_btn"), type="primary"):
             if AUTH_CONFIG["users"].get(u) == p: st.session_state.logged_in = True; st.rerun()
             else: st.error(t("login_error"))
     return False
@@ -126,7 +126,7 @@ def check_data_freshness():
 
 check_data_freshness()
 
-if st.sidebar.button(t("btn_clear_cache"), use_container_width=True):
+if st.sidebar.button(t("btn_clear_cache")):
     st.cache_data.clear(); st.cache_resource.clear()
     st.rerun()
 
@@ -136,7 +136,7 @@ with lang_col1:
     st.caption(t("lang_selector"))
 with lang_col2:
     current_lang_display = "🇨🇳 " + t("lang_zh") if st.session_state.lang == "zh" else "🇺🇸 " + t("lang_en")
-    if st.button(current_lang_display, use_container_width=True, key="lang_switcher",
+    if st.button(current_lang_display, key="lang_switcher",
                  help=t("lang_switch_help")):
         st.session_state.lang = "en" if st.session_state.lang == "zh" else "zh"
         set_lang(st.session_state.lang)
@@ -307,9 +307,9 @@ for label, dr, col in [
     (t("date_preset_2022"), ("2022-01-01","2022-12-31"), dp2),
     (t("date_preset_2324"), ("2023-01-01","2024-12-31"), dp3),
 ]:
-    if col.button(label, use_container_width=True, key=f"dp_{label}"):
+    if col.button(label, key=f"dp_{label}"):
         st.session_state.date_range = dr; st.rerun()
-if st.sidebar.button(t("btn_all_history"), use_container_width=True):
+if st.sidebar.button(t("btn_all_history")):
     st.session_state.date_range = None; st.rerun()
 
 # 自定义日期选择器 (恢复!)
@@ -318,13 +318,13 @@ dc1, dc2 = st.sidebar.columns(2)
 d_start = dc1.date_input(t("date_start"), datetime(2020,1,1), key="d_start")
 d_end = dc2.date_input(t("date_end"), datetime.now(), key="d_end")
 dp3, dp4 = st.sidebar.columns(2)
-if dp3.button(t("btn_last_1y"), use_container_width=True):
+if dp3.button(t("btn_last_1y")):
     st.session_state.date_range = ((datetime.now()-timedelta(days=365)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
     st.rerun()
-if dp4.button(t("btn_last_3y"), use_container_width=True):
+if dp4.button(t("btn_last_3y")):
     st.session_state.date_range = ((datetime.now()-timedelta(days=1095)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
     st.rerun()
-if st.sidebar.button(t("btn_apply_date"), use_container_width=True):
+if st.sidebar.button(t("btn_apply_date")):
     st.session_state.date_range = (d_start.strftime("%Y-%m-%d"), d_end.strftime("%Y-%m-%d"))
     st.rerun()
 if st.session_state.date_range:
@@ -649,15 +649,15 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         bull_th = st.slider(t("bull_th_label"), 0.10, 0.60, 0.30, 0.05, key="mf_bt")
 
     st.divider()
-    submitted = st.form_submit_button(t("btn_run_backtest"), use_container_width=True, type="primary")
+    submitted = st.form_submit_button(t("btn_run_backtest"), type="primary")
 
 st.sidebar.divider()
 # 导出 + 刷新 + 登出 (在form外面)
 c_refresh1, c_refresh2 = st.sidebar.columns(2)
-if c_refresh1.button(t("btn_refresh_quote"), use_container_width=True):
+if c_refresh1.button(t("btn_refresh_quote")):
     st.cache_data.clear(); st.cache_resource.clear()
     st.success(t("refresh_success")); time.sleep(1); st.rerun()
-if c_refresh2.button(t("btn_force_refresh"), use_container_width=True,
+if c_refresh2.button(t("btn_force_refresh"),
                      help=t("force_refresh_help")):
     with st.spinner(t("force_refresh_spinner")):
         try:
@@ -692,7 +692,7 @@ with st.sidebar.expander(t("preset_manager"), expanded=False):
     if preset_names:
         selected_preset = st.selectbox(t("saved_presets"), [""] + preset_names, key="preset_sel")
         c1, c2 = st.columns(2)
-        if c1.button(t("btn_load"), use_container_width=True, disabled=not selected_preset):
+        if c1.button(t("btn_load"), disabled=not selected_preset):
             p = presets[selected_preset]
             # 恢复参数到session_state
             for k, v in p.get("params", {}).items():
@@ -702,13 +702,13 @@ with st.sidebar.expander(t("preset_manager"), expanded=False):
                     st.session_state[k] = v
             st.success(t("loaded_preset", name=selected_preset))
             time.sleep(1); st.rerun()
-        if c2.button(t("btn_delete"), use_container_width=True, disabled=not selected_preset):
+        if c2.button(t("btn_delete"), disabled=not selected_preset):
             del presets[selected_preset]
             save_presets(presets)
             st.rerun()
 
     preset_name = st.text_input(t("preset_name"), placeholder=t("preset_placeholder"), key="preset_name")
-    if st.button(t("btn_save_strategy"), use_container_width=True, disabled=not preset_name):
+    if st.button(t("btn_save_strategy"), disabled=not preset_name):
         # 收集所有参数
         bt_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
         saved_metrics = {}
@@ -787,19 +787,19 @@ st.caption(t("version_label", version=_QUANTCODE_VERSION, commit=_git_hash, buil
 if "active_tab" not in st.session_state: st.session_state.active_tab = "回测看板"
 tc1, tc2, tc3, tc4 = st.columns([1, 1, 1, 1])
 with tc1:
-    if st.button(t("nav_backtest"), use_container_width=True,
+    if st.button(t("nav_backtest"),
                  type="primary" if "回测" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "回测看板"; st.rerun()
 with tc2:
-    if st.button(t("nav_ai_chat"), use_container_width=True,
+    if st.button(t("nav_ai_chat"),
                  type="primary" if "AI" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "AI 对话舱"; st.rerun()
 with tc3:
-    if st.button(t("nav_robustness"), use_container_width=True,
+    if st.button(t("nav_robustness"),
                  type="primary" if "鲁棒性" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "鲁棒性实验室"; st.rerun()
 with tc4:
-    if st.button(t("nav_live_trading"), use_container_width=True,
+    if st.button(t("nav_live_trading"),
                  type="primary" if "交易中心" in st.session_state.active_tab else "secondary"):
         st.session_state.active_tab = "交易中心"; st.rerun()
 
@@ -887,7 +887,7 @@ if "AI" in st.session_state.active_tab:
         st.text_input(t("research_goal_label"), key="research_goal",
                       placeholder=t("research_goal_placeholder"), on_change=_on_goal_change)
     with bcol:
-        if st.button(t("research_new_session"), use_container_width=True):
+        if st.button(t("research_new_session")):
             st.session_state.research_session_id = db.create_session()
             st.session_state.ai_chat_history = []
             st.session_state.pop("research_goal", None)
@@ -906,7 +906,7 @@ if "AI" in st.session_state.active_tab:
                 "策略": e["strategy_name"] or "未命名", "资产": e["asset"], "周期": e["timeframe"],
                 "收益%": round(e["total_return"] or 0, 2), "Sharpe": round(e["sharpe"] or 0, 2),
                 "MDD%": round(e["max_drawdown"] or 0, 2), "交易数": e["trade_count"], "评级": e["final_rating"] or "-",
-            } for e in memory["experiments"]]), use_container_width=True)
+            } for e in memory["experiments"]]))
         else:
             st.caption(t("research_no_data"))
 
@@ -914,7 +914,7 @@ if "AI" in st.session_state.active_tab:
         if memory["hypotheses"]:
             st.dataframe(pd.DataFrame([{
                 "假设": h["hypothesis_text"], "状态": h["status"], "创建": h["created_time"],
-            } for h in memory["hypotheses"]]), use_container_width=True)
+            } for h in memory["hypotheses"]]))
         else:
             st.caption(t("research_no_data"))
 
@@ -1005,7 +1005,7 @@ if "AI" in st.session_state.active_tab:
         with tc5:
             task_maxf = st.slider(t("rl_task_max_factors"), 2, 4, 3, key="rl_task_maxf")
 
-        if st.button(t("rl_task_start"), key="rl_task_start", use_container_width=True,
+        if st.button(t("rl_task_start"), key="rl_task_start",
                      disabled=not task_goal.strip()):
             task_id = db.create_task(task_goal.strip(), task_asset, task_tf)
             st.session_state.rl_task_id = task_id
@@ -1029,7 +1029,7 @@ if "AI" in st.session_state.active_tab:
                               task_asset, task_tf, task_n, task_maxf), daemon=True).start()
             st.rerun()
 
-        if st.button(t("rl_task_refresh"), key="rl_task_refresh", use_container_width=True):
+        if st.button(t("rl_task_refresh"), key="rl_task_refresh"):
             st.rerun()
         for tk in db.list_tasks(5):
             pct = (tk["done"] / tk["total"] * 100) if tk["total"] else 0
@@ -1071,7 +1071,7 @@ if "AI" in st.session_state.active_tab:
                 "MDD%": round(m.get("max_drawdown") or 0, 1),
             })
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.dataframe(pd.DataFrame(rows))
             st.caption(t("rl_indicator_roles"))
             for r in res.get("ranked", [])[:5]:
                 label = f"{'✅' if r.get('passed') else '❌'} {' + '.join(r.get('combo', []))} · {r.get('score', {}).get('total')} 分"
@@ -1091,7 +1091,7 @@ if "AI" in st.session_state.active_tab:
             goal = st.text_input(t("research_goal_label"), key="rl_goal",
                                  placeholder=t("research_goal_placeholder"))
         with cbtn:
-            create_clicked = st.button(t("rl_create_btn"), key="rl_create", use_container_width=True,
+            create_clicked = st.button(t("rl_create_btn"), key="rl_create",
                                        disabled=not ai_key)
         if create_clicked and goal.strip():
             with st.spinner(t("rl_generating")):
@@ -1159,7 +1159,7 @@ if "AI" in st.session_state.active_tab:
                         f"{h.get('leverage') or 2}x · 状态 {h['status']}</small>",
                         unsafe_allow_html=True)
         with r2:
-            if st.button(t("rl_verify_btn"), key=f"verify_{h['id']}", use_container_width=True):
+            if st.button(t("rl_verify_btn"), key=f"verify_{h['id']}"):
                 with st.spinner(t("rl_verify_running")):
                     try:
                         asset = _norm_asset(h.get("asset"))
@@ -1239,7 +1239,7 @@ if "AI" in st.session_state.active_tab:
                 t("rl_overfitting"): s.get("overfitting_risk") or "-",
                 t("rl_validation_count"): s.get("validation_count") or 0,
                 "状态": s.get("status"),
-            } for s in strat_rows]), use_container_width=True)
+            } for s in strat_rows]))
             for s in strat_rows:
                 roles = _js(s.get("indicator_roles"))
                 stable = s.get("param_stable_range")
@@ -1262,7 +1262,7 @@ if "AI" in st.session_state.active_tab:
                 "失败原因": f.get("failure_reason") or "-",
                 "失效环境": f.get("failure_env") or "-",
                 "时间": f.get("created_time"),
-            } for f in fails]), use_container_width=True)
+            } for f in fails]))
         else:
             st.caption(t("rl_failure_memory_empty"))
 
@@ -1280,12 +1280,12 @@ if "AI" in st.session_state.active_tab:
     quick_msgs = get_quick_prompts()
     quick_clicked = None
     for i, (label, prompt) in enumerate(quick_msgs):
-        if qcols[i].button(label, use_container_width=True, key=f"qp_{i}", disabled=not ai_key):
+        if qcols[i].button(label, key=f"qp_{i}", disabled=not ai_key):
             quick_clicked = prompt
 
     # 一键诊断按钮
     dcol, _ = st.columns([1, 3])
-    if dcol.button(t("btn_diagnose"), use_container_width=True, type="primary", disabled=not ai_key):
+    if dcol.button(t("btn_diagnose"), type="primary", disabled=not ai_key):
         quick_clicked = t("diagnose_report_prompt")
 
     # 聊天记录
@@ -1352,7 +1352,7 @@ if "AI" in st.session_state.active_tab:
                     st.error(result["error"])
 
     if st.session_state.ai_chat_history:
-        if st.button(t("btn_clear_chat"), use_container_width=True):
+        if st.button(t("btn_clear_chat")):
             st.session_state.ai_chat_history = []; st.rerun()
 
     st.stop()
@@ -1446,7 +1446,7 @@ if "鲁棒性" in st.session_state.active_tab:
     st.divider()
     run_col1, run_col2 = st.columns([2, 1])
     with run_col1:
-        run_lab = st.button(t("btn_start_robustness"), use_container_width=True, type="primary",
+        run_lab = st.button(t("btn_start_robustness"), type="primary",
                             disabled=len(selected_dims) == 0)
     with run_col2:
         st.caption(t("hint_robustness_tip"))
@@ -1582,7 +1582,7 @@ if "鲁棒性" in st.session_state.active_tab:
                             f"CV={ds.get('cv',0):.3f}", expanded=True):
                 # 参数收益矩阵
                 mat = RobustnessLab.format_matrix(dim, sweeps)
-                st.dataframe(mat.set_index(t('param_label')), use_container_width=True)
+                st.dataframe(mat.set_index(t('param_label')))
 
                 # 如果存在错误，展示详细traceback
                 errors_in_dim = [s for s in sweeps if s.get('error')]
@@ -1596,7 +1596,7 @@ if "鲁棒性" in st.session_state.active_tab:
                 labels = [s['label'] for s in sweeps if not s.get('error')]
                 if len(returns) >= 2:
                     chart_data = pd.DataFrame({f'{t("total_return")}%': returns}, index=labels)
-                    st.line_chart(chart_data, use_container_width=True, height=200)
+                    st.line_chart(chart_data, height=200)
 
                 # 稳定性指标
                 dsc1, dsc2, dsc3 = st.columns(3)
@@ -1643,7 +1643,7 @@ if "鲁棒性" in st.session_state.active_tab:
                 ds = stability.get('dim_scores', {}).get(dim, {}) if isinstance(stability.get('dim_scores'), dict) else {}
                 with st.expander(f"📐 {_dim_label(dim)} — {ds.get('verdict','?')}", expanded=False):
                     mat = RobustnessLab.format_matrix(dim, sweeps)
-                    st.dataframe(mat.set_index(t('param_label')), use_container_width=True)
+                    st.dataframe(mat.set_index(t('param_label')))
 
             with st.expander(t("robustness_full_report"), expanded=False):
                 st.markdown(RobustnessLab.generate_report(all_results, stability))
@@ -1679,7 +1679,7 @@ if "鲁棒性" in st.session_state.active_tab:
                 st.metric(t("combo_total_combos"), total_combos_preview,
                           delta=t("combo_est_time", min=total_combos_preview * 2 * 4, max=total_combos_preview * 2 * 6))
 
-            run_combo = st.button(t("btn_start_combo"), use_container_width=True, type="primary",
+            run_combo = st.button(t("btn_start_combo"), type="primary",
                                   key="run_combo_btn")
 
             if run_combo:
@@ -1762,7 +1762,7 @@ if "鲁棒性" in st.session_state.active_tab:
                         # Top 10 表格
                         st.markdown(f"### {t('combo_top10_title')}")
                         table_df = RobustnessLab.combo_format_table(all_combo, top_n=10)
-                        st.dataframe(table_df.set_index(t('combo_rank')), use_container_width=True,
+                        st.dataframe(table_df.set_index(t('combo_rank')),
                                      column_config={
                                          t('combo_flag'): st.column_config.TextColumn(t('combo_flag'), width='small'),
                                          t('combo_score'): st.column_config.ProgressColumn(t('combo_score'), min_value=0, max_value=100, format='%.0f'),
@@ -1786,7 +1786,7 @@ if "鲁棒性" in st.session_state.active_tab:
                                     f'IS{t("total_return")}%': chart_is,
                                     f'OOS{t("total_return")}%': chart_oos,
                                 }, index=chart_labels)
-                                st.bar_chart(chart_df, use_container_width=True, height=300)
+                                st.bar_chart(chart_df, height=300)
 
                         # 完整报告
                         with st.expander(t("combo_full_report"), expanded=False):
@@ -1811,7 +1811,7 @@ if "鲁棒性" in st.session_state.active_tab:
                 if top10_cached:
                     st.info(t("info_cached_result"))
                     table_df2 = RobustnessLab.combo_format_table(cr.get('combinations', []), top_n=10)
-                    st.dataframe(table_df2.set_index(t('combo_rank')), use_container_width=True)
+                    st.dataframe(table_df2.set_index(t('combo_rank')))
                     st.caption(t("hint_rerun_combo"))
 
     st.stop()
@@ -2102,7 +2102,7 @@ if submitted:
 
         if diag_rows:
             df_diag_out = pd.DataFrame(diag_rows, columns=[t("diag_ind_col"), t("diag_status_col"), t("diag_type_col")])
-            st.dataframe(df_diag_out, use_container_width=True, hide_index=True)
+            st.dataframe(df_diag_out, hide_index=True)
 
         st.info(t("diag_suggestion"))
         st.stop()
@@ -2159,7 +2159,7 @@ if submitted:
         fig_delta.update_layout(height=250, template="plotly_dark",
                                  margin=dict(l=0,r=0,t=0,b=0),
                                  paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_delta, use_container_width=True,
+        st.plotly_chart(fig_delta,
                         config={'responsive': True, 'displayModeBar': False})
 
     # 多空统计
@@ -2225,7 +2225,7 @@ if submitted:
         fig_eq.add_hline(y=initial_capital, line_dash="dash", line_color="gray")
         fig_eq.update_layout(height=350, template="plotly_dark", margin=dict(l=0,r=0,t=0,b=0),
                               paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-        st.plotly_chart(fig_eq, use_container_width=True)
+        st.plotly_chart(fig_eq)
 
     # === K线图 (带缩放按钮) ===
     st.subheader(t("kline_title"))
@@ -2233,11 +2233,11 @@ if submitted:
     zc1, zc2, zc3, zc4, zc5, zc6 = st.columns([1,1,1,1,1,2])
     zoom_n = min(2000, len(df_train))  # 默认最多2000根, 点[全部]显示所有
     tf_hours = {"5m": 1/12, "15m": 0.25, "1h": 1, "4h": 4, "1d": 24}
-    if zc1.button(t("zoom_1m"), use_container_width=True, key="z1m"): zoom_n = int(30 * 24 / tf_hours.get(timeframe, 4))
-    if zc2.button(t("zoom_6m"), use_container_width=True, key="z6m"): zoom_n = int(180 * 24 / tf_hours.get(timeframe, 4))
-    if zc3.button(t("zoom_1y"), use_container_width=True, key="z1y"): zoom_n = int(365 * 24 / tf_hours.get(timeframe, 4))
-    if zc4.button(t("zoom_3y"), use_container_width=True, key="z3y"): zoom_n = int(1095 * 24 / tf_hours.get(timeframe, 4))
-    if zc5.button(t("zoom_all"), use_container_width=True, key="zall"): zoom_n = len(df_train)
+    if zc1.button(t("zoom_1m"), key="z1m"): zoom_n = int(30 * 24 / tf_hours.get(timeframe, 4))
+    if zc2.button(t("zoom_6m"), key="z6m"): zoom_n = int(180 * 24 / tf_hours.get(timeframe, 4))
+    if zc3.button(t("zoom_1y"), key="z1y"): zoom_n = int(365 * 24 / tf_hours.get(timeframe, 4))
+    if zc4.button(t("zoom_3y"), key="z3y"): zoom_n = int(1095 * 24 / tf_hours.get(timeframe, 4))
+    if zc5.button(t("zoom_all"), key="zall"): zoom_n = len(df_train)
     zc6.caption(t("zoom_display_fmt", n=min(zoom_n, len(df_train))))
 
     df_show = df_train.tail(zoom_n)
@@ -2308,7 +2308,7 @@ if submitted:
     fig_kl.update_xaxes(type='date', range=[x0, x1], autorange=False, row=2, col=1)
     fig_kl.update_yaxes(title_text=t("yaxis_price"), range=[y_lo, y_hi], autorange=False, row=1, col=1)
     fig_kl.update_yaxes(title_text=t("yaxis_volume"), autorange=True, row=2, col=1)
-    st.plotly_chart(fig_kl, use_container_width=True,
+    st.plotly_chart(fig_kl,
                     config={'responsive': True, 'displayModeBar': False,
                             'scrollZoom': False})
 
@@ -2354,7 +2354,7 @@ if submitted:
             styled = monthly.style.format("{:+.1f}%").map(color_monthly)
         else:
             styled = monthly.style.format("{:+.1f}%").applymap(color_monthly)
-        st.dataframe(styled, use_container_width=True)
+        st.dataframe(styled)
 
         # 年度过滤 → 重新计算指标
         if selected_year != t("year_all"):
@@ -2383,7 +2383,7 @@ if submitted:
                 st.markdown(t("annual_detail_table"))
                 yr_df = pd.DataFrame(annual)
                 yr_df.columns = [t("col_year"), t("col_return_pct"), t("col_maxdd_pct"), t("col_trades"), t("col_wr_pct"), t("col_pf")]
-                st.dataframe(yr_df.set_index(t("col_year")), use_container_width=True)
+                st.dataframe(yr_df.set_index(t("col_year")))
 
             # ── Tab2: 交易贡献分析 ──
             contrib = audit.get('contribution', {})
@@ -2425,7 +2425,7 @@ if submitted:
                         t('col_remaining_annual'): f"{r['new_annual']:+.2f}%",
                         t('col_remaining_maxdd'): f"{r['new_maxdd']:.2f}%",
                     })
-                st.dataframe(pd.DataFrame(rem_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rem_rows), hide_index=True)
 
             # ── Tab4: 风险贡献分析 ──
             risk = audit.get('risk_contrib', {})
@@ -2601,7 +2601,7 @@ if submitted:
                  t("col_side"): tr.get('side','?'), t("col_entry"): f"${tr.get('entry',0):.2f}",
                  t("col_exit"): f"${tr.get('exit',0):.2f}", t("col_reason"): tr.get('reason','?'),
                  t("col_pnl_pct"): f"{tr.get('pnl_pct',0):+.2f}%"} for tr in closed[-15:]]
-        st.dataframe(pd.DataFrame(rows[::-1]), use_container_width=True, height=300)
+        st.dataframe(pd.DataFrame(rows[::-1]), height=300)
 
     # === AI 量化审计分析 ===
     if "show_audit" not in st.session_state:
@@ -2616,7 +2616,7 @@ if submitted:
     c_audit, c_wf = st.columns(2)
 
     # --- 按钮1: 基础审计 (不含Walk Forward) ---
-    if c_audit.button(t("btn_audit"), use_container_width=True, type="primary"):
+    if c_audit.button(t("btn_audit"), type="primary"):
         st.session_state.show_audit = True
         st.session_state.wf_cache = None  # 清除旧WF数据
         with st.spinner(t("spinner_audit")):
@@ -2677,7 +2677,7 @@ if submitted:
             st.rerun()
 
     # --- 按钮2: Walk Forward 滚动样本外测试 ---
-    if c_wf.button(t("btn_walk_forward"), use_container_width=True):
+    if c_wf.button(t("btn_walk_forward")):
         st.session_state.show_audit = True
         with st.spinner(t("spinner_wf")):
             from walk_forward import WalkForwardAnalyzer
@@ -2797,7 +2797,7 @@ if submitted:
                             t("col_test_dd"): f"{test.get('max_drawdown', 0):.1f}%",
                             t("col_status"): t("wf_profitable") if test_ret > 0 else t("wf_loss"),
                         })
-                    st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(wf_rows), hide_index=True)
 
                 # ADX 趋势分析
                 st.divider()
@@ -2863,7 +2863,7 @@ if submitted:
 
     # === AI 策略诊断 (保留原有) ===
     with st.expander(t("ai_diag_expander"), expanded=False):
-        if st.button(t("btn_gen_diag"), use_container_width=True):
+        if st.button(t("btn_gen_diag")):
             ai_k = os.environ.get("AI_API_KEY", "")
             if not ai_k:
                 st.warning(t("warn_config_api"))
@@ -2896,7 +2896,7 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
     wf_cache = st.session_state.get("wf_cache")
 
     st.subheader(t("audit_report_title"))
-    if st.button(t("btn_back_to_dashboard"), use_container_width=True):
+    if st.button(t("btn_back_to_dashboard")):
         st.session_state.show_audit = False
         st.rerun()
 
@@ -2955,7 +2955,7 @@ if st.session_state.get("show_audit") and st.session_state.get("audit_cache"):
                         t("col_test_dd"): f"{test.get('max_drawdown', 0):.1f}%",
                         t("col_status"): t("wf_profitable") if test_ret > 0 else t("wf_loss"),
                     })
-                st.dataframe(pd.DataFrame(wf_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(wf_rows), hide_index=True)
 
             # ADX 分析
             st.divider()
@@ -3012,7 +3012,7 @@ elif not submitted:
     for i, period in enumerate(chart_periods):
         col = cc_cols[i]
         is_active = st.session_state.chart_period == period
-        if col.button(period, use_container_width=True,
+        if col.button(period,
                       type="primary" if is_active else "secondary",
                       key=f"cp_{period}"):
             st.session_state.chart_period = period
@@ -3112,7 +3112,7 @@ elif not submitted:
                             autorange=False, row=1, col=1)
         fig_pv.update_yaxes(title_text=t("volume_axis"), autorange=True, row=2, col=1)
 
-        st.plotly_chart(fig_pv, use_container_width=True,
+        st.plotly_chart(fig_pv,
                         config={'responsive': True, 'displayModeBar': False,
                                 'scrollZoom': False})
 

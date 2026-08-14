@@ -1,13 +1,17 @@
 """
-UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 运行 / 旧版兼容
+UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 版本兼容 / 运行
 覆盖：i18n 静态 key 完整 · 动态状态 key 解析 · research_storage 导出齐全 ·
-      无 width="stretch" 残留（旧版 Streamlit 不兼容）· AppTest 完整启动 +
-      侧边栏按钮 + AI 研究仓页面加载
-运行: pytest test_ui_smoke.py 或 python test_ui_smoke.py
+      无 use_container_width / width="stretch" 残留（版本无关默认布局）·
+      AppTest 完整启动 + 侧边栏按钮 + AI 研究仓页面加载
+运行: python test_ui_smoke.py
 """
 import os
 import re
 import sys
+
+# Streamlit 入口文件（全项目 UI，均需版本无关布局）
+UI_FILES = ("app.py", "live_trading/trading_dashboard.py",
+            "rotation_app.py", "streamlit_app.py")
 
 
 def _fix_encoding():
@@ -55,15 +59,17 @@ def main():
     assert not missing, f"db 模块缺失函数: {missing}"
     print(f"[OK] 3. research_storage 导出齐全（app.py 用到 db.{', db.'.join(used)} 全存在）")
 
-    # 4) 无 width="stretch"/"content" 残留（旧版 Streamlit 不兼容，防回归）
+    # 4) 无 use_container_width / width="stretch"（版本无关默认布局，防回归）
     bad = []
-    for f in ("app.py", "live_trading/trading_dashboard.py"):
+    for f in UI_FILES:
         txt = open(f, encoding="utf-8").read()
+        if "use_container_width" in txt:
+            bad.append(f"{f}:use_container_width")
         for kw in ('width="stretch"', 'width="content"', "width='stretch'", "width='content'"):
             if kw in txt:
                 bad.append(f"{f}:{kw}")
-    assert not bad, f"存在旧版不兼容 width 参数: {bad}"
-    print("[OK] 4. 无 width=\"stretch\"/\"content\" 残留（全部改为 use_container_width=True）")
+    assert not bad, f"存在版本特定布局参数: {bad}"
+    print("[OK] 4. 无 use_container_width / width=\"stretch\"（全部走 Streamlit 默认布局）")
 
     # 5) Streamlit AppTest：完整启动 + 侧边栏按钮不报错
     from streamlit.testing.v1 import AppTest
@@ -71,7 +77,7 @@ def main():
     at.run()
     errs = list(getattr(at, "exception", []) or [])
     assert not errs, f"启动异常（含侧边栏 clear_cache 按钮）: {errs}"
-    print("[OK] 5. AppTest 完整启动 + 侧边栏按钮无 StreamlitAPIException")
+    print("[OK] 5. AppTest 完整启动 + 侧边栏按钮无异常")
 
     # 6) AI 研究仓页面正常加载
     at.session_state["active_tab"] = "AI 对话舱"
