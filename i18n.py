@@ -63,7 +63,21 @@ _TRANSLATIONS = {
         # ── 导航与页面标题 ──
         "app_title": "QuantCode 量化回测平台",
         "nav_backtest": "📈 回测看板",
-        "nav_ai_chat": "🤖 翔哥 AI 对话舱",
+        "nav_ai_chat": "🤖 AI 研究仓",
+        # ── AI 研究仓 (Research Agent) ──
+        "research_current_project": "当前研究项目",
+        "research_goal_label": "研究目标",
+        "research_goal_placeholder": "例如：研究 ETH 短线突破策略",
+        "research_new_session": "新建会话",
+        "research_stats_hypotheses": "假设",
+        "research_stats_passed": "已通过",
+        "research_stats_failed": "已失败",
+        "research_stats_pending": "待验证",
+        "research_stats_experiments": "实验",
+        "research_experiments_title": "策略实验记录",
+        "research_hypotheses_title": "研究假设",
+        "research_no_data": "暂无数据 — 先运行一次回测，或在下方向 AI 发起研究",
+        "research_memory_note": "已加载研究记忆：{n} 个会话 · {h} 个假设 · {e} 个实验",
         "nav_robustness": "🔬 鲁棒性实验室",
         "version_label": "QuantCode {version} | Commit: `{commit}` | Build: {build}",
 
@@ -1303,7 +1317,21 @@ _TRANSLATIONS = {
         # ── Navigation & Page Titles ──
         "app_title": "QuantCode Backtesting Platform",
         "nav_backtest": "📈 Backtest Dashboard",
-        "nav_ai_chat": "🤖 Xiang AI Chat",
+        "nav_ai_chat": "🤖 AI Research Lab",
+        # ── AI Research Lab (Research Agent) ──
+        "research_current_project": "Current Research Project",
+        "research_goal_label": "Research Goal",
+        "research_goal_placeholder": "e.g. Research ETH short-term breakout",
+        "research_new_session": "New Session",
+        "research_stats_hypotheses": "Hypotheses",
+        "research_stats_passed": "Passed",
+        "research_stats_failed": "Failed",
+        "research_stats_pending": "Pending",
+        "research_stats_experiments": "Experiments",
+        "research_experiments_title": "Strategy Experiments",
+        "research_hypotheses_title": "Research Hypotheses",
+        "research_no_data": "No data yet — run a backtest or start research below",
+        "research_memory_note": "Memory loaded: {n} sessions · {h} hypotheses · {e} experiments",
         "nav_robustness": "🔬 Robustness Lab",
         "version_label": "QuantCode {version} | Commit: `{commit}` | Build: {build}",
 
@@ -2569,6 +2597,7 @@ INDICATOR_I18N = {
     "MFI 资金流量": ("MFI", "MFI below oversold = long, above overbought = short"),
     "CMF 柴金流量": ("CMF", "CMF > 0 = long, < 0 = short"),
     "成交量突破": ("Volume Breakout", "Volume > MA × multiple + bullish close = long"),
+    "量比 Volume Ratio": ("Volume Ratio", "Volume / SMA(volume) > threshold = volume spike (direction-neutral)"),
     "锤头/倒锤": ("Hammer/Inverted Hammer", "Lower shadow > 2× body = hammer long"),
     "吞没形态": ("Engulfing", "Bullish engulfing = long, bearish engulfing = short"),
     "早晨/黄昏之星": ("Morning/Evening Star", "Morning star = long, evening star = short"),
@@ -2623,6 +2652,7 @@ PARAM_LABEL_I18N = {
     "CMF周期": "CMF Period",
     "均量周期": "Volume MA Period",
     "放大倍数": "Multiplier",
+    "量比阈值": "Volume Ratio Threshold",
     "影线比": "Shadow Ratio",
 }
 
@@ -2663,6 +2693,8 @@ PARAM_HELP_I18N = {
     "柴金流量指数平滑周期": "Chaikin Money Flow smoothing period",
     "成交量均线周期": "Volume MA period",
     "量>均量*倍数视为放量": "Volume > MA × multiple = volume spike",
+    "成交量SMA周期": "Volume SMA period",
+    "量比超过此值视为放量": "Volume ratio above this = volume spike",
     "下影/上影长度比": "Lower/upper shadow length ratio",
 }
 
