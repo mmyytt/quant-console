@@ -50,7 +50,19 @@ def _fmt_memory_ctx(memory) -> str:
         lines.append("【策略库】")
         for s in strat[:5]:
             lines.append(f"  - {s['name']} [{s['status']}]")
-    if not (hyp or exp or strat):
+    fail = memory.get("failure_memory") or []
+    if fail:
+        lines.append("【失败研究记忆】（禁止重复这些方向）")
+        for f in fail[:10]:
+            ic = ""
+            if f.get("indicator_combination"):
+                try:
+                    ic = " 指标: " + ", ".join(json.loads(f["indicator_combination"]))
+                except Exception:
+                    pass
+            lines.append(f"  - {f.get('fingerprint') or f.get('strategy_name') or '未命名'}{ic}"
+                         f"｜失败原因: {f.get('failure_reason') or '-'}")
+    if not (hyp or exp or strat or fail):
         lines.append("（尚无研究记录。首次研究请从用户目标出发提出假设。）")
     return "\n".join(lines)
 

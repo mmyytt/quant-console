@@ -119,7 +119,8 @@ def main():
     assert rl.grade_from(70) == "A" and rl.grade_from(50) == "B"
     assert rl.grade_from(30) == "C" and rl.grade_from(20) == "D"
     m_ok = {"sharpe": 1.5, "max_drawdown": 20, "oos_return": 15, "mc_p5": 5,
-            "trade_count": 80, "wf_profit_ratio": 60, "wf_windows": 5}
+            "trade_count": 80, "wf_profit_ratio": 60, "wf_windows": 5,
+            "total_return": 150, "profit_factor": 1.8, "win_rate": 55}
     sc = rl.research_score(m_ok)
     assert sc["grade"] in ("A", "B")
     assert 0 < sc["total"] <= 100
@@ -138,7 +139,7 @@ def main():
     dup = rl.check_duplicate(["EMA 双均线", "量比 Volume Ratio"])
     assert len(dup) >= 1, "应命中历史假设/实验"
     warn = rl.duplicate_warning(["EMA 双均线", "量比 Volume Ratio"])
-    assert warn and "重合" in warn
+    assert warn and "相似" in warn
     print("[OK] 6. 防重复研究 (命中 %d 条)" % len(dup))
 
     # 7) 完整闭环（回测→判定→评分→报告→落库，注入策略工厂，不 import app.py）

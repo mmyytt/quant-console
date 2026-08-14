@@ -7,6 +7,7 @@ from .db import (
     add_experiment, list_experiments, get_experiment, update_experiment,
     add_strategy, list_strategies,
     add_report, list_reports,
+    add_failure_memory, list_failure_memory, search_failure_memory,
     memory_summary,
 )
 
@@ -18,5 +19,6 @@ __all__ = [
     "add_experiment", "list_experiments", "get_experiment", "update_experiment",
     "add_strategy", "list_strategies",
     "add_report", "list_reports",
+    "add_failure_memory", "list_failure_memory", "search_failure_memory",
     "memory_summary",
 ]

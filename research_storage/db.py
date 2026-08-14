@@ -92,6 +92,18 @@ CREATE TABLE IF NOT EXISTS research_reports (
     report_text TEXT,
     created_time TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_failure_memory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    strategy_name TEXT,
+    indicator_combination TEXT,
+    parameters TEXT,
+    fingerprint TEXT,
+    failure_reason TEXT,
+    failure_env TEXT,
+    metrics TEXT,
+    avoid INTEGER DEFAULT 1,
+    created_time TEXT NOT NULL
+);
 """
 
 
@@ -108,6 +120,7 @@ _COLUMN_ADDITIONS = {
         "expected_logic": "TEXT",
         "expected_market_condition": "TEXT",
         "risk_assumption": "TEXT",
+        "failure_environment": "TEXT",
     },
     "strategy_experiments": {
         "hypothesis_id": "INTEGER",
@@ -115,6 +128,9 @@ _COLUMN_ADDITIONS = {
         "research_score": "REAL",
         "grade": "TEXT",
         "failure_reason": "TEXT",
+        "fingerprint": "TEXT",
+        "overfitting_risk": "TEXT",
+        "param_stability": "REAL",
     },
     "strategy_library": {
         "applicable_market": "TEXT",
@@ -123,6 +139,10 @@ _COLUMN_ADDITIONS = {
         "failure_env": "TEXT",
         "research_score": "REAL",
         "grade": "TEXT",
+        "indicator_roles": "TEXT",
+        "param_stable_range": "TEXT",
+        "overfitting_risk": "TEXT",
+        "validation_count": "INTEGER",
     },
 }
 
@@ -241,15 +261,15 @@ def add_hypothesis(text, related_indicators=None, status="new",
                    user_goal=None, asset=None, timeframe=None, leverage=None,
                    parameters=None, tp_pct=None, sl_pct=None,
                    expected_logic=None, expected_market_condition=None,
-                   risk_assumption=None) -> int:
+                   risk_assumption=None, failure_environment=None) -> int:
     return _execute(
         "INSERT INTO research_hypothesis (hypothesis_text, created_time, related_indicators, status, "
         "user_goal, asset, timeframe, leverage, parameters, tp_pct, sl_pct, "
-        "expected_logic, expected_market_condition, risk_assumption) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "expected_logic, expected_market_condition, risk_assumption, failure_environment) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (text, _now(), _dumps(related_indicators), status,
          user_goal, asset, timeframe, leverage, _dumps(parameters), tp_pct, sl_pct,
-         expected_logic, expected_market_condition, risk_assumption),
+         expected_logic, expected_market_condition, risk_assumption, failure_environment),
     )
 
 
@@ -280,18 +300,21 @@ def add_experiment(strategy_name=None, indicator_combination=None, parameters=No
                    win_rate=None, trade_count=None, walk_forward_score=None,
                    monte_carlo_score=None, final_rating=None,
                    hypothesis_id=None, oos_return=None, research_score=None,
-                   grade=None, failure_reason=None) -> int:
+                   grade=None, failure_reason=None, fingerprint=None,
+                   overfitting_risk=None, param_stability=None) -> int:
     return _execute(
         "INSERT INTO strategy_experiments (strategy_name, indicator_combination, parameters, asset, "
         "timeframe, leverage, backtest_time, total_return, annual_return, sharpe, max_drawdown, "
         "win_rate, trade_count, walk_forward_score, monte_carlo_score, final_rating, "
-        "hypothesis_id, oos_return, research_score, grade, failure_reason) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "hypothesis_id, oos_return, research_score, grade, failure_reason, fingerprint, "
+        "overfitting_risk, param_stability) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (strategy_name, _dumps(indicator_combination), _dumps(parameters), asset,
          timeframe, leverage, backtest_time or _now(),
          total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count,
          walk_forward_score, monte_carlo_score, final_rating,
-         hypothesis_id, oos_return, research_score, grade, failure_reason),
+         hypothesis_id, oos_return, research_score, grade, failure_reason, fingerprint,
+         overfitting_risk, param_stability),
     )
 
 
@@ -307,7 +330,8 @@ def get_experiment(exp_id):
 def update_experiment(exp_id, **fields):
     if not fields:
         return
-    allowed = {"final_rating", "grade", "failure_reason", "research_score", "status"}
+    allowed = {"final_rating", "grade", "failure_reason", "research_score", "status",
+               "overfitting_risk", "param_stability"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
@@ -326,16 +350,20 @@ def add_strategy(name, logic_description=None, indicator_logic=None, parameters=
                  risk_control=None, performance_summary=None, status="draft",
                  applicable_market=None, applicable_timeframe=None,
                  core_indicators=None, failure_env=None,
-                 research_score=None, grade=None) -> int:
+                 research_score=None, grade=None,
+                 indicator_roles=None, param_stable_range=None,
+                 overfitting_risk=None, validation_count=None) -> int:
     return _execute(
         "INSERT INTO strategy_library (name, logic_description, indicator_logic, parameters, "
         "risk_control, performance_summary, created_time, status, "
         "applicable_market, applicable_timeframe, core_indicators, failure_env, "
-        "research_score, grade) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "research_score, grade, indicator_roles, param_stable_range, overfitting_risk, "
+        "validation_count) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (name, logic_description, _dumps(indicator_logic), _dumps(parameters),
          _dumps(risk_control), _dumps(performance_summary), _now(), status,
          applicable_market, applicable_timeframe, _dumps(core_indicators), failure_env,
-         research_score, grade),
+         research_score, grade, _dumps(indicator_roles), _dumps(param_stable_range),
+         overfitting_risk, validation_count),
     )
 
 
@@ -359,6 +387,45 @@ def list_reports(limit=100):
 
 
 # ------------------------------------------------------------
+# failure memory (Phase 3：失败研究记忆，避免重复验证已失败策略)
+# ------------------------------------------------------------
+def add_failure_memory(strategy_name=None, indicator_combination=None, parameters=None,
+                       fingerprint=None, failure_reason=None, failure_env=None,
+                       metrics=None, avoid=1) -> int:
+    return _execute(
+        "INSERT INTO research_failure_memory (strategy_name, indicator_combination, parameters, "
+        "fingerprint, failure_reason, failure_env, metrics, avoid, created_time) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (strategy_name, _dumps(indicator_combination), _dumps(parameters), fingerprint,
+         failure_reason, failure_env, _dumps(metrics), avoid, _now()),
+    )
+
+
+def list_failure_memory(limit=100):
+    return _rows("SELECT * FROM research_failure_memory ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def search_failure_memory(fingerprint=None, indicator_combination=None, limit=100):
+    """按指纹或指标组合检索失败记忆。返回命中列表（用于相似度提醒）。"""
+    rows = _rows("SELECT * FROM research_failure_memory ORDER BY id DESC LIMIT ?", (limit,))
+    hits = []
+    for r in rows:
+        fp = r.get("fingerprint")
+        ic = r.get("indicator_combination")
+        if fingerprint and fp and fp == fingerprint:
+            hits.append(r)
+            continue
+        if indicator_combination and ic:
+            try:
+                existing = set(json.loads(ic))
+                if existing & set(indicator_combination):
+                    hits.append(r)
+            except Exception:
+                pass
+    return hits
+
+
+# ------------------------------------------------------------
 # memory summary（供 AI 研究记忆）
 # ------------------------------------------------------------
 def memory_summary() -> dict:
@@ -372,5 +439,6 @@ def memory_summary() -> dict:
         "hypotheses": hypotheses,
         "experiments": experiments,
         "strategies": strategies,
+        "failure_memory": list_failure_memory(15),
         "hypothesis_counts": hypothesis_status_counts(),
     }

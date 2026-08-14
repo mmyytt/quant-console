@@ -1074,35 +1074,63 @@ if "AI" in st.session_state.active_tab:
                     except Exception as e:
                         st.error(f"{t('rl_verify_error')}: {e}")
 
-    # --- 三、验证结果 + 加入策略库 ---
+    # --- 三、验证结果 + 参数敏感性 + 加入策略库 ---
     if "rl_last_verdict" in st.session_state:
         v = st.session_state.rl_last_verdict
         h = st.session_state.rl_last_hyp
         sc = v["score"]
+        sen = st.session_state.get("rl_sensitivity")
         st.divider()
         st.subheader(t("rl_verdict_title"))
-        vc1, vc2 = st.columns(2)
+        vc1, vc2, vc3 = st.columns(3)
         with vc1:
             st.metric(t("rl_verdict"), t("rl_verdict_pass") if v["passed"] else t("rl_verdict_fail"))
             st.metric(t("rl_score"), f"{sc['total']} / 100")
         with vc2:
             st.metric(t("rl_grade"), sc["grade"])
             st.metric(t("rl_grade_meaning"), rl.GRADE_MEANING.get(sc["grade"], "-"))
+        with vc3:
+            _ofit = {"Low": "rl_overfit_low", "Medium": "rl_overfit_medium",
+                     "High": "rl_overfit_high", "Unknown": "rl_not_evaluated"}
+            risk = t(_ofit.get((sen or {}).get("overfitting"), "rl_not_evaluated"))
+            st.metric(t("rl_overfitting"), risk)
+            st.metric(t("rl_param_stability"), f"{(sen or {}).get('stability', sc.get('param_stability', '-'))}")
         if not v["passed"]:
             st.error("；".join(v["failures"]))
-        st.caption(t("rl_score_breakdown", sharpe=sc["sharpe"], oos=sc["oos"],
-                     mdd=sc["mdd"], stability=sc["stability"], trades=sc["trades"]))
+        st.caption(t("rl_score_breakdown", rq=sc["return_quality"], sharpe=sc["sharpe"],
+                     mdd=sc["mdd"], oos=sc["oos"], param=sc["param_stability"]))
+
+        sc1, sc2 = st.columns([1, 3])
+        with sc1:
+            if st.button(t("rl_sensitivity_btn"), key="rl_sensitivity_run"):
+                with st.spinner(t("rl_sensitivity_running")):
+                    asset = _norm_asset(h.get("asset"))
+                    df = _load_research_df(asset, _norm_tf(h.get("timeframe")))
+                    st.session_state.rl_sensitivity = rl.run_sensitivity(
+                        h, v["metrics"], df, asset, v["experiment_id"])
+                    st.rerun()
+        if sen:
+            st.success(t("rl_sensitivity_done") + f" · {t('rl_param_stability')} {sen['stability']} / 100")
+            if sen.get("stable_ranges"):
+                st.markdown("**" + t("rl_stable_ranges") + "**")
+                for lab, rng in sen["stable_ranges"].items():
+                    st.markdown(f"- `{lab}` → [{rng[0]}, {rng[1]}]")
+            else:
+                st.warning(t("rl_no_stable_region"))
+
         if v["passed"] and st.button(t("rl_add_library"), key="rl_add_lib"):
-            entry = rl.library_entry(h, v["indicators"], v["params"], v["metrics"], v)
+            entry = rl.library_entry(h, v["indicators"], v["params"], v["metrics"], v,
+                                     sensitivity=st.session_state.get("rl_sensitivity"))
             db.add_strategy(**entry)
             st.session_state.rl_added = entry["name"]
             st.rerun()
         if st.session_state.get("rl_added"):
             st.success(t("rl_added_library") + ": " + st.session_state.rl_added)
+        report_to_show = (sen or {}).get("report") or v["report"]
         with st.expander(t("rl_report"), expanded=True):
-            st.markdown(v["report"])
+            st.markdown(report_to_show)
 
-    # --- 四、策略库 + 研究报告 ---
+    # --- 四、策略库 + 研究报告 + 失败记忆 ---
     with st.expander(t("rl_library_title"), expanded=False):
         strat_rows = db.list_strategies(50)
         if strat_rows:
@@ -1111,10 +1139,35 @@ if "AI" in st.session_state.active_tab:
                 "适用市场": s.get("applicable_market") or "-",
                 "周期": s.get("applicable_timeframe") or "-",
                 "核心指标": "、".join(_js(s.get("core_indicators"))),
+                t("rl_overfitting"): s.get("overfitting_risk") or "-",
+                t("rl_validation_count"): s.get("validation_count") or 0,
                 "状态": s.get("status"),
             } for s in strat_rows]), use_container_width=True)
+            for s in strat_rows:
+                roles = _js(s.get("indicator_roles"))
+                stable = s.get("param_stable_range")
+                if roles or stable:
+                    with st.expander(f"{s['name']} · {t('rl_indicator_roles')}"):
+                        if roles:
+                            for nm, role in roles.items():
+                                st.markdown(f"- **{nm}**：{role}")
+                        if stable:
+                            st.caption(t("rl_stable_ranges") + ": " + str(stable))
         else:
             st.caption(t("research_no_data"))
+
+    with st.expander(t("rl_failure_memory_title"), expanded=False):
+        fails = db.list_failure_memory(50)
+        if fails:
+            st.dataframe(pd.DataFrame([{
+                "策略": f.get("strategy_name") or "-",
+                t("rl_fingerprint"): f.get("fingerprint") or "-",
+                "失败原因": f.get("failure_reason") or "-",
+                "失效环境": f.get("failure_env") or "-",
+                "时间": f.get("created_time"),
+            } for f in fails]), use_container_width=True)
+        else:
+            st.caption(t("rl_failure_memory_empty"))
 
     with st.expander(t("rl_reports_title"), expanded=False):
         reps = db.list_reports(50)
