@@ -1,8 +1,9 @@
 """
-UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 运行
-覆盖：app.py 所有 t("...") 静态 key 在 i18n.py zh/en 完整 · 动态状态 key 解析 ·
-      research_storage 导出函数齐全 · Streamlit AppTest 无异常
-运行: python test_ui_smoke.py
+UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 运行 / 旧版兼容
+覆盖：i18n 静态 key 完整 · 动态状态 key 解析 · research_storage 导出齐全 ·
+      无 width="stretch" 残留（旧版 Streamlit 不兼容）· AppTest 完整启动 +
+      侧边栏按钮 + AI 研究仓页面加载
+运行: pytest test_ui_smoke.py 或 python test_ui_smoke.py
 """
 import os
 import re
@@ -24,7 +25,6 @@ def main():
     sys.path.insert(0, root)
 
     import i18n
-    import research_storage
     import research_storage.db as db
 
     src = open("app.py", encoding="utf-8").read()
@@ -55,16 +55,30 @@ def main():
     assert not missing, f"db 模块缺失函数: {missing}"
     print(f"[OK] 3. research_storage 导出齐全（app.py 用到 db.{', db.'.join(used)} 全存在）")
 
-    # 4) Streamlit AppTest 冒烟（无未捕获异常）
-    try:
-        from streamlit.testing.v1 import AppTest
-        at = AppTest.from_file("app.py", default_timeout=30)
-        at.run()
-        errs = list(getattr(at, "exception", []) or [])
-        assert not errs, f"AppTest 抛出异常: {errs}"
-        print("[OK] 4. Streamlit AppTest 运行无异常")
-    except Exception as e:
-        print(f"[WARN] 4. AppTest 不可用或失败（非阻塞）: {e}")
+    # 4) 无 width="stretch"/"content" 残留（旧版 Streamlit 不兼容，防回归）
+    bad = []
+    for f in ("app.py", "live_trading/trading_dashboard.py"):
+        txt = open(f, encoding="utf-8").read()
+        for kw in ('width="stretch"', 'width="content"', "width='stretch'", "width='content'"):
+            if kw in txt:
+                bad.append(f"{f}:{kw}")
+    assert not bad, f"存在旧版不兼容 width 参数: {bad}"
+    print("[OK] 4. 无 width=\"stretch\"/\"content\" 残留（全部改为 use_container_width=True）")
+
+    # 5) Streamlit AppTest：完整启动 + 侧边栏按钮不报错
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file("app.py", default_timeout=60)
+    at.run()
+    errs = list(getattr(at, "exception", []) or [])
+    assert not errs, f"启动异常（含侧边栏 clear_cache 按钮）: {errs}"
+    print("[OK] 5. AppTest 完整启动 + 侧边栏按钮无 StreamlitAPIException")
+
+    # 6) AI 研究仓页面正常加载
+    at.session_state["active_tab"] = "AI 对话舱"
+    at.run()
+    errs = list(getattr(at, "exception", []) or [])
+    assert not errs, f"AI 研究仓加载异常: {errs}"
+    print("[OK] 6. AI 研究仓页面正常加载")
 
     print("\nALL UI SMOKE TESTS PASSED")
 
