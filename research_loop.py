@@ -179,6 +179,78 @@ def strategy_similarity(new_indicators, new_params, old_indicators, old_params=N
 
 
 # ============================================================
+# 〇.五、因子探索引擎（逻辑约束组合，防随机堆砌/过拟合）
+# ============================================================
+# 核心研究因子池（4 类 17 个，从 INDICATOR_SCHEMA 精选，排除 K线形态等噪音指标）
+RESEARCH_POOL = {
+    "trend":      ["EMA 双均线", "SMA 三均线", "ADX/DMI 趋势强度", "SuperTrend 超级趋势", "Ichimoku 一目均衡"],
+    "momentum":   ["RSI 相对强弱", "MACD 异同均线", "KDJ 随机指标", "CCI 商品通道"],
+    "volatility": ["布林带 Bollinger", "Keltner 通道", "斐波那契回调", "Donchian 通道"],
+    "volume":     ["量比 Volume Ratio", "OBV 能量潮", "CMF 柴金流量", "MFI 资金流量"],
+}
+_PRIMARY_CLASSES = ("trend", "momentum", "volatility")   # 可做主信号的类
+_REGIME_BY_CLASS = {"trend": "趋势行情", "momentum": "趋势/震荡", "volatility": "震荡/均值回归", "volume": "通用"}
+
+
+def _class_of(name):
+    for c, names in RESEARCH_POOL.items():
+        if name in names:
+            return c
+    return None
+
+
+def factor_pool():
+    """因子池元数据（名称/类别/作用），供 UI 展示与假设生成。"""
+    return [{"name": n, "category": c, "role": indicator_roles([n]).get(n, "")}
+            for c, names in RESEARCH_POOL.items() for n in names]
+
+
+def generate_factor_combos(min_factors=2, max_factors=4):
+    """逻辑约束生成因子组合：
+      1. 同类最多 1 个（防冗余堆叠，如 EMA+SMA 都做趋势）
+      2. 必须有主信号（趋势/动量/波动），成交量不能单独成策略
+      3. 因子数 2~4（≤5 防过拟合）
+    返回按「因子数→名称」排序的组合列表（list of list[显示名]）。"""
+    from itertools import combinations
+    names = [n for ns in RESEARCH_POOL.values() for n in ns]
+    combos = []
+    for k in range(min_factors, max_factors + 1):
+        for combo in combinations(names, k):
+            cats = [_class_of(n) for n in combo]
+            if len(set(cats)) != len(cats):                    # 同类冗余因子不堆叠
+                continue
+            if not any(c in _PRIMARY_CLASSES for c in cats):   # 必须有主信号
+                continue
+            combos.append(sorted(combo))
+    combos.sort(key=lambda c: (len(c), c))
+    return combos
+
+
+def combo_to_hypothesis(combo_names, goal, asset="ETH", timeframe="4h",
+                        leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL):
+    """因子组合 → 研究假设 dict（含每指标作用/预期环境/风险假设，可直接喂 verify_hypothesis）。"""
+    roles = indicator_roles(combo_names)
+    params = {n: {pk: pv["default"] for pk, pv in INDICATOR_REGISTRY[n]["params"].items()}
+              for n in combo_names}
+    cats = [_class_of(n) for n in combo_names]
+    primary = next((c for c in cats if c in _PRIMARY_CLASSES), cats[0])
+    regime = _REGIME_BY_CLASS.get(primary, "通用")
+    logic = "；".join(f"{n}：{roles.get(n, '辅助信号')}" for n in combo_names)
+    return {
+        "hypothesis_text": f"{' + '.join(combo_names)}组合",
+        "user_goal": goal,
+        "related_indicators": combo_names,
+        "parameters": params,
+        "asset": asset, "timeframe": timeframe, "leverage": leverage,
+        "tp_pct": tp_pct, "sl_pct": sl_pct,
+        "expected_logic": logic,
+        "expected_market_condition": regime,
+        "failure_environment": "震荡市" if regime != "趋势行情" else "趋势反转/低波动",
+        "risk_assumption": f"预期 Sharpe ≥ {CRITERIA['sharpe_min']}，最大回撤 < {CRITERIA['mdd_max']:.0f}%",
+    }
+
+
+# ============================================================
 # 一、指标 / 参数解析
 # ============================================================
 def normalize_indicators(raw):
@@ -322,28 +394,40 @@ def judge_pass(m):
     return (len(failures) == 0, failures)
 
 
+def classify_failure(m):
+    """失败原因结构化分类：OOS亏损/MDD过高/交易次数不足/参数敏感/市场迁移失败。"""
+    tags = []
+    oos = m.get("oos_return")
+    if oos is not None and oos <= 0:
+        tags.append("OOS亏损")
+    if (m.get("max_drawdown") or 0) >= CRITERIA["mdd_max"]:
+        tags.append("MDD过高")
+    if (m.get("trade_count") or 0) < CRITERIA["trades_min"]:
+        tags.append("交易次数不足")
+    if (m.get("total_return") or 0) > 0 and oos is not None and oos < 0:
+        tags.append("市场迁移失败")
+    wf = m.get("wf_profit_ratio")
+    if wf is not None and wf < CRITERIA["wf_win_ratio_min"]:
+        tags.append("参数敏感")
+    return tags
+
+
 # ============================================================
 # 四、研究评分 + 等级（A/B/C/D）+ 过拟合风险
 # ============================================================
 def research_score(m, param_stability=None):
-    """综合评分(0-100)：收益质量 40% + Sharpe 20% + MDD 15% + OOS 15% + 参数稳定性 10%。
+    """综合评分(0-100)：收益 20% + Sharpe 20% + MDD 20% + OOS 20% + 参数稳定 10% + Monte Carlo 10%。
 
-    param_stability: 0~100 的参数稳定性评分（敏感性分析得出）。缺省时用 Walk-Forward
+    禁止只按收益排序：6 个维度加权，收益仅占 20%。param_stability 缺省时用 Walk-Forward
     盈利窗口占比作为稳定性代理，保证「未跑敏感性」时评分仍可算。
     """
+    total_ret = m.get("total_return") or 0.0
     sharpe = m.get("sharpe") or 0.0
     mdd = m.get("max_drawdown") if m.get("max_drawdown") is not None else 100.0
     oos = m.get("oos_return") or 0.0
-    total_ret = m.get("total_return") or 0.0
-    pf = m.get("profit_factor") or 0.0
-    wr = m.get("win_rate") or 0.0
+    mc = m.get("mc_p5")
 
-    # 收益质量 = 绝对收益 40% + 盈亏比 30% + 胜率 30%
     s_ret = _clip(total_ret / 200.0)
-    s_pf = _clip(pf / 2.0)
-    s_wr = _clip(wr / 60.0)
-    s_rq = 0.40 * s_ret + 0.30 * s_pf + 0.30 * s_wr
-
     s_sharpe = _clip(sharpe / 2.0)
     s_mdd = _clip(1.0 - mdd / 30.0)
     s_oos = _clip(oos / 20.0)
@@ -351,16 +435,18 @@ def research_score(m, param_stability=None):
         s_param = _clip(param_stability / 100.0)
     else:
         s_param = _clip((m.get("wf_profit_ratio") or 0.0) / 100.0)
+    s_mc = _clip((mc / 10.0) if mc is not None else 0.0)
 
-    total = round(100.0 * (0.40 * s_rq + 0.20 * s_sharpe + 0.15 * s_mdd
-                           + 0.15 * s_oos + 0.10 * s_param), 1)
+    total = round(100.0 * (0.20 * s_ret + 0.20 * s_sharpe + 0.20 * s_mdd
+                           + 0.20 * s_oos + 0.10 * s_param + 0.10 * s_mc), 1)
     return {
         "total": total,
-        "return_quality": round(s_rq * 100, 1),
+        "return": round(s_ret * 100, 1),
         "sharpe": round(s_sharpe * 100, 1),
         "mdd": round(s_mdd * 100, 1),
         "oos": round(s_oos * 100, 1),
         "param_stability": round(s_param * 100, 1),
+        "monte_carlo": round(s_mc * 100, 1),
         "grade": grade_from(total),
     }
 
@@ -825,6 +911,7 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
             failure_env=hyp.get("failure_environment") or hyp.get("risk_assumption"),
             metrics={"sharpe": m.get("sharpe"), "oos_return": m.get("oos_return"),
                      "max_drawdown": m.get("max_drawdown"), "trade_count": m.get("trade_count")},
+            failure_category=classify_failure(m),
             avoid=1,
         )
     db.update_hypothesis_status(hyp.get("id"), "passed" if passed else "failed")
@@ -864,3 +951,107 @@ def run_sensitivity(hyp, m, df, coin, exp_id, strategy_factory=None):
     sen["score"] = score
     sen["report"] = report_text
     return sen
+
+
+# ============================================================
+# 九、智能参数搜索（IS-only）+ 研究任务模式（批量自主研究）
+# ============================================================
+def parameter_search(df, coin, indicators, base_params, lev, tp, sl,
+                     strategy_factory=None, is_end_year=IS_END_YEAR):
+    """IS-only 参数搜索：只在训练集(df.year<=is_end_year)做贪心坐标下降寻优，禁止偷看 OOS。
+
+    每个参数在其邻域(±1/±2 步)扫描，用 IS Sharpe 选最优（无交易候选直接淘汰），
+    返回 best_params + 搜索轨迹 history。OOS 仅由调用方在最终验证时使用一次。
+    """
+    is_df = df[df.index.year <= is_end_year]
+    if len(is_df) < 100:
+        return {"best_params": base_params, "is_end_year": is_end_year, "history": [], "note": "IS 样本不足"}
+    best = json.loads(json.dumps(base_params or {}))
+    history = []
+    for name in indicators:
+        info = INDICATOR_REGISTRY.get(name)
+        if not info:
+            continue
+        pvals = (best or {}).get(name) or {}
+        for pk, base_val in list(pvals.items()):
+            pmeta = info["params"].get(pk)
+            if not pmeta:
+                continue
+            best_v, best_score = base_val, None
+            for v in [base_val] + _neighborhood(pmeta, base_val):
+                trial = json.loads(json.dumps(best))
+                trial[name][pk] = v
+                try:
+                    pm = run_sensitivity_point(is_df, coin, indicators, trial, lev, tp, sl, strategy_factory)
+                except Exception:
+                    continue
+                trades = pm.get("trade_count") or 0
+                history.append({"param": f"{name}.{pk}", "value": v,
+                                "sharpe": round(pm.get("sharpe") or 0, 3),
+                                "return": round(pm.get("total_return") or 0, 2),
+                                "trades": trades})
+                if trades < 10:
+                    continue
+                score = pm.get("sharpe") or 0.0
+                if best_score is None or score > best_score:
+                    best_score, best_v = score, v
+            if best_v is not None:
+                best[name][pk] = best_v
+    return {"best_params": best, "is_end_year": is_end_year, "history": history}
+
+
+def run_research_task(goal, df, coin, timeframe="4h", strategy_factory=None,
+                      max_hypotheses=20, min_factors=2, max_factors=3,
+                      leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL,
+                      progress=None):
+    """研究任务模式：目标 → 生成因子组合 → 建假设 → 回测验证 → 排名 → 优秀策略进候选库。
+
+    progress(done, total, label): 可选进度回调（供 UI 展示）。
+    返回 {goal, coin, timeframe, ranked(按综合分降序), summary, library_added}。
+    """
+    combos = generate_factor_combos(min_factors, max_factors)[:max_hypotheses]
+    ranked = []
+    total = len(combos)
+    for i, combo in enumerate(combos, 1):
+        hyp = combo_to_hypothesis(combo, goal, coin, timeframe, leverage, tp_pct, sl_pct)
+        hid = db.add_hypothesis(
+            hyp["hypothesis_text"], related_indicators=combo, user_goal=goal,
+            asset=coin, timeframe=timeframe, leverage=leverage,
+            parameters=hyp["parameters"], tp_pct=tp_pct, sl_pct=sl_pct,
+            expected_logic=hyp["expected_logic"],
+            expected_market_condition=hyp["expected_market_condition"],
+            risk_assumption=hyp["risk_assumption"],
+            failure_environment=hyp["failure_environment"])
+        hyp["id"] = hid
+        if progress:
+            progress(i, total, " + ".join(combo[:2]))
+        try:
+            v = verify_hypothesis(hyp, df, coin, strategy_factory)
+        except Exception as e:
+            ranked.append({"combo": combo, "hypothesis_id": hid, "passed": False,
+                           "score": {"total": 0, "grade": "D"}, "metrics": {},
+                           "failures": [], "error": str(e), "hyp": hyp})
+            continue
+        ranked.append({"combo": combo, "hypothesis_id": hid, "passed": v["passed"],
+                       "score": v["score"], "metrics": v["metrics"],
+                       "failures": v["failures"], "report": v["report"],
+                       "fingerprint": v["fingerprint"], "hyp": hyp})
+    ranked.sort(key=lambda r: -(r["score"].get("total") or 0))
+
+    # 优秀策略（通过门禁）进候选库
+    added = []
+    for r in [x for x in ranked if x.get("passed")][:5]:
+        entry = library_entry(r["hyp"], r["combo"], _loads(r["hyp"].get("parameters")),
+                              r["metrics"], {"passed": True, "score": r["score"],
+                                             "coin": coin, "leverage": leverage,
+                                             "tp_pct": tp_pct, "sl_pct": sl_pct})
+        db.add_strategy(**entry)
+        added.append(entry["name"])
+
+    passed = sum(1 for r in ranked if r.get("passed"))
+    top = ranked[0]
+    summary = (f"目标「{goal}」：生成 {total} 个假设，通过门禁 {passed} 个，"
+               f"Top1 = {' + '.join(top['combo'])}（{top['score']['total']} 分）。"
+               f"进候选库 {len(added)} 个。")
+    return {"goal": goal, "coin": coin, "timeframe": timeframe,
+            "ranked": ranked, "summary": summary, "library_added": added}

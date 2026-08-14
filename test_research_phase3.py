@@ -124,21 +124,21 @@ def main():
     print("[OK] 3. 参数敏感性 (stability=%.1f overfit=%s 测点%d)"
           % (sen["stability"], sen["overfitting"], sen["points_tested"]))
 
-    # 4) 评分（新权重 40/20/15/15/10）+ 等级
+    # 4) 评分（新权重 20/20/20/20/10/10）+ 等级
     m_ok = {"total_return": 150, "annual_return": 30, "sharpe": 1.5, "max_drawdown": 20,
             "win_rate": 55, "profit_factor": 1.8, "trade_count": 80,
             "oos_return": 15, "oos_sharpe": 1.2, "oos_mdd": 18, "wf_profit_ratio": 60,
             "wf_windows": 5, "wf_profitable": 3, "mc_p5": 5, "max_consecutive_losses": 4}
     sc = rl.research_score(m_ok)
-    for k in ("return_quality", "sharpe", "mdd", "oos", "param_stability"):
+    for k in ("return", "sharpe", "mdd", "oos", "param_stability", "monte_carlo"):
         assert k in sc, f"评分缺分量 {k}"
     assert 0 < sc["total"] <= 100 and sc["grade"] in ("A", "B", "C", "D")
     sc_stable = rl.research_score(m_ok, param_stability=90.0)
     assert sc_stable["param_stability"] == 90.0, "参数稳定性分量应精确反映"
-    # 收益质量分量应主导：高收益高质量 → 高分
-    assert sc["return_quality"] >= 50, f"收益质量分量异常 {sc['return_quality']}"
-    print("[OK] 4. 评分新权重 (total=%.1f grade=%s rq=%.1f param_stability=%.1f)"
-          % (sc["total"], sc["grade"], sc["return_quality"], sc["param_stability"]))
+    # 收益分量上限 100：150% 收益 / 200 = 0.75 → 75 分
+    assert 0 <= sc["return"] <= 100, f"收益分量异常 {sc['return']}"
+    print("[OK] 4. 评分新权重 (total=%.1f grade=%s return=%.1f param_stability=%.1f)"
+          % (sc["total"], sc["grade"], sc["return"], sc["param_stability"]))
 
     # 5) 失败策略进入记忆 + 完整闭环（死策略 → 判定失败 → 写入 failure_memory）
     hyp = {

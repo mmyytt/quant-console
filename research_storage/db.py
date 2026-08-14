@@ -104,6 +104,18 @@ CREATE TABLE IF NOT EXISTS research_failure_memory (
     avoid INTEGER DEFAULT 1,
     created_time TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS research_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    goal TEXT NOT NULL,
+    asset TEXT,
+    timeframe TEXT,
+    status TEXT DEFAULT 'pending',
+    total INTEGER DEFAULT 0,
+    done INTEGER DEFAULT 0,
+    current TEXT,
+    result TEXT,
+    created_time TEXT NOT NULL
+);
 """
 
 
@@ -143,6 +155,9 @@ _COLUMN_ADDITIONS = {
         "param_stable_range": "TEXT",
         "overfitting_risk": "TEXT",
         "validation_count": "INTEGER",
+    },
+    "research_failure_memory": {
+        "failure_category": "TEXT",
     },
 }
 
@@ -391,13 +406,13 @@ def list_reports(limit=100):
 # ------------------------------------------------------------
 def add_failure_memory(strategy_name=None, indicator_combination=None, parameters=None,
                        fingerprint=None, failure_reason=None, failure_env=None,
-                       metrics=None, avoid=1) -> int:
+                       metrics=None, failure_category=None, avoid=1) -> int:
     return _execute(
         "INSERT INTO research_failure_memory (strategy_name, indicator_combination, parameters, "
-        "fingerprint, failure_reason, failure_env, metrics, avoid, created_time) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "fingerprint, failure_reason, failure_env, metrics, failure_category, avoid, created_time) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
         (strategy_name, _dumps(indicator_combination), _dumps(parameters), fingerprint,
-         failure_reason, failure_env, _dumps(metrics), avoid, _now()),
+         failure_reason, failure_env, _dumps(metrics), _dumps(failure_category), avoid, _now()),
     )
 
 
@@ -423,6 +438,41 @@ def search_failure_memory(fingerprint=None, indicator_combination=None, limit=10
             except Exception:
                 pass
     return hits
+
+
+# ------------------------------------------------------------
+# research tasks（Phase 3B：研究任务模式，后台批量研究进度）
+# ------------------------------------------------------------
+def create_task(goal, asset=None, timeframe=None) -> int:
+    return _execute(
+        "INSERT INTO research_tasks (goal, asset, timeframe, status, total, done, created_time) "
+        "VALUES (?,?,?,?,0,0,?)",
+        (goal, asset, timeframe, "pending", _now()),
+    )
+
+
+def update_task(task_id, **fields):
+    if not fields:
+        return
+    allowed = {"status", "total", "done", "current", "result"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(task_id)
+    _execute(f"UPDATE research_tasks SET {', '.join(sets)} WHERE id = ?", tuple(vals))
+
+
+def get_task(task_id):
+    rows = _rows("SELECT * FROM research_tasks WHERE id = ?", (task_id,))
+    return rows[0] if rows else None
+
+
+def list_tasks(limit=20):
+    return _rows("SELECT * FROM research_tasks ORDER BY id DESC LIMIT ?", (limit,))
 
 
 # ------------------------------------------------------------

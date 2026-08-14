@@ -986,6 +986,103 @@ if "AI" in st.session_state.active_tab:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
 
+    # ============================================================
+    # Phase 3B: 研究任务模式（批量自主研究：目标 → 组合 → 回测 → 排名）
+    # ============================================================
+    with st.expander(t("rl_task_title"), expanded=False):
+        st.caption(t("rl_task_hint"))
+        tc1, tc2, tc3 = st.columns([3, 1, 1])
+        with tc1:
+            task_goal = st.text_input(t("research_goal_label"), key="rl_task_goal",
+                                      placeholder=t("rl_task_placeholder"))
+        with tc2:
+            task_asset = st.selectbox(t("rl_task_asset_label"), ["ETH", "BTC", "SOL"], key="rl_task_asset")
+        with tc3:
+            task_tf = st.selectbox(t("timeframe_select"), ["15m", "1h", "4h", "1d"], index=2, key="rl_task_tf")
+        tc4, tc5 = st.columns([1, 1])
+        with tc4:
+            task_n = st.slider(t("rl_task_count"), 5, 50, 20, key="rl_task_n")
+        with tc5:
+            task_maxf = st.slider(t("rl_task_max_factors"), 2, 4, 3, key="rl_task_maxf")
+
+        if st.button(t("rl_task_start"), key="rl_task_start", width="stretch",
+                     disabled=not task_goal.strip()):
+            task_id = db.create_task(task_goal.strip(), task_asset, task_tf)
+            st.session_state.rl_task_id = task_id
+
+            def _run_task(task_id, goal, asset, tf, n, maxf):
+                db.update_task(task_id, status="running", total=n)
+                try:
+                    df = _load_research_df(asset, tf)
+                    def _progress(done, total, label):
+                        db.update_task(task_id, done=done, total=total, current=label)
+                    result = rl.run_research_task(goal, df, asset, tf,
+                                                  max_hypotheses=n, max_factors=maxf,
+                                                  progress=_progress)
+                    db.update_task(task_id, status="done",
+                                   result=json.dumps(result, ensure_ascii=False))
+                except Exception as e:
+                    db.update_task(task_id, status="failed", result=str(e))
+
+            import threading
+            threading.Thread(target=_run_task, args=(task_id, task_goal.strip(),
+                              task_asset, task_tf, task_n, task_maxf), daemon=True).start()
+            st.rerun()
+
+        if st.button(t("rl_task_refresh"), key="rl_task_refresh", width="stretch"):
+            st.rerun()
+        for tk in db.list_tasks(5):
+            pct = (tk["done"] / tk["total"] * 100) if tk["total"] else 0
+            status = tk.get("status") or "pending"
+            st.markdown(f"**#{tk['id']}** `{tk['goal']}` · {tk['asset']} {tk['timeframe']} · "
+                        f"**{t('rl_task_status_' + status)}** ({tk['done']}/{tk['total']})")
+            if tk["status"] == "running":
+                st.progress(min(pct / 100.0, 1.0))
+                if tk.get("current"):
+                    st.caption(t("rl_task_current") + ": " + tk["current"])
+            if tk["status"] == "done" and tk.get("result"):
+                try:
+                    res = json.loads(tk["result"])
+                    st.success(res.get("summary", ""))
+                    if st.button(t("rl_task_view"), key=f"task_view_{tk['id']}"):
+                        st.session_state.rl_task_result = res
+                        st.rerun()
+                except Exception:
+                    st.error(tk["result"][:500])
+            if tk["status"] == "failed":
+                st.error(f"{t('rl_task_failed')}: {(tk.get('result') or '')[:500]}")
+
+    if "rl_task_result" in st.session_state:
+        res = st.session_state.rl_task_result
+        st.divider()
+        st.subheader(t("rl_task_ranking"))
+        st.caption(res.get("summary", ""))
+        rows = []
+        for rank, r in enumerate(res.get("ranked", []), 1):
+            sc = r.get("score", {})
+            m = r.get("metrics", {})
+            rows.append({
+                "#": rank, "策略": " + ".join(r.get("combo", [])),
+                "评分": sc.get("total"), "等级": sc.get("grade"),
+                "判定": t("rl_verdict_pass") if r.get("passed") else t("rl_verdict_fail"),
+                "收益%": round(m.get("total_return") or 0, 1),
+                "Sharpe": round(m.get("sharpe") or 0, 2),
+                "OOS%": round(m.get("oos_return") or 0, 1),
+                "MDD%": round(m.get("max_drawdown") or 0, 1),
+            })
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            st.caption(t("rl_indicator_roles"))
+            for r in res.get("ranked", [])[:5]:
+                label = f"{'✅' if r.get('passed') else '❌'} {' + '.join(r.get('combo', []))} · {r.get('score', {}).get('total')} 分"
+                with st.expander(label):
+                    if r.get("report"):
+                        st.markdown(r["report"])
+                    elif r.get("error"):
+                        st.error(r["error"])
+                    else:
+                        st.caption("；".join(r.get("failures", [])))
+
     # --- 一、创建研究任务 ---
     with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
         st.caption(t("rl_create_hint"))
@@ -1097,8 +1194,8 @@ if "AI" in st.session_state.active_tab:
             st.metric(t("rl_param_stability"), f"{(sen or {}).get('stability', sc.get('param_stability', '-'))}")
         if not v["passed"]:
             st.error("；".join(v["failures"]))
-        st.caption(t("rl_score_breakdown", rq=sc["return_quality"], sharpe=sc["sharpe"],
-                     mdd=sc["mdd"], oos=sc["oos"], param=sc["param_stability"]))
+        st.caption(t("rl_score_breakdown", ret=sc["return"], sharpe=sc["sharpe"], mdd=sc["mdd"],
+                     oos=sc["oos"], param=sc["param_stability"], mc=sc["monte_carlo"]))
 
         sc1, sc2 = st.columns([1, 3])
         with sc1:

@@ -8,6 +8,7 @@ from .db import (
     add_strategy, list_strategies,
     add_report, list_reports,
     add_failure_memory, list_failure_memory, search_failure_memory,
+    create_task, update_task, get_task, list_tasks,
     memory_summary,
 )
 
@@ -20,5 +21,6 @@ __all__ = [
     "add_strategy", "list_strategies",
     "add_report", "list_reports",
     "add_failure_memory", "list_failure_memory", "search_failure_memory",
+    "create_task", "update_task", "get_task", "list_tasks",
     "memory_summary",
 ]
