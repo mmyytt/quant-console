@@ -3,9 +3,10 @@ from .db import (
     init_db,
     create_session, list_sessions, get_session, update_session,
     add_message, list_messages,
-    add_hypothesis, list_hypotheses, update_hypothesis_status, hypothesis_status_counts,
-    add_experiment, list_experiments,
+    add_hypothesis, list_hypotheses, get_hypothesis, update_hypothesis_status, hypothesis_status_counts,
+    add_experiment, list_experiments, get_experiment, update_experiment,
     add_strategy, list_strategies,
+    add_report, list_reports,
     memory_summary,
 )
 
@@ -13,8 +14,9 @@ __all__ = [
     "init_db",
     "create_session", "list_sessions", "get_session", "update_session",
     "add_message", "list_messages",
-    "add_hypothesis", "list_hypotheses", "update_hypothesis_status", "hypothesis_status_counts",
-    "add_experiment", "list_experiments",
+    "add_hypothesis", "list_hypotheses", "get_hypothesis", "update_hypothesis_status", "hypothesis_status_counts",
+    "add_experiment", "list_experiments", "get_experiment", "update_experiment",
     "add_strategy", "list_strategies",
+    "add_report", "list_reports",
     "memory_summary",
 ]

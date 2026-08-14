@@ -859,6 +859,7 @@ if "AI" in st.session_state.active_tab:
     from ai_assistant import build_context, DEFAULT_TRADING_NOTES, get_quick_prompts
     import research_agent as ra
     from research_storage import db
+    import research_loop as rl
     set_lang(st.session_state.lang)
 
     # ---- 持久化初始化 + 会话管理（退出重进仍保留） ----
@@ -949,6 +950,180 @@ if "AI" in st.session_state.active_tab:
         st.info(t("ai_key_hint"))
     else:
         st.session_state.ai_configured = True
+
+    # ============================================================
+    # Phase 2: 研究闭环（创建任务 → 验证假设 → 评审 → 沉淀策略库）
+    # ============================================================
+    st.divider()
+    st.subheader(t("rl_title"))
+    st.caption(t("rl_subtitle"))
+
+    def _norm_tf(tf):
+        tf = str(tf or "4h").strip().lower()
+        return tf if tf in ("15m", "1h", "4h", "1d") else "4h"
+
+    def _norm_asset(a):
+        a = str(a or "ETH").strip().upper()
+        return a if a in ("ETH", "BTC", "SOL") else "ETH"
+
+    def _js(v):
+        if isinstance(v, (list, dict)):
+            return v
+        if not v:
+            return []
+        try:
+            return json.loads(v)
+        except Exception:
+            return []
+
+    def _load_research_df(asset, timeframe):
+        de = DataEngine()
+        all_tf = de.get_multi_timeframe(asset)
+        df = all_tf.get(timeframe, all_tf["4h"])
+        if not isinstance(df.index, pd.DatetimeIndex):
+            df.index = pd.to_datetime(df.index)
+        if hasattr(df.index, "tz") and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        return df.sort_index()
+
+    # --- 一、创建研究任务 ---
+    with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
+        st.caption(t("rl_create_hint"))
+        cgoal, cbtn = st.columns([4, 1])
+        with cgoal:
+            goal = st.text_input(t("research_goal_label"), key="rl_goal",
+                                 placeholder=t("research_goal_placeholder"))
+        with cbtn:
+            create_clicked = st.button(t("rl_create_btn"), key="rl_create", width="stretch",
+                                       disabled=not ai_key)
+        if create_clicked and goal.strip():
+            with st.spinner(t("rl_generating")):
+                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                        {"role": "user", "content": rl.hypothesis_prompt(goal.strip())}]
+                res = _call_unified_api(msgs, ai_key, ai_model_name, trading_notes)
+                if res["success"]:
+                    spec = rl.parse_hypothesis_json(res["content"])
+                    if not spec:
+                        st.error(t("rl_parse_fail"))
+                        st.write(res["content"][:500])
+                    else:
+                        indicators, invalid = rl.normalize_indicators(spec.get("indicators"))
+                        if not indicators:
+                            st.error(t("rl_no_valid_indicators"))
+                        else:
+                            warn = rl.duplicate_warning(indicators, spec.get("params"))
+                            hid = db.add_hypothesis(
+                                text=spec.get("hypothesis") or spec.get("goal") or goal.strip(),
+                                related_indicators=indicators, status="new",
+                                user_goal=spec.get("goal") or goal.strip(),
+                                asset=_norm_asset(spec.get("asset")),
+                                timeframe=_norm_tf(spec.get("timeframe")),
+                                leverage=float(spec.get("leverage") or 2),
+                                parameters=spec.get("params") or {},
+                                tp_pct=float(spec.get("tp_pct") or 8.0),
+                                sl_pct=float(spec.get("sl_pct") or 4.0),
+                                expected_logic=spec.get("expected_logic"),
+                                expected_market_condition=spec.get("expected_market_condition"),
+                                risk_assumption=spec.get("risk_assumption"),
+                            )
+                            st.session_state.rl_created = {
+                                "hid": hid, "spec": spec, "indicators": indicators,
+                                "warn": warn, "invalid": invalid,
+                            }
+                            st.rerun()
+                else:
+                    st.error(res["error"])
+
+    if "rl_created" in st.session_state:
+        c = st.session_state.rl_created
+        st.success(t("rl_created_ok", id=c["hid"]))
+        st.markdown(f"**{t('rl_hypothesis')}** {c['spec'].get('hypothesis')}")
+        st.markdown(f"**{t('rl_indicators')}** {'、'.join(c['indicators'])}")
+        st.markdown(f"**{t('rl_design')}** {_norm_asset(c['spec'].get('asset'))} "
+                    f"{_norm_tf(c['spec'].get('timeframe'))} · "
+                    f"{c['spec'].get('leverage')}x · TP {c['spec'].get('tp_pct')}% / SL {c['spec'].get('sl_pct')}%")
+        if c["invalid"]:
+            st.warning(t("rl_invalid_indicators") + "：" + "、".join(c["invalid"]))
+        if c["warn"]:
+            st.warning(c["warn"])
+        else:
+            st.caption(t("rl_no_dup"))
+
+    # --- 二、验证假设 ---
+    st.markdown(f"**{t('rl_hypotheses_title')}**")
+    hyps = [h for h in db.list_hypotheses(50) if h["status"] in ("new", "testing")]
+    if not hyps:
+        st.caption(t("rl_no_hypotheses"))
+    for h in hyps[:8]:
+        r1, r2 = st.columns([4, 1])
+        with r1:
+            st.markdown(f"**#{h['id']}** {h['hypothesis_text']}  \n"
+                        f"<small>{h.get('asset') or '?'} {h.get('timeframe') or '?'} · "
+                        f"{h.get('leverage') or 2}x · 状态 {h['status']}</small>",
+                        unsafe_allow_html=True)
+        with r2:
+            if st.button(t("rl_verify_btn"), key=f"verify_{h['id']}", width="stretch"):
+                with st.spinner(t("rl_verify_running")):
+                    try:
+                        asset = _norm_asset(h.get("asset"))
+                        df = _load_research_df(asset, _norm_tf(h.get("timeframe")))
+                        verdict = rl.verify_hypothesis(h, df, asset)
+                        st.session_state.rl_last_verdict = verdict
+                        st.session_state.rl_last_hyp = h
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"{t('rl_verify_error')}: {e}")
+
+    # --- 三、验证结果 + 加入策略库 ---
+    if "rl_last_verdict" in st.session_state:
+        v = st.session_state.rl_last_verdict
+        h = st.session_state.rl_last_hyp
+        sc = v["score"]
+        st.divider()
+        st.subheader(t("rl_verdict_title"))
+        vc1, vc2 = st.columns(2)
+        with vc1:
+            st.metric(t("rl_verdict"), t("rl_verdict_pass") if v["passed"] else t("rl_verdict_fail"))
+            st.metric(t("rl_score"), f"{sc['total']} / 100")
+        with vc2:
+            st.metric(t("rl_grade"), sc["grade"])
+            st.metric(t("rl_grade_meaning"), rl.GRADE_MEANING.get(sc["grade"], "-"))
+        if not v["passed"]:
+            st.error("；".join(v["failures"]))
+        st.caption(t("rl_score_breakdown", sharpe=sc["sharpe"], oos=sc["oos"],
+                     mdd=sc["mdd"], stability=sc["stability"], trades=sc["trades"]))
+        if v["passed"] and st.button(t("rl_add_library"), key="rl_add_lib"):
+            entry = rl.library_entry(h, v["indicators"], v["params"], v["metrics"], v)
+            db.add_strategy(**entry)
+            st.session_state.rl_added = entry["name"]
+            st.rerun()
+        if st.session_state.get("rl_added"):
+            st.success(t("rl_added_library") + ": " + st.session_state.rl_added)
+        with st.expander(t("rl_report"), expanded=True):
+            st.markdown(v["report"])
+
+    # --- 四、策略库 + 研究报告 ---
+    with st.expander(t("rl_library_title"), expanded=False):
+        strat_rows = db.list_strategies(50)
+        if strat_rows:
+            st.dataframe(pd.DataFrame([{
+                "名称": s["name"], "等级": s.get("grade") or "-",
+                "适用市场": s.get("applicable_market") or "-",
+                "周期": s.get("applicable_timeframe") or "-",
+                "核心指标": "、".join(_js(s.get("core_indicators"))),
+                "状态": s.get("status"),
+            } for s in strat_rows]), use_container_width=True)
+        else:
+            st.caption(t("research_no_data"))
+
+    with st.expander(t("rl_reports_title"), expanded=False):
+        reps = db.list_reports(50)
+        if reps:
+            for r in reps:
+                with st.expander(f"{t('rl_report')} #{r['id']} · {t('rl_grade')} {r.get('grade') or '-'} · {r['created_time']}"):
+                    st.markdown(r["report_text"] or "-")
+        else:
+            st.caption(t("research_no_data"))
 
     # 快捷按钮行
     qcols = st.columns(5)

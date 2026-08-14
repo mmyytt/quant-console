@@ -10,6 +10,7 @@
   research_hypothesis   研究假设（new/testing/passed/failed/archived）
   strategy_experiments  每次回测实验
   strategy_library      策略库（含版本演进入口）
+  research_reports      研究报告（Phase 2 自动生成）
 """
 import os
 import sqlite3
@@ -83,17 +84,75 @@ CREATE TABLE IF NOT EXISTS strategy_library (
     created_time TEXT NOT NULL,
     status TEXT DEFAULT 'draft'
 );
+CREATE TABLE IF NOT EXISTS research_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    experiment_id INTEGER,
+    hypothesis_id INTEGER,
+    grade TEXT,
+    report_text TEXT,
+    created_time TEXT NOT NULL
+);
 """
 
 
+# Phase 2 新增字段（对已存在的旧库做 ALTER TABLE 增量迁移）
+_COLUMN_ADDITIONS = {
+    "research_hypothesis": {
+        "user_goal": "TEXT",
+        "asset": "TEXT",
+        "timeframe": "TEXT",
+        "leverage": "REAL",
+        "parameters": "TEXT",
+        "tp_pct": "REAL",
+        "sl_pct": "REAL",
+        "expected_logic": "TEXT",
+        "expected_market_condition": "TEXT",
+        "risk_assumption": "TEXT",
+    },
+    "strategy_experiments": {
+        "hypothesis_id": "INTEGER",
+        "oos_return": "REAL",
+        "research_score": "REAL",
+        "grade": "TEXT",
+        "failure_reason": "TEXT",
+    },
+    "strategy_library": {
+        "applicable_market": "TEXT",
+        "applicable_timeframe": "TEXT",
+        "core_indicators": "TEXT",
+        "failure_env": "TEXT",
+        "research_score": "REAL",
+        "grade": "TEXT",
+    },
+}
+
+
 def init_db():
-    """创建数据库与全部表（幂等）。"""
+    """创建数据库与全部表（幂等）+ 增量迁移新增列。"""
     conn = _connect()
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
     finally:
         conn.close()
+    _migrate()
+
+
+def _columns(table):
+    conn = _connect()
+    try:
+        return {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+    finally:
+        conn.close()
+
+
+def _migrate():
+    """对已存在表补充缺失列（幂等，CREATE TABLE IF NOT EXISTS 不会加列）。"""
+    for table, cols in _COLUMN_ADDITIONS.items():
+        existing = _columns(table)
+        for col, ddl in cols.items():
+            if col not in existing:
+                _execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
 
 
 def _rows(sql, params=()):
@@ -113,6 +172,11 @@ def _execute(sql, params=()):
         return cur.lastrowid
     finally:
         conn.close()
+
+
+def _dumps(v):
+    import json as _json
+    return _json.dumps(v, ensure_ascii=False) if v is not None else None
 
 
 # ------------------------------------------------------------
@@ -173,18 +237,29 @@ def list_messages(session_id, limit=None):
 # ------------------------------------------------------------
 # hypotheses
 # ------------------------------------------------------------
-def add_hypothesis(text, related_indicators=None, status="new") -> int:
-    import json as _json
-    rel = _json.dumps(related_indicators, ensure_ascii=False) if related_indicators else None
+def add_hypothesis(text, related_indicators=None, status="new",
+                   user_goal=None, asset=None, timeframe=None, leverage=None,
+                   parameters=None, tp_pct=None, sl_pct=None,
+                   expected_logic=None, expected_market_condition=None,
+                   risk_assumption=None) -> int:
     return _execute(
-        "INSERT INTO research_hypothesis (hypothesis_text, created_time, related_indicators, status) "
-        "VALUES (?, ?, ?, ?)",
-        (text, _now(), rel, status),
+        "INSERT INTO research_hypothesis (hypothesis_text, created_time, related_indicators, status, "
+        "user_goal, asset, timeframe, leverage, parameters, tp_pct, sl_pct, "
+        "expected_logic, expected_market_condition, risk_assumption) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (text, _now(), _dumps(related_indicators), status,
+         user_goal, asset, timeframe, leverage, _dumps(parameters), tp_pct, sl_pct,
+         expected_logic, expected_market_condition, risk_assumption),
     )
 
 
 def list_hypotheses(limit=100):
     return _rows("SELECT * FROM research_hypothesis ORDER BY id DESC LIMIT ?", (limit,))
+
+
+def get_hypothesis(hyp_id):
+    rows = _rows("SELECT * FROM research_hypothesis WHERE id = ?", (hyp_id,))
+    return rows[0] if rows else None
 
 
 def update_hypothesis_status(hyp_id, status):
@@ -203,18 +278,20 @@ def add_experiment(strategy_name=None, indicator_combination=None, parameters=No
                    asset=None, timeframe=None, leverage=None, backtest_time=None,
                    total_return=None, annual_return=None, sharpe=None, max_drawdown=None,
                    win_rate=None, trade_count=None, walk_forward_score=None,
-                   monte_carlo_score=None, final_rating=None) -> int:
-    import json as _json
-    ic = _json.dumps(indicator_combination, ensure_ascii=False) if indicator_combination is not None else None
-    pm = _json.dumps(parameters, ensure_ascii=False) if parameters is not None else None
+                   monte_carlo_score=None, final_rating=None,
+                   hypothesis_id=None, oos_return=None, research_score=None,
+                   grade=None, failure_reason=None) -> int:
     return _execute(
         "INSERT INTO strategy_experiments (strategy_name, indicator_combination, parameters, asset, "
         "timeframe, leverage, backtest_time, total_return, annual_return, sharpe, max_drawdown, "
-        "win_rate, trade_count, walk_forward_score, monte_carlo_score, final_rating) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (strategy_name, ic, pm, asset, timeframe, leverage, backtest_time or _now(),
+        "win_rate, trade_count, walk_forward_score, monte_carlo_score, final_rating, "
+        "hypothesis_id, oos_return, research_score, grade, failure_reason) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (strategy_name, _dumps(indicator_combination), _dumps(parameters), asset,
+         timeframe, leverage, backtest_time or _now(),
          total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count,
-         walk_forward_score, monte_carlo_score, final_rating),
+         walk_forward_score, monte_carlo_score, final_rating,
+         hypothesis_id, oos_return, research_score, grade, failure_reason),
     )
 
 
@@ -222,25 +299,63 @@ def list_experiments(limit=100):
     return _rows("SELECT * FROM strategy_experiments ORDER BY id DESC LIMIT ?", (limit,))
 
 
+def get_experiment(exp_id):
+    rows = _rows("SELECT * FROM strategy_experiments WHERE id = ?", (exp_id,))
+    return rows[0] if rows else None
+
+
+def update_experiment(exp_id, **fields):
+    if not fields:
+        return
+    allowed = {"final_rating", "grade", "failure_reason", "research_score", "status"}
+    sets, vals = [], []
+    for k, v in fields.items():
+        if k in allowed:
+            sets.append(f"{k} = ?")
+            vals.append(v)
+    if not sets:
+        return
+    vals.append(exp_id)
+    _execute(f"UPDATE strategy_experiments SET {', '.join(sets)} WHERE id = ?", tuple(vals))
+
+
 # ------------------------------------------------------------
 # strategy library
 # ------------------------------------------------------------
 def add_strategy(name, logic_description=None, indicator_logic=None, parameters=None,
-                 risk_control=None, performance_summary=None, status="draft") -> int:
-    import json as _json
-    il = _json.dumps(indicator_logic, ensure_ascii=False) if indicator_logic is not None else None
-    pm = _json.dumps(parameters, ensure_ascii=False) if parameters is not None else None
-    rc = _json.dumps(risk_control, ensure_ascii=False) if risk_control is not None else None
-    ps = _json.dumps(performance_summary, ensure_ascii=False) if performance_summary is not None else None
+                 risk_control=None, performance_summary=None, status="draft",
+                 applicable_market=None, applicable_timeframe=None,
+                 core_indicators=None, failure_env=None,
+                 research_score=None, grade=None) -> int:
     return _execute(
         "INSERT INTO strategy_library (name, logic_description, indicator_logic, parameters, "
-        "risk_control, performance_summary, created_time, status) VALUES (?,?,?,?,?,?,?,?)",
-        (name, logic_description, il, pm, rc, ps, _now(), status),
+        "risk_control, performance_summary, created_time, status, "
+        "applicable_market, applicable_timeframe, core_indicators, failure_env, "
+        "research_score, grade) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (name, logic_description, _dumps(indicator_logic), _dumps(parameters),
+         _dumps(risk_control), _dumps(performance_summary), _now(), status,
+         applicable_market, applicable_timeframe, _dumps(core_indicators), failure_env,
+         research_score, grade),
     )
 
 
 def list_strategies(limit=100):
     return _rows("SELECT * FROM strategy_library ORDER BY strategy_id DESC LIMIT ?", (limit,))
+
+
+# ------------------------------------------------------------
+# research reports (Phase 2)
+# ------------------------------------------------------------
+def add_report(experiment_id=None, hypothesis_id=None, grade=None, report_text="") -> int:
+    return _execute(
+        "INSERT INTO research_reports (experiment_id, hypothesis_id, grade, report_text, created_time) "
+        "VALUES (?,?,?,?,?)",
+        (experiment_id, hypothesis_id, grade, report_text, _now()),
+    )
+
+
+def list_reports(limit=100):
+    return _rows("SELECT * FROM research_reports ORDER BY id DESC LIMIT ?", (limit,))
 
 
 # ------------------------------------------------------------
