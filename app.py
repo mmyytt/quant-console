@@ -861,6 +861,7 @@ if "AI" in st.session_state.active_tab:
                     "评分": sc["total"],
                     "等级": sc["grade"],
                     "判定": "✅" if v["passed"] else "❌",
+                    "失败分类": v.get("failure_level") or "-",
                 })
             st.dataframe(pd.DataFrame(rows))
             for idx, r in enumerate(ranked[:10], 1):
@@ -1053,6 +1054,9 @@ if "AI" in st.session_state.active_tab:
         if fails:
             st.dataframe(pd.DataFrame([{
                 "策略": f.get("strategy_name") or "-",
+                "失败分类": ("、".join(_js(f.get("failure_category")))
+                             if isinstance(_js(f.get("failure_category")), list)
+                             else (_js(f.get("failure_category")) or "-")),
                 t("rl_fingerprint"): f.get("fingerprint") or "-",
                 "失败原因": f.get("failure_reason") or "-",
                 "失效环境": f.get("failure_env") or "-",

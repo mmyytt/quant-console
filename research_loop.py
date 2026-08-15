@@ -421,6 +421,28 @@ def classify_failure(m):
     return tags
 
 
+def failure_level(m, leverage=None):
+    """把失败实验归为 4 类（失败≠方向失败，帮 AI 定位「改参数」还是「换方向」）：
+
+    方向失败   —— 指标组合不产生足够/盈利信号（交易太少且 Sharpe≤0）
+    过拟合风险 —— 样本内赚钱、样本外失效（数据泄露/参数拟合嫌疑）
+    风险配置失败—— 高杠杆导致回撤失控
+    参数失败   —— 方向尚可，参数/TP·SL 未调好（换参数再试，不换方向）
+    """
+    trades = m.get("trade_count") or 0
+    sharpe = m.get("sharpe") or 0.0
+    mdd = m.get("max_drawdown") if m.get("max_drawdown") is not None else 100.0
+    total = m.get("total_return") or 0.0
+    oos = m.get("oos_return")
+    if trades < CRITERIA["trades_min"] and sharpe <= 0.0:
+        return "方向失败"
+    if total > 0.0 and (oos is None or oos <= 0.0):
+        return "过拟合风险"
+    if mdd >= CRITERIA["mdd_max"] and (leverage or DEFAULT_LEVERAGE) >= 5:
+        return "风险配置失败"
+    return "参数失败"
+
+
 # ============================================================
 # 四、研究评分 + 等级（A/B/C/D）+ 过拟合风险
 # ============================================================
@@ -874,18 +896,22 @@ def run_strategy_search(candidates, df, coin, progress=None):
 # 十、参数空间搜索（V3：方向探索 → 参数组合搜索 → 排名）
 # ============================================================
 # 搜索维度（有界，防组合爆炸；仓位/加仓未在引擎独立暴露，不在搜索列）
-LEVERAGE_GRID = [1, 2, 3, 5, 10]
-TPSL_GRID = [(8.0, 4.0), (4.0, 2.0), (15.0, 6.0), (25.0, 10.0)]
+LEVERAGE_GRID = [1, 2, 3, 5, 10, 20]
+TPSL_GRID = [(5.0, 2.0), (10.0, 5.0), (15.0, 5.0), (20.0, 10.0)]
 
 
 def _param_sample_values(schema_key):
-    """取某指标第一个带 min/max 的参数，采样 [min, default, max] 三点（去重排序）。"""
+    """取某指标第一个带 min/max 的参数，采样 [min, 中位, default, max]（去重排序）。
+
+    不只看默认参数：min/max 边界 + 中位点一并纳入粗搜索，让 AI 探索整个参数空间而非单点。
+    """
     s = INDICATOR_SCHEMA.get(schema_key)
     if not s or not s.get("params"):
         return []
     for pk, pv in s["params"].items():
         if "min" in pv and "max" in pv:
-            vals = sorted({pv["min"], pv["default"], pv["max"]})
+            lo, hi, dft = pv["min"], pv["max"], pv["default"]
+            vals = sorted({lo, round((lo + hi) / 2.0, 4), dft, hi})
             return [(pk, vals)]
     return []
 
@@ -936,87 +962,163 @@ def expand_parameter_grid(direction, max_combos=20):
     return out[:max_combos]
 
 
-def run_parameter_search(directions, df, coin, progress=None, max_combos_per_direction=20):
-    """系统化参数空间搜索：每个方向展开参数组合 → 逐个回测 → 记录 → 按综合分排名。
+def expand_refinement_grid(direction, combo, step_ratio=0.25):
+    """围绕一个有效组合做精搜索（二阶段）：主参数 ± 邻近值 + 杠杆 ±1 + TP/SL 邻近档。
 
-    与 run_strategy_search（V2 固定候选）不同：这里对每个方向做「杠杆/TP·SL/主参数」
-    一次性扫描，复用 run_hypothesis_backtest（完整 IS/OOS/WF/MC），每个组合都落实验库 +
-    失败记忆（全指纹去重）。progress(i, total, label) 为全局进度。
+    例：粗搜索发现 EMA_short=20 有效 → 精搜索测试 EMA_short≈15/25，而非无限组合。
     """
-    # 先展开全部任务（方向 × 参数组合），便于全局进度与总数
-    tasks = []  # (spec, indicators, combo|None)
+    indicators = direction.get("indicators") or []
+    base_params = combo.get("param_overrides") or {}
+    lev0 = combo["leverage"]
+    tp0 = combo["tp_pct"]
+    sl0 = combo["sl_pct"]
+    out = []
+
+    def _add(label, params, lev, tp, sl):
+        out.append({"label": label, "param_overrides": params,
+                    "leverage": lev, "tp_pct": tp, "sl_pct": sl})
+
+    # 主参数精调：每个指标首参数在当前值附近 ±step
+    for name in indicators:
+        key = _NAME_TO_KEY.get(name)
+        for pk, _ in _param_sample_values(key):
+            s = INDICATOR_SCHEMA[key]["params"][pk]
+            lo, hi = s["min"], s["max"]
+            cur = (base_params.get(name) or {}).get(pk, s["default"])
+            step = max((hi - lo) * step_ratio, s.get("step") or 0)
+            if step <= 0:
+                continue
+            for delta in (-step, step):
+                v = round(cur + delta, 6)
+                if lo <= v <= hi:
+                    po = {n: dict(p) for n, p in base_params.items()}
+                    po.setdefault(name, {})[pk] = v
+                    _add(f"{name} {pk}={v:g}（精调）", po, lev0, tp0, sl0)
+    # 杠杆精调 ±1
+    for lev in {lev0 - 1, lev0 + 1}:
+        if 1 <= lev <= 20:
+            _add(f"杠杆 {lev}x（精调）", base_params, lev, tp0, sl0)
+    # TP/SL 精调（邻近档）
+    for tp, sl in [(tp0 + 5, sl0 + 2), (tp0 - 5, sl0 + 2)]:
+        if tp > sl > 0:
+            _add(f"TP{tp:g}%/SL{sl:g}%（精调）", base_params, lev0, tp, sl)
+    # 去重
+    seen, out2 = set(), []
+    for c in out:
+        fp = full_fingerprint(indicators, c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"])
+        if fp in seen:
+            continue
+        seen.add(fp)
+        out2.append(c)
+    return out2
+
+
+def _run_experiment(spec, indicators, combo, coin, df):
+    """跑单个实验（回测→判定→评分→落库→报告→失败记忆），返回结果 dict。"""
+    fp = full_fingerprint(indicators, combo["param_overrides"],
+                          combo["leverage"], combo["tp_pct"], combo["sl_pct"])
+    if _previously_failed(fp):
+        return {"spec": spec, "indicators": indicators, "combo": combo,
+                "skipped": True, "reason": "历史失败（相同参数组合）"}
+    try:
+        m = run_hypothesis_backtest(df, coin, indicators, combo["param_overrides"],
+                                    combo["leverage"], combo["tp_pct"], combo["sl_pct"])
+        passed, failures = judge_pass(m)
+        score = research_score(m)
+        name = " + ".join(indicators[:3]) if indicators else "未命名策略"
+        lvl = None if passed else failure_level(m, combo["leverage"])
+        exp_id = db.add_experiment(
+            strategy_name=name, indicator_combination=indicators,
+            parameters=combo["param_overrides"], asset=coin,
+            timeframe=spec.get("timeframe"), leverage=combo["leverage"],
+            tp_pct=combo["tp_pct"], sl_pct=combo["sl_pct"],
+            total_return=m.get("total_return"), annual_return=m.get("annual_return"),
+            sharpe=m.get("sharpe"), max_drawdown=m.get("max_drawdown"),
+            win_rate=m.get("win_rate"), trade_count=m.get("trade_count"),
+            walk_forward_score=m.get("wf_profit_ratio"), monte_carlo_score=m.get("mc_p5"),
+            final_rating=score["grade"], oos_return=m.get("oos_return"),
+            research_score=score["total"], grade=score["grade"],
+            failure_reason="；".join(failures) if failures else None, fingerprint=fp,
+        )
+        verdict = {"passed": passed, "failures": failures, "score": score, "metrics": m,
+                   "indicators": indicators, "params": combo["param_overrides"],
+                   "coin": coin, "leverage": combo["leverage"], "tp_pct": combo["tp_pct"],
+                   "sl_pct": combo["sl_pct"], "fingerprint": fp, "experiment_id": exp_id,
+                   "failure_level": lvl}
+        hyp = _spec_to_hyp(spec, indicators, coin)
+        hyp["parameters"] = combo["param_overrides"]
+        verdict["report"] = build_report(hyp, indicators, combo["param_overrides"], m, verdict)
+        if not passed:
+            db.add_failure_memory(
+                strategy_name=name, indicator_combination=indicators,
+                parameters=combo["param_overrides"], fingerprint=fp,
+                failure_reason="；".join(failures) if failures else None,
+                failure_env=spec.get("failure_environment") or spec.get("risk_assumption"),
+                metrics={"sharpe": m.get("sharpe"), "oos_return": m.get("oos_return"),
+                         "max_drawdown": m.get("max_drawdown"), "trade_count": m.get("trade_count")},
+                failure_category=lvl, avoid=1,
+            )
+        return {"spec": spec, "indicators": indicators, "combo": combo,
+                "verdict": verdict, "skipped": False}
+    except Exception as e:
+        return {"spec": spec, "indicators": indicators, "combo": combo,
+                "skipped": True, "reason": f"回测异常: {e}"}
+
+
+def _run_tasks(tasks, coin, df, progress, phase_label=""):
+    """运行一批实验任务，返回结果列表。tasks: [(spec, indicators, combo|None), ...]"""
+    total = len(tasks)
+    results = []
+    for i, (spec, indicators, combo) in enumerate(tasks):
+        if combo is None:
+            if progress:
+                progress(i, total, f"{phase_label}{spec.get('hypothesis') or '方向'}")
+            results.append({"spec": spec, "indicators": [], "skipped": True, "reason": "无有效指标"})
+            continue
+        name = spec.get("hypothesis") or f"方向 {i + 1}"
+        if progress:
+            progress(i, total, f"{phase_label}{name} · {combo['label']}")
+        results.append(_run_experiment(spec, indicators, combo, coin, df))
+    return results
+
+
+def run_parameter_search(directions, df, coin, progress=None, max_combos_per_direction=20, refine_top=3):
+    """两阶段方向搜索：粗搜索（全方向有界网格）→ 精搜索（围绕 top 组合邻域），合并排名。
+
+    核心思想：一次实验失败只代表该组合失败，不代表方向失败。粗搜索阶段每个方向都展开
+    「杠杆/TP·SL/主参数(min~max)」完整网格（不因第一组失败淘汰方向）；精搜索阶段只围绕
+    top refine_top 个有效组合邻域继续测（EMA20 有效→测 EMA15/25），防组合爆炸。
+    progress(i, total, label) 分两阶段回调（阶段前缀「粗搜」/「精搜」）。
+    """
+    # 阶段一：粗搜索任务（方向 × 有界参数网格）
+    coarse_tasks = []
     for spec in directions:
         indicators, _inv = normalize_indicators(spec.get("indicators"))
         if not indicators:
-            tasks.append((spec, [], None))
+            coarse_tasks.append((spec, [], None))
             continue
         direction = {"indicators": indicators, "params": spec.get("params") or {},
                      "leverage": spec.get("leverage"), "tp_pct": spec.get("tp_pct"),
                      "sl_pct": spec.get("sl_pct")}
         for combo in expand_parameter_grid(direction, max_combos_per_direction):
-            tasks.append((spec, indicators, combo))
+            coarse_tasks.append((spec, indicators, combo))
 
-    total = len(tasks)
-    results = []
-    for i, (spec, indicators, combo) in enumerate(tasks):
-        label = spec.get("hypothesis") or f"方向 {i + 1}"
-        if combo is None:
-            if progress:
-                progress(i, total, label)
-            results.append({"spec": spec, "indicators": [], "skipped": True, "reason": "无有效指标"})
-            continue
-        if progress:
-            progress(i, total, f"{label} · {combo['label']}")
+    coarse_results = _run_tasks(coarse_tasks, coin, df, progress, phase_label="粗搜 ")
 
-        fp = full_fingerprint(indicators, combo["param_overrides"],
-                              combo["leverage"], combo["tp_pct"], combo["sl_pct"])
-        if _previously_failed(fp):
-            results.append({"spec": spec, "indicators": indicators, "combo": combo,
-                            "skipped": True, "reason": "历史失败（相同参数组合）"})
-            continue
+    # 阶段二：精搜索任务（围绕 top 组合邻域）
+    valid = [r for r in coarse_results if not r.get("skipped")]
+    valid.sort(key=lambda r: r["verdict"]["score"]["total"], reverse=True)
+    fine_tasks = []
+    for r in valid[:refine_top]:
+        spec, indicators, combo = r["spec"], r["indicators"], r["combo"]
+        direction = {"indicators": indicators, "params": spec.get("params") or {},
+                     "leverage": spec.get("leverage"), "tp_pct": spec.get("tp_pct"),
+                     "sl_pct": spec.get("sl_pct")}
+        for c in expand_refinement_grid(direction, combo):
+            fine_tasks.append((spec, indicators, c))
 
-        try:
-            m = run_hypothesis_backtest(df, coin, indicators, combo["param_overrides"],
-                                        combo["leverage"], combo["tp_pct"], combo["sl_pct"])
-            passed, failures = judge_pass(m)
-            score = research_score(m)
-            name = " + ".join(indicators[:3]) if indicators else "未命名策略"
-            exp_id = db.add_experiment(
-                strategy_name=name, indicator_combination=indicators,
-                parameters=combo["param_overrides"], asset=coin,
-                timeframe=spec.get("timeframe"), leverage=combo["leverage"],
-                tp_pct=combo["tp_pct"], sl_pct=combo["sl_pct"],
-                total_return=m.get("total_return"), annual_return=m.get("annual_return"),
-                sharpe=m.get("sharpe"), max_drawdown=m.get("max_drawdown"),
-                win_rate=m.get("win_rate"), trade_count=m.get("trade_count"),
-                walk_forward_score=m.get("wf_profit_ratio"), monte_carlo_score=m.get("mc_p5"),
-                final_rating=score["grade"], oos_return=m.get("oos_return"),
-                research_score=score["total"], grade=score["grade"],
-                failure_reason="；".join(failures) if failures else None, fingerprint=fp,
-            )
-            verdict = {"passed": passed, "failures": failures, "score": score, "metrics": m,
-                       "indicators": indicators, "params": combo["param_overrides"],
-                       "coin": coin, "leverage": combo["leverage"], "tp_pct": combo["tp_pct"],
-                       "sl_pct": combo["sl_pct"], "fingerprint": fp, "experiment_id": exp_id}
-            hyp = _spec_to_hyp(spec, indicators, coin)
-            hyp["parameters"] = combo["param_overrides"]
-            verdict["report"] = build_report(hyp, indicators, combo["param_overrides"], m, verdict)
-            if not passed:
-                db.add_failure_memory(
-                    strategy_name=name, indicator_combination=indicators,
-                    parameters=combo["param_overrides"], fingerprint=fp,
-                    failure_reason="；".join(failures) if failures else None,
-                    failure_env=spec.get("failure_environment") or spec.get("risk_assumption"),
-                    metrics={"sharpe": m.get("sharpe"), "oos_return": m.get("oos_return"),
-                             "max_drawdown": m.get("max_drawdown"), "trade_count": m.get("trade_count")},
-                    failure_category=classify_failure(m), avoid=1,
-                )
-            results.append({"spec": spec, "indicators": indicators, "combo": combo,
-                            "verdict": verdict, "skipped": False})
-        except Exception as e:
-            results.append({"spec": spec, "indicators": indicators, "combo": combo,
-                            "skipped": True, "reason": f"回测异常: {e}"})
-
+    fine_results = _run_tasks(fine_tasks, coin, df, progress, phase_label="精搜 ")
+    results = coarse_results + fine_results
     results.sort(key=lambda r: (r.get("verdict") or {}).get("score", {}).get("total", -999.0),
                  reverse=True)
     return results

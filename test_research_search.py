@@ -158,6 +158,24 @@ def main():
     finally:
         rl.run_hypothesis_backtest = _orig_bt
 
+    # 7) V4 失败分级 + 精搜索网格
+    assert rl.failure_level({"trade_count": 5, "sharpe": -0.2, "total_return": -3.0}) == "方向失败"
+    assert rl.failure_level({"trade_count": 40, "sharpe": 1.2, "total_return": 10.0,
+                             "max_drawdown": 15.0, "oos_return": -1.0}) == "过拟合风险"
+    assert rl.failure_level({"trade_count": 40, "sharpe": 0.8, "total_return": 5.0,
+                             "max_drawdown": 40.0, "oos_return": 2.0}, leverage=10) == "风险配置失败"
+    assert rl.failure_level({"trade_count": 40, "sharpe": 0.9, "total_return": 3.0,
+                             "max_drawdown": 20.0, "oos_return": 1.0}) == "参数失败"
+    print(f"[OK] 7. failure_level：方向/参数/风险配置/过拟合 4 类分级正确")
+
+    refine = rl.expand_refinement_grid(direction, {"param_overrides": {}, "leverage": 2,
+                                                   "tp_pct": 8.0, "sl_pct": 4.0})
+    rfp = [rl.full_fingerprint(direction["indicators"], c["param_overrides"],
+                               c["leverage"], c["tp_pct"], c["sl_pct"]) for c in refine]
+    assert len(rfp) == len(set(rfp)), "精搜索网格不应有重复"
+    assert any("精调" in c["label"] for c in refine), "精搜索应包含参数精调标签"
+    print(f"[OK] 8. expand_refinement_grid：围绕有效组合做 ± 邻域精搜索（{len(refine)} 组合，去重）")
+
     print("\nALL SEARCH TESTS PASSED")
 
 
