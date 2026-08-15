@@ -11,6 +11,9 @@ from plotly.subplots import make_subplots
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 构建版本标记（用于确认 Streamlit Cloud 已拉取最新代码）
+APP_BUILD_VERSION = "c790371-hotfix1"
+
 # 加载 .env 中的 API Key
 _env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 if os.path.exists(_env_path):
@@ -127,6 +130,7 @@ def check_data_freshness():
 check_data_freshness()
 
 with st.sidebar:
+    st.caption(APP_BUILD_VERSION)
     if st.button(t("btn_clear_cache"), key="clear_cache_btn"):
         st.cache_data.clear(); st.cache_resource.clear()
         st.rerun()
