@@ -796,17 +796,27 @@ if "AI" in st.session_state.active_tab:
         search_clicked = st.button(t("rl_search_btn"), key="rl_search", disabled=not ai_key)
 
     if search_clicked and search_goal.strip():
-        msgs = [{"role": "system", "content": t("rl_sys_prompt")},
-                {"role": "user", "content": rl.search_prompt(search_goal.strip())}]
-        res = call_unified_api(msgs, ai_key, ai_model_name, "")
+        # 第一步：生成候选策略（搜索模式，走 search_prompt → parse_hypothesis_array → run_parameter_search）
+        with st.spinner(t("rl_search_generating")):
+            msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                    {"role": "user", "content": rl.search_prompt(search_goal.strip())}]
+            res = call_unified_api(msgs, ai_key, ai_model_name, "")
         if not res.get("success"):
             st.error(t("rl_search_no_candidates"))
+            st.caption(t("rl_search_diag"))
+            st.code((res.get("content") or "")[:500] or "（LLM 调用失败，无返回内容）", language=None)
         else:
-            candidates = rl.parse_hypothesis_array(res.get("content", ""))
+            candidates, diag = rl.parse_hypothesis_array_diag(res.get("content", ""))
             if not candidates:
+                # 解析失败：给出完整诊断，而非只显示「无有效候选」
                 st.error(t("rl_search_no_candidates"))
-                st.write((res.get("content") or "")[:500])
+                with st.expander(t("rl_search_diag"), expanded=True):
+                    st.caption(f"LLM 原始返回长度：{diag['raw_len']} 字符")
+                    st.caption(f"JSON 提取结果：{diag['extracted'] or '（未提取到）'}")
+                    st.caption(f"解析失败原因：{diag['error']}")
+                    st.code(diag["preview"] or "（空）", language=None)
             else:
+                st.success(t("rl_search_found", n=len(candidates)))
                 ctx = rl.parse_research_context(search_goal.strip())
                 asset = _norm_asset(ctx.get("symbol"))
                 tf = _norm_tf(ctx.get("timeframe"))

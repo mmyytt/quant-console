@@ -808,19 +808,87 @@ JSON 结构（数组，每个元素字段名固定）：
 """
 
 
-def parse_hypothesis_array(text):
-    """从 AI 输出中提取 JSON 数组；失败返回 []。"""
-    if not text:
-        return []
-    t = text.strip()
-    s, e = t.find("["), t.rfind("]")
-    if s == -1 or e <= s:
-        return []
+def _balanced_array_substrings(text):
+    """返回文本中所有平衡的 [...] 子串（字符串感知），按出现顺序。已去除 markdown 代码围栏。"""
+    import re
+    t = re.sub(r"```[a-zA-Z]*\s*", "", text or "").strip()
+    subs = []
+    for start in (i for i, c in enumerate(t) if c == "["):
+        depth, in_str, esc = 0, False, False
+        for j in range(start, len(t)):
+            ch = t[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    subs.append(t[start:j + 1])
+                    break
+    return subs
+
+
+def _try_parse_json(sub):
+    """依次尝试 json.loads → 去尾逗号 json.loads → ast.literal_eval，返回 (arr|None, err|None)。"""
+    import ast
+    import re
     try:
-        arr = json.loads(t[s:e + 1])
-        return [x for x in arr if isinstance(x, dict)]
-    except Exception:
-        return []
+        return json.loads(sub), None
+    except Exception as e1:
+        try:
+            return json.loads(re.sub(r",\s*([\]}])", r"\1", sub)), None
+        except Exception as e2:
+            try:
+                return ast.literal_eval(sub), None
+            except Exception as e3:
+                return None, f"json.loads:{e1} | 去尾逗号:{e2} | literal_eval:{e3}"
+
+
+def parse_hypothesis_array_diag(text):
+    """从 AI 输出提取 JSON 数组候选，返回 (candidates, diag)。
+
+    容错：纯 JSON 数组 / markdown JSON 围栏 / 解释文字 + JSON 均可提取。
+    diag = {"raw_len", "preview", "extracted", "error"}，供 UI 定位解析失败原因。
+    """
+    diag = {"raw_len": len(text or ""), "preview": (text or "")[:500],
+            "extracted": None, "error": None}
+    if not text:
+        diag["error"] = "空输入"
+        return [], diag
+    subs = _balanced_array_substrings(text)
+    if not subs:
+        diag["error"] = "未找到 JSON 数组（无 '[...]' 结构）"
+        return [], diag
+    # 优先最外层数组（最长，能容纳全部候选），逐个尝试解析
+    last_err = None
+    for sub in sorted(subs, key=len, reverse=True):
+        arr, err = _try_parse_json(sub)
+        if err:
+            last_err = err
+        if isinstance(arr, list):
+            diag["extracted"] = sub
+            out = [x for x in arr if isinstance(x, dict)]
+            if not out:
+                diag["error"] = "数组内无有效候选对象（需为 JSON 对象数组）"
+            return out, diag
+    diag["extracted"] = subs[0]
+    diag["error"] = "无法解析 JSON: " + (last_err or "未知原因")
+    return [], diag
+
+
+def parse_hypothesis_array(text):
+    """从 AI 输出中提取 JSON 数组候选；失败返回 []。"""
+    arr, _diag = parse_hypothesis_array_diag(text)
+    return arr
 
 
 def _previously_failed(fp):
