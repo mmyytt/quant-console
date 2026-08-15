@@ -76,6 +76,89 @@ _CATEGORY_ROLE = {
     "K线形态": "识别反转/持续形态",
 }
 
+# 交易频率 / 策略风格（供假设列表展示 + research_context）
+_FREQ_OF = {"5m": "高频", "15m": "高频", "1h": "日内", "4h": "波段", "1d": "低频"}
+_STYLE_OF = {"trend": "趋势跟踪", "momentum": "动量", "volatility": "均值回归", "volume": "量价配合"}
+
+
+def _freq_of(timeframe):
+    return _FREQ_OF.get(str(timeframe or "").strip().lower(), "波段")
+
+
+def _style_of(primary_class):
+    return _STYLE_OF.get(primary_class, "综合")
+
+
+def parse_research_context(goal):
+    """从研究目标文本解析 research_context（symbol/timeframe/strategy_style/target_return）。
+
+    例："研究BTC 1小时高频策略，目标年化50%" → {symbol:BTC, timeframe:1h, strategy_style:高频, target_return:50}。
+    解析不到的字段用默认值（ETH/4h/综合/None），绝不返回空。
+    """
+    import re
+    g = str(goal or "")
+    symbol = "ETH"
+    for c in ("BTC", "ETH", "SOL"):
+        if c.lower() in g.lower():
+            symbol = c
+            break
+    low = g.lower()
+    if "15m" in low or "15分钟" in g or "15分" in g:
+        timeframe = "15m"
+    elif "1h" in low or "1小时" in g or "小时" in g:
+        timeframe = "1h"
+    elif "4h" in low or "4小时" in g:
+        timeframe = "4h"
+    elif "1d" in low or "日线" in g:
+        timeframe = "1d"
+    else:
+        timeframe = "4h"
+    target_return = None
+    m = re.search(r'年化\s*(\d+(?:\.\d+)?)\s*%', g) or re.search(r'(\d+(?:\.\d+)?)\s*%\s*年化', g)
+    if m:
+        target_return = float(m.group(1))
+    strategy_style = "综合"
+    for k, v in (("高频", "高频"), ("趋势", "趋势跟踪"), ("均值回归", "均值回归"),
+                 ("动量", "动量"), ("突破", "突破"), ("日内", "日内")):
+        if k in g:
+            strategy_style = v
+            break
+    return {"symbol": symbol, "timeframe": timeframe,
+            "strategy_style": strategy_style, "target_return": target_return}
+
+
+def build_strategy_config(indicators, asset="ETH", timeframe="4h",
+                          leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL,
+                          strategy_style=None, entry_rules=None, exit_rules=None,
+                          risk_parameters=None, target_return=None):
+    """生成完整 strategy_config（asset/timeframe/indicators/entry_rules/exit_rules/leverage/risk_parameters）。
+
+    保证 hypothesis 永远携带非空 strategy_config（禁止空假设）。entry_rules/exit_rules
+    缺省时按指标角色 + TP/SL 自动生成，绝不返回空列表。
+    """
+    indicators = [n for n in (indicators or []) if n]
+    cats = [_class_of(n) for n in indicators]
+    primary = next((c for c in cats if c in _PRIMARY_CLASSES), (cats[0] if cats else None))
+    style = strategy_style or _style_of(primary)
+    if not entry_rules:
+        main = " + ".join(indicators[:2]) if indicators else "指标"
+        entry_rules = [f"{main} 给出同向信号", "确认指标全部共振（AND）时开仓"]
+    if not exit_rules:
+        exit_rules = [f"固定止盈 {tp_pct}%", f"固定止损 {sl_pct}%", "信号反向 / 趋势破坏时平仓"]
+    if risk_parameters is None:
+        risk_parameters = {"tp_pct": tp_pct, "sl_pct": sl_pct,
+                           "leverage": leverage, "pos_mode": "fixed_risk"}
+    return {
+        "asset": asset, "timeframe": timeframe,
+        "strategy_style": style, "frequency": _freq_of(timeframe),
+        "indicators": indicators,
+        "entry_rules": entry_rules,
+        "exit_rules": exit_rules,
+        "leverage": leverage,
+        "risk_parameters": risk_parameters,
+        "target_return": target_return,
+    }
+
 
 def _loads(v):
     if isinstance(v, (list, dict)):
@@ -236,6 +319,8 @@ def combo_to_hypothesis(combo_names, goal, asset="ETH", timeframe="4h",
     primary = next((c for c in cats if c in _PRIMARY_CLASSES), cats[0])
     regime = _REGIME_BY_CLASS.get(primary, "通用")
     logic = "；".join(f"{n}：{roles.get(n, '辅助信号')}" for n in combo_names)
+    strategy_config = build_strategy_config(combo_names, asset, timeframe, leverage,
+                                            tp_pct, sl_pct, strategy_style=_style_of(primary))
     return {
         "hypothesis_text": f"{' + '.join(combo_names)}组合",
         "user_goal": goal,
@@ -247,6 +332,9 @@ def combo_to_hypothesis(combo_names, goal, asset="ETH", timeframe="4h",
         "expected_market_condition": regime,
         "failure_environment": "震荡市" if regime != "趋势行情" else "趋势反转/低波动",
         "risk_assumption": f"预期 Sharpe ≥ {CRITERIA['sharpe_min']}，最大回撤 < {CRITERIA['mdd_max']:.0f}%",
+        "strategy_style": strategy_config["strategy_style"],
+        "frequency": strategy_config["frequency"],
+        "strategy_config": strategy_config,
     }
 
 
@@ -596,6 +684,9 @@ JSON 结构（字段名固定）：
   "leverage": 2,
   "tp_pct": 8.0,
   "sl_pct": 4.0,
+  "strategy_style": "趋势跟踪",
+  "entry_rules": ["开仓条件1", "开仓条件2"],
+  "exit_rules": ["平仓条件1", "平仓条件2"],
   "expected_logic": "策略逻辑说明（为什么认为有效）",
   "expected_market_condition": "适用市场环境（趋势/震荡）",
   "failure_environment": "预期失效市场环境（哪些行情下会亏损）",
@@ -606,6 +697,8 @@ JSON 结构（字段名固定）：
 - 可用资产: {assets}；可用周期: {timeframes}。
 - indicators 必须从下方清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
 - params 的 key 必须用清单中给出的参数 key；值必须是数字。
+- entry_rules / exit_rules 各 1~3 条，描述具体开仓 / 平仓条件（不能为空）。
+- strategy_style 取：趋势跟踪 / 动量 / 均值回归 / 量价配合 / 高频 / 日内 之一。
 - 最多 3 个核心指标，避免堆叠冗余因子。
 - 不得生成与「失败研究记忆」指纹相同的指标组合。
 
@@ -1021,7 +1114,8 @@ def run_research_task(goal, df, coin, timeframe="4h", strategy_factory=None,
             expected_logic=hyp["expected_logic"],
             expected_market_condition=hyp["expected_market_condition"],
             risk_assumption=hyp["risk_assumption"],
-            failure_environment=hyp["failure_environment"])
+            failure_environment=hyp["failure_environment"],
+            strategy_config=hyp["strategy_config"])
         hyp["id"] = hid
         if progress:
             progress(i, total, " + ".join(combo[:2]))

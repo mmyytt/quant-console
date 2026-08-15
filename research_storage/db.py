@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS research_tasks (
 
 # Phase 2 新增字段（对已存在的旧库做 ALTER TABLE 增量迁移）
 _COLUMN_ADDITIONS = {
+    "research_sessions": {
+        "research_context": "TEXT",
+    },
     "research_hypothesis": {
         "user_goal": "TEXT",
         "asset": "TEXT",
@@ -133,6 +136,7 @@ _COLUMN_ADDITIONS = {
         "expected_market_condition": "TEXT",
         "risk_assumption": "TEXT",
         "failure_environment": "TEXT",
+        "strategy_config": "TEXT",
     },
     "strategy_experiments": {
         "hypothesis_id": "INTEGER",
@@ -217,11 +221,11 @@ def _dumps(v):
 # ------------------------------------------------------------
 # sessions
 # ------------------------------------------------------------
-def create_session(model_provider=None, title="", user_goal="") -> int:
+def create_session(model_provider=None, title="", user_goal="", research_context=None) -> int:
     return _execute(
-        "INSERT INTO research_sessions (created_time, model_provider, conversation_title, user_goal, status) "
-        "VALUES (?, ?, ?, ?, 'active')",
-        (_now(), model_provider, title, user_goal),
+        "INSERT INTO research_sessions (created_time, model_provider, conversation_title, user_goal, status, research_context) "
+        "VALUES (?, ?, ?, ?, 'active', ?)",
+        (_now(), model_provider, title, user_goal, _dumps(research_context)),
     )
 
 
@@ -237,7 +241,7 @@ def get_session(session_id):
 def update_session(session_id, **fields):
     if not fields:
         return
-    allowed = {"conversation_title", "user_goal", "status", "model_provider"}
+    allowed = {"conversation_title", "user_goal", "status", "model_provider", "research_context"}
     sets, vals = [], []
     for k, v in fields.items():
         if k in allowed:
@@ -276,15 +280,18 @@ def add_hypothesis(text, related_indicators=None, status="new",
                    user_goal=None, asset=None, timeframe=None, leverage=None,
                    parameters=None, tp_pct=None, sl_pct=None,
                    expected_logic=None, expected_market_condition=None,
-                   risk_assumption=None, failure_environment=None) -> int:
+                   risk_assumption=None, failure_environment=None,
+                   strategy_config=None) -> int:
     return _execute(
         "INSERT INTO research_hypothesis (hypothesis_text, created_time, related_indicators, status, "
         "user_goal, asset, timeframe, leverage, parameters, tp_pct, sl_pct, "
-        "expected_logic, expected_market_condition, risk_assumption, failure_environment) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "expected_logic, expected_market_condition, risk_assumption, failure_environment, "
+        "strategy_config) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (text, _now(), _dumps(related_indicators), status,
          user_goal, asset, timeframe, leverage, _dumps(parameters), tp_pct, sl_pct,
-         expected_logic, expected_market_condition, risk_assumption, failure_environment),
+         expected_logic, expected_market_condition, risk_assumption, failure_environment,
+         _dumps(strategy_config)),
     )
 
 

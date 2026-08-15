@@ -357,10 +357,10 @@ is_dual_leg = False
 with st.sidebar.form(key="config_form", clear_on_submit=False):
     st.caption(t("sidebar_title"))
     c1, c2 = st.columns(2)
-    coin = c1.selectbox(t("coin_select"), ["ETH", "BTC", "SOL"], 0)
-    timeframe = c2.selectbox(t("timeframe_select"), ["5m", "15m", "1h", "4h", "1d"], 3)
+    coin = c1.selectbox(t("coin_select"), ["ETH", "BTC", "SOL"], 0, key="coin")
+    timeframe = c2.selectbox(t("timeframe_select"), ["5m", "15m", "1h", "4h", "1d"], 3, key="timeframe")
     c1, c2 = st.columns(2)
-    leverage = c1.slider(t("leverage_label"), 1, 20, 3, 1)
+    leverage = c1.slider(t("leverage_label"), 1, 20, 3, 1, key="leverage")
     initial_capital = c2.number_input(t("capital_label"), 100, 1000000, 10000, 1000)
     st.caption(t("direction_control"))
     c1, c2 = st.columns(2)
@@ -486,11 +486,11 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         c1, c2 = st.columns(2)
         use_margin_tp = "Margin" in tp_mode
         tp_label = t("margin_tp_pct") if use_margin_tp else t("price_tp_pct")
-        tp_pct = c1.slider(tp_label, 2.0, 50.0, 10.0, 0.5,
+        tp_pct = c1.slider(tp_label, 2.0, 50.0, 10.0, 0.5, key="tp_pct",
             help=t("tp_help_margin") if use_margin_tp else t("tp_help_price"))
         use_margin_sl = "Margin" in sl_mode
         sl_label = t("margin_sl_pct") if use_margin_sl else t("price_sl_pct")
-        sl_pct = c2.slider(sl_label, 1.0, 30.0, 5.0, 0.5,
+        sl_pct = c2.slider(sl_label, 1.0, 30.0, 5.0, 0.5, key="sl_pct",
             help=t("sl_help_margin") if use_margin_sl else t("sl_help_price"))
 
         # ── 市场系数 (动态标签) ──
@@ -888,6 +888,9 @@ if "AI" in st.session_state.active_tab:
             st.session_state.research_goal = (cur_session["user_goal"] if cur_session and cur_session["user_goal"] else "")
         def _on_goal_change():
             db.update_session(st.session_state.research_session_id, user_goal=st.session_state.research_goal)
+            ctx = rl.parse_research_context(st.session_state.research_goal)
+            db.update_session(st.session_state.research_session_id,
+                              research_context=json.dumps(ctx, ensure_ascii=False))
         st.text_input(t("research_goal_label"), key="research_goal",
                       placeholder=t("research_goal_placeholder"), on_change=_on_goal_change)
     with bcol:
@@ -969,6 +972,9 @@ if "AI" in st.session_state.active_tab:
     def _norm_asset(a):
         a = str(a or "ETH").strip().upper()
         return a if a in ("ETH", "BTC", "SOL") else "ETH"
+
+    def _freq_of(tf):
+        return {"15m": "高频", "1h": "日内", "4h": "波段", "1d": "低频"}.get(str(tf or "").lower(), "波段")
 
     def _js(v):
         if isinstance(v, (list, dict)):
@@ -1113,19 +1119,33 @@ if "AI" in st.session_state.active_tab:
                             st.error(t("rl_no_valid_indicators"))
                         else:
                             warn = rl.duplicate_warning(indicators, spec.get("params"))
+                            _h_asset = _norm_asset(spec.get("asset"))
+                            _h_tf = _norm_tf(spec.get("timeframe"))
+                            _h_lev = float(spec.get("leverage") or 2)
+                            _h_tp = float(spec.get("tp_pct") or 8.0)
+                            _h_sl = float(spec.get("sl_pct") or 4.0)
+                            ctx = rl.parse_research_context(goal.strip())
+                            strategy_config = rl.build_strategy_config(
+                                indicators, _h_asset, _h_tf, _h_lev, _h_tp, _h_sl,
+                                strategy_style=spec.get("strategy_style") or ctx.get("strategy_style"),
+                                entry_rules=spec.get("entry_rules"),
+                                exit_rules=spec.get("exit_rules"),
+                                target_return=ctx.get("target_return"),
+                            )
                             hid = db.add_hypothesis(
                                 text=spec.get("hypothesis") or spec.get("goal") or goal.strip(),
                                 related_indicators=indicators, status="new",
                                 user_goal=spec.get("goal") or goal.strip(),
-                                asset=_norm_asset(spec.get("asset")),
-                                timeframe=_norm_tf(spec.get("timeframe")),
-                                leverage=float(spec.get("leverage") or 2),
+                                asset=_h_asset,
+                                timeframe=_h_tf,
+                                leverage=_h_lev,
                                 parameters=spec.get("params") or {},
-                                tp_pct=float(spec.get("tp_pct") or 8.0),
-                                sl_pct=float(spec.get("sl_pct") or 4.0),
+                                tp_pct=_h_tp,
+                                sl_pct=_h_sl,
                                 expected_logic=spec.get("expected_logic"),
                                 expected_market_condition=spec.get("expected_market_condition"),
                                 risk_assumption=spec.get("risk_assumption"),
+                                strategy_config=strategy_config,
                             )
                             st.session_state.rl_created = {
                                 "hid": hid, "spec": spec, "indicators": indicators,
@@ -1156,21 +1176,42 @@ if "AI" in st.session_state.active_tab:
     if not hyps:
         st.caption(t("rl_no_hypotheses"))
     for h in hyps[:8]:
+        sc = _js(h.get("strategy_config"))
+        freq = (sc or {}).get("frequency") or _freq_of(h.get("timeframe"))
+        inds = "、".join(_js(h.get("related_indicators")) or [])
         r1, r2 = st.columns([4, 1])
         with r1:
             st.markdown(f"**#{h['id']}** {h['hypothesis_text']}  \n"
-                        f"<small>{h.get('asset') or '?'} {h.get('timeframe') or '?'} · "
-                        f"{h.get('leverage') or 2}x · 状态 {h['status']}</small>",
+                        f"<small>{h.get('asset') or '?'} · {h.get('timeframe') or '?'} · {freq} · "
+                        f"{h.get('leverage') or 2}x · 状态 {h['status']}  \n"
+                        f"指标: {inds or '-'}</small>",
                         unsafe_allow_html=True)
         with r2:
             if st.button(t("rl_verify_btn"), key=f"verify_{h['id']}"):
                 with st.spinner(t("rl_verify_running")):
                     try:
                         asset = _norm_asset(h.get("asset"))
-                        df = _load_research_df(asset, _norm_tf(h.get("timeframe")))
+                        tf = _norm_tf(h.get("timeframe"))
+                        df = _load_research_df(asset, tf)
                         verdict = rl.verify_hypothesis(h, df, asset)
                         st.session_state.rl_last_verdict = verdict
                         st.session_state.rl_last_hyp = h
+                        st.session_state.pop("rl_added", None)
+                        # 自动填充回测参数栏（品种/周期/杠杆/TP/SL/指标）
+                        st.session_state["coin"] = asset
+                        st.session_state["timeframe"] = tf
+                        st.session_state["leverage"] = int(min(max(float(h.get("leverage") or 2), 1), 20))
+                        st.session_state["tp_pct"] = min(max(float(h.get("tp_pct") or 8.0), 2.0), 50.0)
+                        st.session_state["sl_pct"] = min(max(float(h.get("sl_pct") or 4.0), 1.0), 30.0)
+                        if _js(h.get("related_indicators")):
+                            st.session_state.selected_indicators = rl.build_selected(
+                                _js(h.get("related_indicators")))
+                        # 验证成功自动沉淀策略库
+                        if verdict["passed"]:
+                            entry = rl.library_entry(h, verdict["indicators"], verdict["params"],
+                                                     verdict["metrics"], verdict)
+                            db.add_strategy(**entry)
+                            st.session_state.rl_added = entry["name"]
                         st.rerun()
                     except Exception as e:
                         st.error(f"{t('rl_verify_error')}: {e}")
@@ -1219,12 +1260,6 @@ if "AI" in st.session_state.active_tab:
             else:
                 st.warning(t("rl_no_stable_region"))
 
-        if v["passed"] and st.button(t("rl_add_library"), key="rl_add_lib"):
-            entry = rl.library_entry(h, v["indicators"], v["params"], v["metrics"], v,
-                                     sensitivity=st.session_state.get("rl_sensitivity"))
-            db.add_strategy(**entry)
-            st.session_state.rl_added = entry["name"]
-            st.rerun()
         if st.session_state.get("rl_added"):
             st.success(t("rl_added_library") + ": " + st.session_state.rl_added)
         report_to_show = (sen or {}).get("report") or v["report"]
