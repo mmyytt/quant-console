@@ -811,7 +811,6 @@ if "AI" in st.session_state.active_tab:
                 asset = _norm_asset(ctx.get("symbol"))
                 tf = _norm_tf(ctx.get("timeframe"))
                 df = _load_research_df(asset, tf)
-                total = len(candidates)
                 progress_bar = st.progress(0)
                 status_text = st.empty()
 
@@ -819,12 +818,14 @@ if "AI" in st.session_state.active_tab:
                     progress_bar.progress((i + 1) / n)
                     status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
 
-                results = rl.run_strategy_search(candidates, df, asset, progress=_progress)
+                results = rl.run_parameter_search(candidates, df, asset, progress=_progress)
                 progress_bar.progress(1.0)
                 status_text.caption(t("rl_search_done"))
                 st.session_state.rl_search_results = results
                 st.session_state.rl_search_meta = {"goal": search_goal.strip(),
-                                                   "asset": asset, "tf": tf}
+                                                   "asset": asset, "tf": tf,
+                                                   "max_drawdown": ctx.get("max_drawdown"),
+                                                   "target_return": ctx.get("target_return")}
                 st.rerun()
 
     if "rl_search_results" in st.session_state:
@@ -835,15 +836,21 @@ if "AI" in st.session_state.active_tab:
         st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
         ranked = [r for r in results if not r.get("skipped")]
         skipped = [r for r in results if r.get("skipped")]
+        st.caption(t("rl_search_hint_rank"))
         if ranked:
             rows = []
             for idx, r in enumerate(ranked[:10], 1):
                 v = r["verdict"]
                 m = v["metrics"]
                 sc = v["score"]
+                combo = r.get("combo") or {}
                 rows.append({
                     "排名": idx,
                     "指标组合": " + ".join(v["indicators"][:3]) or "-",
+                    "参数变体": combo.get("label") or "基准",
+                    "杠杆": v.get("leverage"),
+                    "TP%": v.get("tp_pct"),
+                    "SL%": v.get("sl_pct"),
                     "总收益%": round(m.get("total_return") or 0, 1),
                     "年化%": round(m.get("annual_return") or 0, 1),
                     "Sharpe": round(m.get("sharpe") or 0, 2),
@@ -858,14 +865,17 @@ if "AI" in st.session_state.active_tab:
             st.dataframe(pd.DataFrame(rows))
             for idx, r in enumerate(ranked[:10], 1):
                 v = r["verdict"]
-                title = f"#{idx} {v['score']['grade']} · {' + '.join(v['indicators'][:3])} · 评分 {v['score']['total']}"
+                combo = r.get("combo") or {}
+                title = f"#{idx} {v['score']['grade']} · {' + '.join(v['indicators'][:3])} · {combo.get('label') or '基准'} · 评分 {v['score']['total']}"
                 with st.expander(title):
                     st.markdown(v["report"])
         if skipped:
             st.markdown(f"**{t('rl_search_skipped')}**")
             for r in skipped:
                 inds = "、".join(r.get("indicators") or []) or "-"
-                st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）：{r.get('reason')}")
+                combo = (r.get("combo") or {}).get("label")
+                tail = f"（{combo}）" if combo else ""
+                st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）{tail}：{r.get('reason')}")
 
     # --- 一、创建研究任务 ---
     with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
@@ -1007,7 +1017,8 @@ if "AI" in st.session_state.active_tab:
                      oos=sc["oos"], param=sc["param_stability"], mc=sc["monte_carlo"]))
 
         if st.session_state.get("rl_added"):
-            st.success(t("rl_added_library") + ": " + st.session_state.rl_added)
+            st.info(t("rl_pending_review") + ": " + st.session_state.rl_added)
+            st.caption(t("rl_review_hint"))
         with st.expander(t("rl_report"), expanded=True):
             st.markdown(v["report"])
 
@@ -1022,7 +1033,7 @@ if "AI" in st.session_state.active_tab:
                 "核心指标": "、".join(_js(s.get("core_indicators"))),
                 t("rl_overfitting"): s.get("overfitting_risk") or "-",
                 t("rl_validation_count"): s.get("validation_count") or 0,
-                "状态": s.get("status"),
+                "状态": t("rl_status_" + str(s.get("status") or "draft")),
             } for s in strat_rows]))
             for s in strat_rows:
                 roles = _js(s.get("indicator_roles"))

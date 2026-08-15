@@ -147,6 +147,8 @@ _COLUMN_ADDITIONS = {
         "fingerprint": "TEXT",
         "overfitting_risk": "TEXT",
         "param_stability": "REAL",
+        "tp_pct": "REAL",
+        "sl_pct": "REAL",
     },
     "strategy_library": {
         "applicable_market": "TEXT",
@@ -323,20 +325,21 @@ def add_experiment(strategy_name=None, indicator_combination=None, parameters=No
                    monte_carlo_score=None, final_rating=None,
                    hypothesis_id=None, oos_return=None, research_score=None,
                    grade=None, failure_reason=None, fingerprint=None,
-                   overfitting_risk=None, param_stability=None) -> int:
+                   overfitting_risk=None, param_stability=None,
+                   tp_pct=None, sl_pct=None) -> int:
     return _execute(
         "INSERT INTO strategy_experiments (strategy_name, indicator_combination, parameters, asset, "
         "timeframe, leverage, backtest_time, total_return, annual_return, sharpe, max_drawdown, "
         "win_rate, trade_count, walk_forward_score, monte_carlo_score, final_rating, "
         "hypothesis_id, oos_return, research_score, grade, failure_reason, fingerprint, "
-        "overfitting_risk, param_stability) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "overfitting_risk, param_stability, tp_pct, sl_pct) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (strategy_name, _dumps(indicator_combination), _dumps(parameters), asset,
          timeframe, leverage, backtest_time or _now(),
          total_return, annual_return, sharpe, max_drawdown, win_rate, trade_count,
          walk_forward_score, monte_carlo_score, final_rating,
          hypothesis_id, oos_return, research_score, grade, failure_reason, fingerprint,
-         overfitting_risk, param_stability),
+         overfitting_risk, param_stability, tp_pct, sl_pct),
     )
 
 

@@ -99,6 +99,65 @@ def main():
 
     print(f"[OK] 2. run_strategy_search：真实 verify 链路跑通（{len(progress_log)} 步回调），排序正确")
     print(f"[OK] 3. 失败记忆去重：相同指标组合第二次被跳过（{dup['reason']}）")
+
+    # 4) V3 参数空间搜索：full_fingerprint / expand_parameter_grid / run_parameter_search
+    fp1 = rl.full_fingerprint(["EMA 双均线"], {"EMA 双均线": {"EMA_short": 7}}, 2, 8.0, 4.0)
+    fp2 = rl.full_fingerprint(["EMA 双均线"], {"EMA 双均线": {"EMA_short": 50}}, 2, 8.0, 4.0)
+    fp3 = rl.full_fingerprint(["EMA 双均线"], {"EMA 双均线": {"EMA_short": 7}}, 5, 8.0, 4.0)
+    assert fp1 != fp2, "不同参数应产生不同完整指纹"
+    assert fp1 != fp3, "不同杠杆应产生不同完整指纹"
+    assert fp1 == rl.full_fingerprint(["EMA 双均线"], {"EMA 双均线": {"EMA_short": 7}}, 2, 8.0, 4.0)
+    print(f"[OK] 4. full_fingerprint：指标+参数+杠杆+TP/SL 全纳入，参数不同指纹不同")
+
+    direction = {"indicators": ["EMA 双均线"], "params": {}, "leverage": 2, "tp_pct": 8.0, "sl_pct": 4.0}
+    combos = rl.expand_parameter_grid(direction, max_combos=20)
+    labels = [c["label"] for c in combos]
+    assert any("杠杆" in l for l in labels), "应包含杠杆扫描"
+    assert any("TP" in l for l in labels), "应包含 TP/SL 扫描"
+    assert any("EMA_short" in l for l in labels), "应包含指标主参数扫描"
+    assert combos[0]["label"] == "基准参数", "第一个应为基准参数"
+    assert len(combos) <= 20, "应受 max_combos 上限约束"
+    # 去重：组合无完全重复
+    fps = [rl.full_fingerprint(direction["indicators"], c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"]) for c in combos]
+    assert len(fps) == len(set(fps)), "展开后不应有完全重复组合"
+    print(f"[OK] 5. expand_parameter_grid：杠杆/TP·SL/主参数三轴展开（{len(combos)} 组合），有界且去重")
+
+    _orig_bt = rl.run_hypothesis_backtest
+
+    def _fake_backtest(df, coin, indicator_names, param_overrides=None,
+                       leverage=2, tp_pct=8.0, sl_pct=4.0, strategy_factory=None):
+        # 用参数产生可区分的 sharpe，验证排序
+        s = 0.5 + (param_overrides or {}).get(indicator_names[0], {}).get("EMA_short", 7) / 100.0
+        return {"total_return": 10.0, "annual_return": 15.0, "sharpe": s, "max_drawdown": 12.0,
+                "win_rate": 0.5, "profit_factor": 1.4, "trade_count": 40, "max_consecutive_losses": 4,
+                "leak_count": 0, "oos_return": 4.0, "oos_sharpe": 0.9, "oos_mdd": 8.0, "oos_trades": 10,
+                "mc_p5": 1.0, "wf_avg_oos": 2.0, "wf_profit_ratio": 55.0, "wf_windows": 3, "wf_profitable": 2}
+
+    try:
+        rl.run_hypothesis_backtest = _fake_backtest
+        directions = [
+            {"hypothesis": "方向A", "indicators": ["EMA 双均线"], "params": {},
+             "asset": "ETH", "timeframe": "1h", "leverage": 2, "tp_pct": 8.0, "sl_pct": 4.0,
+             "expected_logic": "趋势", "expected_market_condition": "趋势",
+             "failure_environment": "震荡", "risk_assumption": "回撤<20%"},
+            {"hypothesis": "坏方向", "indicators": ["不存在的指标XYZ"], "params": {}},
+        ]
+        results = rl.run_parameter_search(directions, df, "ETH")
+        ok = [r for r in results if not r.get("skipped")]
+        skipped = [r for r in results if r.get("skipped")]
+        assert len(ok) >= 1, "至少一个有效方向应有实验"
+        assert any(r["reason"] == "无有效指标" for r in skipped), "无效方向应跳过"
+        # 排序降序
+        scores = [r["verdict"]["score"]["total"] for r in ok]
+        assert scores == sorted(scores, reverse=True), f"未按综合分降序: {scores}"
+        # 每个有效实验都落库（含 tp_pct/sl_pct）
+        exps = db.list_experiments(500)
+        assert any(e.get("tp_pct") is not None for e in exps), "实验应记录 tp_pct"
+        assert any(e.get("sl_pct") is not None for e in exps), "实验应记录 sl_pct"
+        print(f"[OK] 6. run_parameter_search：方向展开 + 逐个回测 + 落库（tp/sl）+ 降序排名（{len(ok)} 实验）")
+    finally:
+        rl.run_hypothesis_backtest = _orig_bt
+
     print("\nALL SEARCH TESTS PASSED")
 
 

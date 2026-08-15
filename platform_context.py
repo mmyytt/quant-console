@@ -101,7 +101,11 @@ def format_context_text() -> str:
         for ind in inds:
             params = ind["params"]
             if params:
-                plist = ", ".join(f"{pv['label']}={pv['default']}" for pv in params.values())
+                plist = ", ".join(
+                    f"{pv['label']}={pv['default']}({pv['min']}~{pv['max']})"
+                    if ("min" in pv and "max" in pv) else f"{pv['label']}={pv['default']}"
+                    for pv in params.values()
+                )
             else:
                 plist = "无参数"
             lines.append(f"- {ind['name']}: {ind['desc']}；参数: {plist}")

@@ -122,6 +122,10 @@ def parse_research_context(goal):
     m = re.search(r'年化\s*(\d+(?:\.\d+)?)\s*%', g) or re.search(r'(\d+(?:\.\d+)?)\s*%\s*年化', g)
     if m:
         target_return = float(m.group(1))
+    max_drawdown = None
+    m2 = re.search(r'(?:最大)?回撤\s*(?:低于|不超过|控制在|小于|≤|<=)?\s*(\d+(?:\.\d+)?)\s*%', g)
+    if m2:
+        max_drawdown = float(m2.group(1))
     strategy_style = "综合"
     for k, v in (("高频", "高频"), ("趋势", "趋势跟踪"), ("均值回归", "均值回归"),
                  ("动量", "动量"), ("突破", "突破"), ("日内", "日内")):
@@ -129,7 +133,8 @@ def parse_research_context(goal):
             strategy_style = v
             break
     return {"symbol": symbol, "timeframe": timeframe,
-            "strategy_style": strategy_style, "target_return": target_return}
+            "strategy_style": strategy_style, "target_return": target_return,
+            "max_drawdown": max_drawdown}
 
 
 def build_strategy_config(indicators, asset="ETH", timeframe="4h",
@@ -220,6 +225,26 @@ def indicator_keys(indicator_names):
 def fingerprint(indicator_names):
     """生成唯一指纹，如 ['EMA 双均线','量比 Volume Ratio'] → 'EMA_VOLUME_RATIO'。"""
     return "_".join(indicator_keys(indicator_names)).upper()
+
+
+def full_fingerprint(indicator_names, param_overrides=None, leverage=None, tp_pct=None, sl_pct=None):
+    """完整实验指纹 = 指标组合 + 指标参数 + 杠杆 + TP/SL。
+
+    与 fingerprint 的区别：把参数/风控也纳入，用于「完全重复实验」去重。
+    同一指标组合但参数不同 → 不同指纹（这正是参数搜索要测试的变体，不能误跳过）。
+    """
+    base = fingerprint(indicator_names)
+    seg = []
+    for name in sorted(param_overrides or {}):
+        for k in sorted(param_overrides[name] or {}):
+            seg.append(f"{_NAME_TO_KEY.get(name, name)}.{k}={param_overrides[name][k]}")
+    if leverage is not None:
+        seg.append(f"lev={leverage}")
+    if tp_pct is not None:
+        seg.append(f"tp={tp_pct}")
+    if sl_pct is not None:
+        seg.append(f"sl={sl_pct}")
+    return (base + "#" + "&".join(seg)).upper() if seg else base
 
 
 def indicator_roles(indicator_names):
@@ -546,6 +571,13 @@ def build_report(hyp, indicators, params, m, verdict, sensitivity=None):
     L.append("## 为什么认为有效")
     L.append(hyp.get("expected_logic") or "-")
     L.append("")
+    L.append("## 交易逻辑")
+    L.append(f"- 策略类型：{hyp.get('strategy_style') or '-'}")
+    for r in hyp.get("entry_rules") or []:
+        L.append(f"- 开仓：{r}")
+    for r in hyp.get("exit_rules") or []:
+        L.append(f"- 平仓：{r}")
+    L.append("")
     L.append("## 使用因子解释")
     for name in indicators:
         L.append(f"- **{name}**：{roles.get(name, '辅助信号')}")
@@ -559,6 +591,7 @@ def build_report(hyp, indicators, params, m, verdict, sensitivity=None):
         L.append(f"- {name}: {row}")
     L.append(f"- 杠杆 {verdict.get('leverage', hyp.get('leverage'))}x · "
              f"TP {verdict.get('tp_pct', hyp.get('tp_pct'))}% · SL {verdict.get('sl_pct', hyp.get('sl_pct'))}%")
+    L.append("- 仓位/加仓：固定单仓（引擎默认，本轮参数搜索不覆盖仓位与加仓逻辑）")
     L.append("")
     L.append("## 历史表现（样本内）")
     L.append(f"- 总收益 {_f(m.get('total_return'))}% · 年化 {_f(m.get('annual_return'))}%")
@@ -635,7 +668,7 @@ def library_entry(hyp, indicators, params, m, verdict, sensitivity=None):
         "failure_env": hyp.get("failure_environment") or hyp.get("risk_assumption"),
         "research_score": score["total"],
         "grade": score["grade"],
-        "status": "passed" if verdict["passed"] else "candidate",
+        "status": "pending_review" if verdict["passed"] else "candidate",
         "indicator_roles": indicator_roles(indicators),
         "param_stable_range": (sensitivity or {}).get("stable_ranges"),
         "overfitting_risk": (sensitivity or {}).get("overfitting"),
@@ -708,13 +741,14 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
 # 九、策略搜索模式（V2：多候选生成 → 去重 → 自动回测 → 排名）
 # ============================================================
 def search_prompt(goal, assets="ETH, BTC, SOL", timeframes="5m, 15m, 1h, 4h, 1d"):
-    """让 LLM 一次生成 10 个不同指标组合的策略候选（JSON 数组）。"""
+    """让 LLM 生成 5~8 个不同的策略方向（指标组合 + 默认参数），参数搜索由系统展开。"""
     from platform_context import format_context_text
     return f"""你是 QuantCode 的量化研究助手。用户研究目标是：
 "{goal}"
 
-你的任务：解析研究目标 → 生成 10 个不同的、可回测的策略候选。
-严格要求：只输出 JSON 数组（10 个元素），不要输出任何其他文字或解释。
+你的任务：解析研究目标 → 提出 5~8 个不同的「策略方向」（每个方向 = 一组指标组合 + 一套默认参数）。
+系统会在每个方向上自动做参数空间搜索（杠杆 / 止盈止损 / 指标主参数），无需你穷举所有参数组合。
+严格要求：只输出 JSON 数组（5~8 个元素），不要输出任何其他文字或解释。
 
 JSON 结构（数组，每个元素字段名固定）：
 [
@@ -735,17 +769,17 @@ JSON 结构（数组，每个元素字段名固定）：
     "failure_environment": "预期失效市场环境（哪些行情下会亏损）",
     "risk_assumption": "风险假设（预期最大回撤/胜率等）"
   }},
-  ...（共 10 个，指标组合尽量互不相同、覆盖不同类别）
+  ...（共 5~8 个，方向尽量覆盖不同类别：趋势/突破/均值回归/量价）
 ]
 
 约束：
 - 可用资产: {assets}；可用周期: {timeframes}。
-- 10 个候选的指标组合必须互不相同（尽量覆盖不同类别，避免全部同类堆叠）。
-- 每个候选的 indicators 必须从下方「平台能力」的指标清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
-- params 的 key 必须用清单中给出的参数 key；值必须是数字。
+- 5~8 个方向的指标组合必须互不相同（覆盖不同类别，避免全部同类堆叠）。
+- 每个方向的 indicators 必须从下方「平台能力」的指标清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
+- params 的 key 必须用清单中给出的参数 key；值必须是数字，且落在清单给出的 min~max 范围内。
 - entry_rules / exit_rules 各 1~3 条，描述具体开仓 / 平仓条件（不能为空）。
 - strategy_style 取：趋势跟踪 / 动量 / 均值回归 / 量价配合 / 高频 / 日内 之一。
-- 每个候选独立完整，字段不能为空。
+- 每个方向独立完整，字段不能为空。
 
 ## 平台能力（quant_context，必须以此为准）
 {format_context_text()}
@@ -794,6 +828,9 @@ def _spec_to_hyp(spec, indicators, coin):
         "expected_logic": spec.get("expected_logic"),
         "expected_market_condition": spec.get("expected_market_condition"),
         "user_goal": spec.get("goal"),
+        "strategy_style": spec.get("strategy_style"),
+        "entry_rules": spec.get("entry_rules"),
+        "exit_rules": spec.get("exit_rules"),
     }
 
 
@@ -828,6 +865,158 @@ def run_strategy_search(candidates, df, coin, progress=None):
             results.append({"spec": spec, "indicators": indicators, "skipped": True,
                             "reason": f"回测异常: {e}"})
     # 按综合分降序（跳过项 score 视为 -inf，排最后）
+    results.sort(key=lambda r: (r.get("verdict") or {}).get("score", {}).get("total", -999.0),
+                 reverse=True)
+    return results
+
+
+# ============================================================
+# 十、参数空间搜索（V3：方向探索 → 参数组合搜索 → 排名）
+# ============================================================
+# 搜索维度（有界，防组合爆炸；仓位/加仓未在引擎独立暴露，不在搜索列）
+LEVERAGE_GRID = [1, 2, 3, 5, 10]
+TPSL_GRID = [(8.0, 4.0), (4.0, 2.0), (15.0, 6.0), (25.0, 10.0)]
+
+
+def _param_sample_values(schema_key):
+    """取某指标第一个带 min/max 的参数，采样 [min, default, max] 三点（去重排序）。"""
+    s = INDICATOR_SCHEMA.get(schema_key)
+    if not s or not s.get("params"):
+        return []
+    for pk, pv in s["params"].items():
+        if "min" in pv and "max" in pv:
+            vals = sorted({pv["min"], pv["default"], pv["max"]})
+            return [(pk, vals)]
+    return []
+
+
+def expand_parameter_grid(direction, max_combos=20):
+    """把一个策略方向展开为有界参数组合列表（一次性扫描：杠杆/TP·SL/主参数）。
+
+    direction: {"indicators": [...], "params": {显示名: {参数key: 值}}, "leverage", "tp_pct", "sl_pct"}
+    返回: [{"label", "param_overrides", "leverage", "tp_pct", "sl_pct"}, ...]（已去重）
+    """
+    indicators = direction.get("indicators") or []
+    base_params = direction.get("params") or {}
+    lev0 = direction.get("leverage") or DEFAULT_LEVERAGE
+    tp0 = direction.get("tp_pct") if direction.get("tp_pct") is not None else DEFAULT_TP
+    sl0 = direction.get("sl_pct") if direction.get("sl_pct") is not None else DEFAULT_SL
+
+    combos = []
+
+    def _add(label, params, lev, tp, sl):
+        combos.append({"label": label, "param_overrides": params,
+                       "leverage": lev, "tp_pct": tp, "sl_pct": sl})
+
+    # 1. 基准
+    _add("基准参数", base_params, lev0, tp0, sl0)
+    # 2. 杠杆扫描（保持参数/TP·SL 默认）
+    for lev in LEVERAGE_GRID:
+        _add(f"杠杆 {lev}x", base_params, lev, tp0, sl0)
+    # 3. TP/SL 扫描（保持参数/杠杆默认）
+    for tp, sl in TPSL_GRID:
+        _add(f"TP{tp:g}%/SL{sl:g}%", base_params, lev0, tp, sl)
+    # 4. 指标主参数扫描（每个指标取主参数 min/default/max，一次只动一个维度）
+    for name in indicators:
+        key = _NAME_TO_KEY.get(name)
+        for pk, vals in _param_sample_values(key):
+            for v in vals:
+                po = {n: dict(p) for n, p in base_params.items()}
+                po.setdefault(name, {})[pk] = v
+                _add(f"{name} {pk}={v}", po, lev0, tp0, sl0)
+
+    # 完全重复（指标+参数+杠杆+TP/SL 相同）去重
+    seen, out = set(), []
+    for c in combos:
+        fp = full_fingerprint(indicators, c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"])
+        if fp in seen:
+            continue
+        seen.add(fp)
+        out.append(c)
+    return out[:max_combos]
+
+
+def run_parameter_search(directions, df, coin, progress=None, max_combos_per_direction=20):
+    """系统化参数空间搜索：每个方向展开参数组合 → 逐个回测 → 记录 → 按综合分排名。
+
+    与 run_strategy_search（V2 固定候选）不同：这里对每个方向做「杠杆/TP·SL/主参数」
+    一次性扫描，复用 run_hypothesis_backtest（完整 IS/OOS/WF/MC），每个组合都落实验库 +
+    失败记忆（全指纹去重）。progress(i, total, label) 为全局进度。
+    """
+    # 先展开全部任务（方向 × 参数组合），便于全局进度与总数
+    tasks = []  # (spec, indicators, combo|None)
+    for spec in directions:
+        indicators, _inv = normalize_indicators(spec.get("indicators"))
+        if not indicators:
+            tasks.append((spec, [], None))
+            continue
+        direction = {"indicators": indicators, "params": spec.get("params") or {},
+                     "leverage": spec.get("leverage"), "tp_pct": spec.get("tp_pct"),
+                     "sl_pct": spec.get("sl_pct")}
+        for combo in expand_parameter_grid(direction, max_combos_per_direction):
+            tasks.append((spec, indicators, combo))
+
+    total = len(tasks)
+    results = []
+    for i, (spec, indicators, combo) in enumerate(tasks):
+        label = spec.get("hypothesis") or f"方向 {i + 1}"
+        if combo is None:
+            if progress:
+                progress(i, total, label)
+            results.append({"spec": spec, "indicators": [], "skipped": True, "reason": "无有效指标"})
+            continue
+        if progress:
+            progress(i, total, f"{label} · {combo['label']}")
+
+        fp = full_fingerprint(indicators, combo["param_overrides"],
+                              combo["leverage"], combo["tp_pct"], combo["sl_pct"])
+        if _previously_failed(fp):
+            results.append({"spec": spec, "indicators": indicators, "combo": combo,
+                            "skipped": True, "reason": "历史失败（相同参数组合）"})
+            continue
+
+        try:
+            m = run_hypothesis_backtest(df, coin, indicators, combo["param_overrides"],
+                                        combo["leverage"], combo["tp_pct"], combo["sl_pct"])
+            passed, failures = judge_pass(m)
+            score = research_score(m)
+            name = " + ".join(indicators[:3]) if indicators else "未命名策略"
+            exp_id = db.add_experiment(
+                strategy_name=name, indicator_combination=indicators,
+                parameters=combo["param_overrides"], asset=coin,
+                timeframe=spec.get("timeframe"), leverage=combo["leverage"],
+                tp_pct=combo["tp_pct"], sl_pct=combo["sl_pct"],
+                total_return=m.get("total_return"), annual_return=m.get("annual_return"),
+                sharpe=m.get("sharpe"), max_drawdown=m.get("max_drawdown"),
+                win_rate=m.get("win_rate"), trade_count=m.get("trade_count"),
+                walk_forward_score=m.get("wf_profit_ratio"), monte_carlo_score=m.get("mc_p5"),
+                final_rating=score["grade"], oos_return=m.get("oos_return"),
+                research_score=score["total"], grade=score["grade"],
+                failure_reason="；".join(failures) if failures else None, fingerprint=fp,
+            )
+            verdict = {"passed": passed, "failures": failures, "score": score, "metrics": m,
+                       "indicators": indicators, "params": combo["param_overrides"],
+                       "coin": coin, "leverage": combo["leverage"], "tp_pct": combo["tp_pct"],
+                       "sl_pct": combo["sl_pct"], "fingerprint": fp, "experiment_id": exp_id}
+            hyp = _spec_to_hyp(spec, indicators, coin)
+            hyp["parameters"] = combo["param_overrides"]
+            verdict["report"] = build_report(hyp, indicators, combo["param_overrides"], m, verdict)
+            if not passed:
+                db.add_failure_memory(
+                    strategy_name=name, indicator_combination=indicators,
+                    parameters=combo["param_overrides"], fingerprint=fp,
+                    failure_reason="；".join(failures) if failures else None,
+                    failure_env=spec.get("failure_environment") or spec.get("risk_assumption"),
+                    metrics={"sharpe": m.get("sharpe"), "oos_return": m.get("oos_return"),
+                             "max_drawdown": m.get("max_drawdown"), "trade_count": m.get("trade_count")},
+                    failure_category=classify_failure(m), avoid=1,
+                )
+            results.append({"spec": spec, "indicators": indicators, "combo": combo,
+                            "verdict": verdict, "skipped": False})
+        except Exception as e:
+            results.append({"spec": spec, "indicators": indicators, "combo": combo,
+                            "skipped": True, "reason": f"回测异常: {e}"})
+
     results.sort(key=lambda r: (r.get("verdict") or {}).get("score", {}).get("total", -999.0),
                  reverse=True)
     return results

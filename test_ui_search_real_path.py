@@ -45,22 +45,24 @@ def main():
     assert not missing, f"research_loop 缺失方法/常量: {missing}"
     print(f"[OK] 1. app.py 调用 rl.{', rl.'.join(rl_calls)} 全部存在")
 
-    # 2) 四个核心接口签名一致（名称 + 首参）
+    # 2) 核心接口签名一致（名称 + 首参）
     sig = {
         "search_prompt": list(inspect.signature(rl.search_prompt).parameters),
         "parse_hypothesis_array": list(inspect.signature(rl.parse_hypothesis_array).parameters),
         "run_strategy_search": list(inspect.signature(rl.run_strategy_search).parameters),
+        "run_parameter_search": list(inspect.signature(rl.run_parameter_search).parameters),
         "verify_hypothesis": list(inspect.signature(rl.verify_hypothesis).parameters),
     }
     assert sig["search_prompt"][0] == "goal"
     assert sig["parse_hypothesis_array"][0] == "text"
     assert sig["run_strategy_search"][:3] == ["candidates", "df", "coin"]
+    assert sig["run_parameter_search"][:3] == ["directions", "df", "coin"]
     assert sig["verify_hypothesis"][:3] == ["hyp", "df", "coin"]
-    print("[OK] 2. 四个核心接口签名一致（search_prompt/parse_hypothesis_array/run_strategy_search/verify_hypothesis）")
+    print("[OK] 2. 核心接口签名一致（search_prompt/parse_hypothesis_array/run_strategy_search/run_parameter_search/verify_hypothesis）")
 
     # 3) AppTest 真实点击路径：登录 → 填 Key → 输入目标 → 点击搜索
     _orig_path = db.DB_PATH
-    _orig_verify = rl.verify_hypothesis
+    _orig_bt = rl.run_hypothesis_backtest
     _orig_mtf = engine_core.DataEngine.get_multi_timeframe
     _orig_call = llm_client.call_unified_api
     try:
@@ -68,29 +70,29 @@ def main():
         db.DB_PATH = os.path.join(tmp, "search.db")
         db.init_db()
 
-        # mock 网络 LLM：返回 1 个有效候选 + 1 个无效指标候选（走真实 run_strategy_search 编排）
+        # mock 网络 LLM：返回 1 个有效方向 + 1 个无效指标方向（走真实 run_parameter_search 编排）
         fake_candidates = json.dumps([
             {"hypothesis": "EMA 趋势策略", "indicators": ["EMA 双均线"], "params": {},
              "asset": "ETH", "timeframe": "1h", "leverage": 2, "tp_pct": 8.0, "sl_pct": 4.0,
+             "strategy_style": "趋势跟踪", "entry_rules": ["EMA 金叉"], "exit_rules": ["EMA 死叉"],
              "expected_logic": "趋势", "expected_market_condition": "趋势",
              "failure_environment": "震荡", "risk_assumption": "回撤<20%"},
-            {"hypothesis": "坏候选", "indicators": ["不存在的指标XYZ"], "params": {}},
+            {"hypothesis": "坏方向", "indicators": ["不存在的指标XYZ"], "params": {}},
         ])
         llm_client.call_unified_api = lambda messages, api_key, model_name, trading_notes: {
             "success": True, "content": fake_candidates,
         }
 
-        # mock 回测（不跑重计算）：返回完整 verdict，让排名表渲染路径执行
-        rl.verify_hypothesis = lambda hyp, df, coin, strategy_factory=None: {
-            "passed": True, "failures": [],
-            "score": {"total": 82, "grade": "B", "return": 12.0, "sharpe": 1.5, "mdd": 9.0,
-                      "oos": 6.0, "param_stability": 60, "monte_carlo": 70},
-            "metrics": {"sharpe": 1.5, "total_return": 12.0, "annual_return": 18.0,
-                        "max_drawdown": 9.0, "win_rate": 0.52, "trade_count": 35, "oos_return": 6.0},
-            "indicators": ["EMA 双均线"], "params": {}, "coin": "ETH",
-            "leverage": 2, "tp_pct": 8.0, "sl_pct": 4.0,
-            "fingerprint": "", "experiment_id": 1, "report": "stub report",
-        }
+        # mock 回测（不跑重计算）：返回完整 metrics，让真实 run_parameter_search 编排执行
+        def _fake_backtest(df, coin, indicator_names, param_overrides=None,
+                           leverage=2, tp_pct=8.0, sl_pct=4.0, strategy_factory=None):
+            return {
+                "total_return": 12.0, "annual_return": 18.0, "sharpe": 1.5, "max_drawdown": 9.0,
+                "win_rate": 0.52, "profit_factor": 1.8, "trade_count": 35, "max_consecutive_losses": 3,
+                "leak_count": 0, "oos_return": 6.0, "oos_sharpe": 1.1, "oos_mdd": 7.0, "oos_trades": 12,
+                "mc_p5": 2.5, "wf_avg_oos": 3.0, "wf_profit_ratio": 66.0, "wf_windows": 3, "wf_profitable": 2,
+            }
+        rl.run_hypothesis_backtest = _fake_backtest
 
         # mock 数据加载：DatetimeIndex + 必需列
         idx = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 04:00"])
@@ -108,7 +110,7 @@ def main():
 
         # 填 API Key（启用搜索按钮）+ 研究目标
         at.text_input(key="ai_main_key").set_value("sk-test-search")
-        at.text_input(key="rl_search_goal").set_value("寻找 ETH 趋势策略")
+        at.text_input(key="rl_search_goal").set_value("寻找 ETH 趋势策略，回撤低于20%")
         at.run()
         assert not list(getattr(at, "exception", []) or []), "填参后渲染异常"
 
@@ -122,10 +124,10 @@ def main():
         # 仅容忍 Rerun 类（st.rerun 正常控制流），其余一律视为失败
         real_errs = [e for e in errs if not ("Rerun" in str(type(e).__name__) or "rerun" in str(e).lower())]
         assert not real_errs, f"点击搜索触发异常: {real_errs}"
-        print("[OK] 3. 打开AI研究舱 → 填Key → 输入目标 → 点击搜索：无 AttributeError/NameError/ImportError/StreamlitAPIException")
+        print("[OK] 3. 打开AI研究舱 → 填Key → 输入目标 → 点击搜索（参数空间搜索）：无 AttributeError/NameError/ImportError/StreamlitAPIException")
     finally:
         db.DB_PATH = _orig_path
-        rl.verify_hypothesis = _orig_verify
+        rl.run_hypothesis_backtest = _orig_bt
         engine_core.DataEngine.get_multi_timeframe = _orig_mtf
         llm_client.call_unified_api = _orig_call
 
