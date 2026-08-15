@@ -126,7 +126,7 @@ def check_data_freshness():
 
 check_data_freshness()
 
-if st.sidebar.button(t("btn_clear_cache")):
+if st.sidebar.button(t("btn_clear_cache"), key="clear_cache_btn"):
     st.cache_data.clear(); st.cache_resource.clear()
     st.rerun()
 
@@ -309,7 +309,7 @@ for label, dr, col in [
 ]:
     if col.button(label, key=f"dp_{label}"):
         st.session_state.date_range = dr; st.rerun()
-if st.sidebar.button(t("btn_all_history")):
+if st.sidebar.button(t("btn_all_history"), key="all_history_btn"):
     st.session_state.date_range = None; st.rerun()
 
 # 自定义日期选择器 (恢复!)
@@ -324,7 +324,7 @@ if dp3.button(t("btn_last_1y")):
 if dp4.button(t("btn_last_3y")):
     st.session_state.date_range = ((datetime.now()-timedelta(days=1095)).strftime("%Y-%m-%d"), datetime.now().strftime("%Y-%m-%d"))
     st.rerun()
-if st.sidebar.button(t("btn_apply_date")):
+if st.sidebar.button(t("btn_apply_date"), key="apply_date_btn"):
     st.session_state.date_range = (d_start.strftime("%Y-%m-%d"), d_end.strftime("%Y-%m-%d"))
     st.rerun()
 if st.session_state.date_range:
@@ -737,7 +737,7 @@ with st.sidebar.expander(t("preset_manager"), expanded=False):
 cur_params = {"coin": coin, "tf": timeframe, "lev": leverage,
               "tp": tp_pct, "sl": sl_pct, "indicators": list(st.session_state.selected_indicators.keys())}
 st.sidebar.markdown(export_json(cur_params), unsafe_allow_html=True)
-if st.sidebar.button(t("btn_logout")): st.session_state.logged_in = False; st.rerun()
+if st.sidebar.button(t("btn_logout"), key="logout_btn"): st.session_state.logged_in = False; st.rerun()
 
 # ============================================================
 # 缓存数据加载 (避免每次切换参数都重新读取)

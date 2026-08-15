@@ -108,6 +108,11 @@ def main():
                        if str(getattr(b, "key", "")).startswith("verify_")]
         assert len(verify_keys) >= 3, f"预期 ≥3 个验证按钮，实际 {len(verify_keys)}"
 
+        # 侧边栏 4 个按钮均带唯一 key 且渲染正常（无 StreamlitAPIException / 无 auto-ID 冲突）
+        sb_keys = [str(b.key) for b in at.sidebar.button]
+        for _k in ("clear_cache_btn", "all_history_btn", "apply_date_btn", "logout_btn"):
+            assert _k in sb_keys, f"侧边栏按钮缺少 key={_k}（现有 {sb_keys}）"
+
         # 进入研究仓自动 create_session（无 AttributeError）
         sessions = db.list_sessions(1)
         assert sessions, "进入研究仓未自动创建 session"
