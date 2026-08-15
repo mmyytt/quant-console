@@ -80,11 +80,13 @@ def main():
     assert m, "验证按钮缺少唯一 key"
     print("[OK] 5. 验证按钮已绑定唯一 key（key=verify_{hypothesis_id}）")
 
-    # 5b) 侧边栏 button 必须走 `with st.sidebar:` 结构（规避 Streamlit 1.50 form 上下文判定 bug）
-    # Streamlit <1.51（PR #10752 前）st.sidebar.button() 会错误继承 form 上下文 → StreamlitAPIException
+    # 5b) 侧边栏非表单按钮必须包裹在 `with st.sidebar.container():`（独立容器，脱离 form 上下文）
+    # Streamlit form 上下文误判会把 st.sidebar.form 外的按钮当成 form 内 → StreamlitAPIException
     bad_sb = re.findall(r'st\.sidebar\.button\s*\(', src)
-    assert not bad_sb, f"仍存在 st.sidebar.button 调用（易触发 form 误判）: {bad_sb}"
-    print("[OK] 5b. 侧边栏按钮全部走 with st.sidebar: 结构（规避 Streamlit 1.50 form 判定 bug）")
+    assert not bad_sb, f"仍存在 st.sidebar.button 直接调用（易触发 form 误判）: {bad_sb}"
+    n_container = len(re.findall(r'with\s+st\.sidebar\.container\s*\(\s*\)\s*:', src))
+    assert n_container >= 4, f"侧边栏动作按钮未全部包裹进 st.sidebar.container（仅 {n_container} 处）"
+    print("[OK] 5b. 侧边栏按钮全部包裹在 with st.sidebar.container(): 中（脱离 form 上下文）")
 
     # 6) Streamlit AppTest：登录页渲染无异常（鉴权门禁先于业务 UI）
     from streamlit.testing.v1 import AppTest
