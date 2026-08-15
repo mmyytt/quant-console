@@ -4,7 +4,8 @@ UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 版本�
       无 use_container_width / width="stretch" 残留（版本无关默认布局）·
       AppTest 完整启动 + 侧边栏按钮 + AI 研究仓页面加载 ·
       验证按钮唯一 key + 多验证按钮共存（防 auto-generated ID 冲突）·
-      登录→AI 研究仓→create_session→输入目标→update_session（防 AttributeError）
+      登录→AI 研究仓→create_session→输入目标→update_session（防 AttributeError）·
+      创建任务→启动研究→重渲染（防 st.form 嵌套 button 的 StreamlitAPIException）
 运行: python test_ui_smoke.py
 """
 import os
@@ -122,6 +123,44 @@ def main():
         print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + create_session + update_session 均无 AttributeError")
     finally:
         db.DB_PATH = _orig_path
+
+    # 8) 创建任务 + 启动研究：登录→AI研究仓→输入目标→点启动→重新渲染，无 StreamlitAPIException（form 嵌套回归）
+    import pandas as pd
+    import research_loop as rl
+    import engine_core
+    _orig_path2 = db.DB_PATH
+    _orig_run = rl.run_research_task
+    _orig_mtf = engine_core.DataEngine.get_multi_timeframe
+    try:
+        tmp2 = tempfile.mkdtemp()
+        db.DB_PATH = os.path.join(tmp2, "smoke2.db")
+        db.init_db()
+        # 桩替换：smoke test 只验证 UI 渲染，不触发真实回测 + 网络数据刷新
+        rl.run_research_task = lambda *a, **k: {"summary": "smoke stub", "ranked": [], "passed": 0}
+        _idx = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 04:00"])
+        _fake = pd.DataFrame({"open": [100.0, 101.0], "high": [102.0, 103.0],
+                              "low": [99.0, 98.0], "close": [101.0, 102.0],
+                              "volume": [1000.0, 1100.0]}, index=_idx)
+        engine_core.DataEngine.get_multi_timeframe = lambda self, asset: {tf: _fake for tf in ("15m", "1h", "4h", "1d")}
+
+        at.session_state["logged_in"] = True
+        at.session_state["active_tab"] = "AI 对话舱"
+        at.run()
+        assert not list(getattr(at, "exception", []) or []), "AI 研究仓渲染异常"
+
+        at.text_input(key="rl_task_goal").set_value("寻找 ETH 趋势策略")
+        at.run()
+        assert not list(getattr(at, "exception", []) or []), "输入任务目标异常"
+
+        at.button(key="rl_task_start").click()
+        at.run()
+        assert not list(getattr(at, "exception", []) or []), "启动研究触发 StreamlitAPIException"
+        assert db.list_tasks(1), "启动研究未创建任务"
+        print("[OK] 8. 创建任务 + 启动研究：登录→AI研究仓→输入目标→启动→重渲染，无 StreamlitAPIException")
+    finally:
+        db.DB_PATH = _orig_path2
+        rl.run_research_task = _orig_run
+        engine_core.DataEngine.get_multi_timeframe = _orig_mtf
 
     print("\nALL UI SMOKE TESTS PASSED")
 
