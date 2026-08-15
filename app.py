@@ -784,6 +784,89 @@ if "AI" in st.session_state.active_tab:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
 
+    # --- 零、策略搜索（V2：目标 → 10 候选 → 自动回测 → 排名） ---
+    st.divider()
+    st.subheader(t("rl_search_title"))
+    st.caption(t("rl_search_hint"))
+    sgoal, sbtn = st.columns([4, 1])
+    with sgoal:
+        search_goal = st.text_input(t("research_goal_label"), key="rl_search_goal",
+                                    placeholder=t("research_goal_placeholder"))
+    with sbtn:
+        search_clicked = st.button(t("rl_search_btn"), key="rl_search", disabled=not ai_key)
+
+    if search_clicked and search_goal.strip():
+        msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                {"role": "user", "content": rl.search_prompt(search_goal.strip())}]
+        res = call_unified_api(msgs, ai_key, ai_model_name, "")
+        if not res.get("success"):
+            st.error(t("rl_search_no_candidates"))
+        else:
+            candidates = rl.parse_hypothesis_array(res.get("content", ""))
+            if not candidates:
+                st.error(t("rl_search_no_candidates"))
+                st.write((res.get("content") or "")[:500])
+            else:
+                ctx = rl.parse_research_context(search_goal.strip())
+                asset = _norm_asset(ctx.get("symbol"))
+                tf = _norm_tf(ctx.get("timeframe"))
+                df = _load_research_df(asset, tf)
+                total = len(candidates)
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def _progress(i, n, label):
+                    progress_bar.progress((i + 1) / n)
+                    status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
+
+                results = rl.run_strategy_search(candidates, df, asset, progress=_progress)
+                progress_bar.progress(1.0)
+                status_text.caption(t("rl_search_done"))
+                st.session_state.rl_search_results = results
+                st.session_state.rl_search_meta = {"goal": search_goal.strip(),
+                                                   "asset": asset, "tf": tf}
+                st.rerun()
+
+    if "rl_search_results" in st.session_state:
+        results = st.session_state.rl_search_results
+        meta = st.session_state.rl_search_meta
+        st.divider()
+        st.subheader(t("rl_search_rank"))
+        st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
+        ranked = [r for r in results if not r.get("skipped")]
+        skipped = [r for r in results if r.get("skipped")]
+        if ranked:
+            rows = []
+            for idx, r in enumerate(ranked[:10], 1):
+                v = r["verdict"]
+                m = v["metrics"]
+                sc = v["score"]
+                rows.append({
+                    "排名": idx,
+                    "指标组合": " + ".join(v["indicators"][:3]) or "-",
+                    "总收益%": round(m.get("total_return") or 0, 1),
+                    "年化%": round(m.get("annual_return") or 0, 1),
+                    "Sharpe": round(m.get("sharpe") or 0, 2),
+                    "回撤%": round(m.get("max_drawdown") or 0, 1),
+                    "胜率%": round(m.get("win_rate") or 0, 1),
+                    "交易数": m.get("trade_count") or 0,
+                    "OOS%": round(m.get("oos_return") or 0, 1),
+                    "评分": sc["total"],
+                    "等级": sc["grade"],
+                    "判定": "✅" if v["passed"] else "❌",
+                })
+            st.dataframe(pd.DataFrame(rows))
+            for idx, r in enumerate(ranked[:10], 1):
+                v = r["verdict"]
+                title = f"#{idx} {v['score']['grade']} · {' + '.join(v['indicators'][:3])} · 评分 {v['score']['total']}"
+                with st.expander(title):
+                    st.markdown(v["report"])
+        if skipped:
+            st.markdown(f"**{t('rl_search_skipped')}**")
+            for r in skipped:
+                inds = "、".join(r.get("indicators") or []) or "-"
+                st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）：{r.get('reason')}")
+
     # --- 一、创建研究任务 ---
     with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
         st.caption(t("rl_create_hint"))

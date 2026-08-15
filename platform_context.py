@@ -92,14 +92,19 @@ def format_context_text() -> str:
              f"- 止盈止损模式: {'、'.join(rc['tp_sl_modes'])}",
              f"- 风控参数: {'、'.join(rc['parameters'])}",
              "",
-             "## 可用指标清单（名称 | 分类 | 默认参数）"]
+             "## 可用指标清单（按分类）"]
+    by_cat = {}
     for ind in ctx["indicators"]:
-        params = ind["params"]
-        if params:
-            plist = ", ".join(f"{pv['label']}={pv['default']}" for pv in params.values())
-        else:
-            plist = "无参数"
-        lines.append(f"- {ind['name']} [{ind['category']}]: {ind['desc']}；参数: {plist}")
+        by_cat.setdefault(ind["category"], []).append(ind)
+    for cat, inds in by_cat.items():
+        lines.append(f"### {cat}")
+        for ind in inds:
+            params = ind["params"]
+            if params:
+                plist = ", ".join(f"{pv['label']}={pv['default']}" for pv in params.values())
+            else:
+                plist = "无参数"
+            lines.append(f"- {ind['name']}: {ind['desc']}；参数: {plist}")
     return "\n".join(lines)
 
 

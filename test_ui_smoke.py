@@ -127,7 +127,13 @@ def main():
         errs = list(getattr(at, "exception", []) or [])
         assert not errs, f"输入研究目标异常: {errs}"
 
-        print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + 目标输入框 均无异常")
+        # 策略搜索区块（V2）：目标输入框 + 开始搜索按钮，渲染无异常且 key 唯一
+        assert "rl_search_goal" in [str(ti.key) for ti in at.text_input], \
+            f"缺少策略搜索目标输入框（现有 {[str(ti.key) for ti in at.text_input]}）"
+        assert any(str(getattr(b, "key", "")) == "rl_search" for b in at.button), \
+            "缺少策略搜索按钮（key=rl_search）"
+
+        print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + 目标输入框 + 策略搜索区块 均无异常")
     finally:
         db.DB_PATH = _orig_path
 

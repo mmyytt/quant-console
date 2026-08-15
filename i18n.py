@@ -145,6 +145,15 @@ _TRANSLATIONS = {
         "rl_task_status_running": "运行中",
         "rl_task_status_done": "已完成",
         "rl_task_status_failed": "失败",
+        # Phase 4: 策略搜索模式（V2）
+        "rl_search_title": "🚀 策略搜索（系统化探索）",
+        "rl_search_hint": "输入研究目标（如「寻找ETH 5分钟高频策略，年化50%以上，回撤低于20%」），AI 从平台指标池生成 10 个候选策略并自动逐个回测、去重、评分、排名。",
+        "rl_search_btn": "🚀 开始搜索",
+        "rl_search_running": "验证候选",
+        "rl_search_done": "✅ 搜索完成，已按综合评分排名",
+        "rl_search_rank": "策略排名 TOP10",
+        "rl_search_skipped": "已跳过（去重 / 无有效指标）",
+        "rl_search_no_candidates": "AI 未返回有效候选，请重试",
         "nav_robustness": "🔬 鲁棒性实验室",
         "version_label": "QuantCode {version} | Commit: `{commit}` | Build: {build}",
 
@@ -1466,6 +1475,15 @@ _TRANSLATIONS = {
         "rl_task_status_running": "Running",
         "rl_task_status_done": "Done",
         "rl_task_status_failed": "Failed",
+        # Phase 4: Strategy Search Mode (V2)
+        "rl_search_title": "🚀 Strategy Search (Systematic Exploration)",
+        "rl_search_hint": "Enter a research goal (e.g. \"find an ETH 5m high-frequency strategy, annualized >50%, drawdown <20%\"); the AI generates 10 candidates from the platform indicator pool and auto-backtests, dedupes, scores and ranks them.",
+        "rl_search_btn": "🚀 Start Search",
+        "rl_search_running": "Verifying candidate",
+        "rl_search_done": "✅ Search done, ranked by composite score",
+        "rl_search_rank": "Strategy Ranking TOP10",
+        "rl_search_skipped": "Skipped (dedup / no valid indicator)",
+        "rl_search_no_candidates": "AI returned no valid candidates, please retry",
         "nav_robustness": "🔬 Robustness Lab",
         "version_label": "QuantCode {version} | Commit: `{commit}` | Build: {build}",
 

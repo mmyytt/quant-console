@@ -702,3 +702,132 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
     verdict["experiment_id"] = exp_id
     verdict["report"] = report_text
     return verdict
+
+
+# ============================================================
+# 九、策略搜索模式（V2：多候选生成 → 去重 → 自动回测 → 排名）
+# ============================================================
+def search_prompt(goal, assets="ETH, BTC, SOL", timeframes="5m, 15m, 1h, 4h, 1d"):
+    """让 LLM 一次生成 10 个不同指标组合的策略候选（JSON 数组）。"""
+    from platform_context import format_context_text
+    return f"""你是 QuantCode 的量化研究助手。用户研究目标是：
+"{goal}"
+
+你的任务：解析研究目标 → 生成 10 个不同的、可回测的策略候选。
+严格要求：只输出 JSON 数组（10 个元素），不要输出任何其他文字或解释。
+
+JSON 结构（数组，每个元素字段名固定）：
+[
+  {{
+    "hypothesis": "假设陈述：该指标组合为何可能有效",
+    "indicators": ["指标名1", "指标名2", "指标名3"],
+    "params": {{"指标名1": {{"参数key": 数值}}, "指标名2": {{}}}},
+    "asset": "ETH",
+    "timeframe": "5m",
+    "leverage": 2,
+    "tp_pct": 8.0,
+    "sl_pct": 4.0,
+    "strategy_style": "趋势跟踪",
+    "entry_rules": ["开仓条件1"],
+    "exit_rules": ["平仓条件1"],
+    "expected_logic": "策略逻辑说明（为什么认为有效）",
+    "expected_market_condition": "适用市场环境（趋势/震荡）",
+    "failure_environment": "预期失效市场环境（哪些行情下会亏损）",
+    "risk_assumption": "风险假设（预期最大回撤/胜率等）"
+  }},
+  ...（共 10 个，指标组合尽量互不相同、覆盖不同类别）
+]
+
+约束：
+- 可用资产: {assets}；可用周期: {timeframes}。
+- 10 个候选的指标组合必须互不相同（尽量覆盖不同类别，避免全部同类堆叠）。
+- 每个候选的 indicators 必须从下方「平台能力」的指标清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
+- params 的 key 必须用清单中给出的参数 key；值必须是数字。
+- entry_rules / exit_rules 各 1~3 条，描述具体开仓 / 平仓条件（不能为空）。
+- strategy_style 取：趋势跟踪 / 动量 / 均值回归 / 量价配合 / 高频 / 日内 之一。
+- 每个候选独立完整，字段不能为空。
+
+## 平台能力（quant_context，必须以此为准）
+{format_context_text()}
+"""
+
+
+def parse_hypothesis_array(text):
+    """从 AI 输出中提取 JSON 数组；失败返回 []。"""
+    if not text:
+        return []
+    t = text.strip()
+    s, e = t.find("["), t.rfind("]")
+    if s == -1 or e <= s:
+        return []
+    try:
+        arr = json.loads(t[s:e + 1])
+        return [x for x in arr if isinstance(x, dict)]
+    except Exception:
+        return []
+
+
+def _previously_failed(fp):
+    """相同指标组合（指纹）是否已在失败记忆中出现过。"""
+    if not fp:
+        return False
+    fp = fp.upper()
+    for f in db.list_failure_memory(200):
+        if (f.get("fingerprint") or "").upper() == fp:
+            return True
+    return False
+
+
+def _spec_to_hyp(spec, indicators, coin):
+    """把候选 spec 映射为 verify_hypothesis 需要的 hyp dict。"""
+    return {
+        "related_indicators": indicators,
+        "parameters": spec.get("params") or {},
+        "leverage": spec.get("leverage"),
+        "tp_pct": spec.get("tp_pct"),
+        "sl_pct": spec.get("sl_pct"),
+        "timeframe": spec.get("timeframe"),
+        "asset": spec.get("asset") or coin,
+        "failure_environment": spec.get("failure_environment"),
+        "risk_assumption": spec.get("risk_assumption"),
+        "hypothesis_text": spec.get("hypothesis"),
+        "expected_logic": spec.get("expected_logic"),
+        "expected_market_condition": spec.get("expected_market_condition"),
+        "user_goal": spec.get("goal"),
+    }
+
+
+def run_strategy_search(candidates, df, coin, progress=None):
+    """逐个去重 → 回测验证 → 评分，返回按综合分降序的结果列表。
+
+    progress(i, total, label)：每处理一个候选前回调（用于 UI 进度）。
+    复用 verify_hypothesis（自动落库 experiment / failure_memory / report）。
+    """
+    results = []
+    total = len(candidates)
+    for i, spec in enumerate(candidates):
+        label = spec.get("hypothesis") or f"候选 {i + 1}"
+        if progress:
+            progress(i, total, label)
+        indicators, _invalid = normalize_indicators(spec.get("indicators"))
+        if not indicators:
+            results.append({"spec": spec, "indicators": [], "skipped": True,
+                            "reason": "无有效指标"})
+            continue
+        fp = fingerprint(indicators)
+        if _previously_failed(fp):
+            results.append({"spec": spec, "indicators": indicators, "skipped": True,
+                            "reason": "历史失败（相同指标组合）"})
+            continue
+        hyp = _spec_to_hyp(spec, indicators, coin)
+        try:
+            verdict = verify_hypothesis(hyp, df, coin)
+            results.append({"spec": spec, "indicators": indicators, "verdict": verdict,
+                            "skipped": False})
+        except Exception as e:
+            results.append({"spec": spec, "indicators": indicators, "skipped": True,
+                            "reason": f"回测异常: {e}"})
+    # 按综合分降序（跳过项 score 视为 -inf，排最后）
+    results.sort(key=lambda r: (r.get("verdict") or {}).get("score", {}).get("total", -999.0),
+                 reverse=True)
+    return results
