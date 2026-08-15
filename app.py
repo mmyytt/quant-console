@@ -808,10 +808,17 @@ if "AI" in st.session_state.active_tab:
         else:
             candidates, diag = rl.parse_hypothesis_array_diag(res.get("content", ""))
             if not candidates:
-                # 解析失败：给出完整诊断，而非只显示「无有效候选」
+                # 解析失败：给出完整诊断（数组扫描 + 选择原因），而非只显示「无有效候选」
                 st.error(t("rl_search_no_candidates"))
                 with st.expander(t("rl_search_diag"), expanded=True):
                     st.caption(f"LLM 原始返回长度：{diag['raw_len']} 字符")
+                    st.caption(f"发现数组：{len(diag.get('arrays') or [])} 个")
+                    for a in (diag.get("arrays") or []):
+                        mark = " ← 已选择" if a["index"] == diag.get("selected") else ""
+                        perr = f"（{a['error']}）" if a.get("error") else ""
+                        st.caption(f"  index{a['index']}: {a['type']} length={a['length']}{mark}{perr}")
+                    if diag.get("selected_reason"):
+                        st.caption(f"选择原因：{diag['selected_reason']}")
                     st.caption(f"JSON 提取结果：{diag['extracted'] or '（未提取到）'}")
                     st.caption(f"解析失败原因：{diag['error']}")
                     st.code(diag["preview"] or "（空）", language=None)

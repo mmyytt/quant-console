@@ -853,14 +853,34 @@ def _try_parse_json(sub):
                 return None, f"json.loads:{e1} | 去尾逗号:{e2} | literal_eval:{e3}"
 
 
-def parse_hypothesis_array_diag(text):
-    """从 AI 输出提取 JSON 数组候选，返回 (candidates, diag)。
+def _describe_array(arr):
+    """描述数组元素类型，用于诊断：list[dict] / list[str] / list[number] / ..."""
+    if arr is None:
+        return "解析失败"
+    if not isinstance(arr, list):
+        return type(arr).__name__
+    if not arr:
+        return "list[空]"
+    if all(isinstance(x, dict) for x in arr):
+        return "list[dict]"
+    if all(isinstance(x, str) for x in arr):
+        return "list[str]"
+    if all(isinstance(x, (int, float)) for x in arr):
+        return "list[number]"
+    return "list[" + ",".join(sorted({type(x).__name__ for x in arr})) + "]"
 
-    容错：纯 JSON 数组 / markdown JSON 围栏 / 解释文字 + JSON 均可提取。
-    diag = {"raw_len", "preview", "extracted", "error"}，供 UI 定位解析失败原因。
+
+def parse_hypothesis_array_diag(text):
+    """从 AI 输出提取「候选策略」JSON 数组，返回 (candidates, diag)。
+
+    只接受 list 且元素全部是 dict 的数组（list[dict]），按出现顺序取第一个匹配
+    （顶层数组天然最先出现，优先被选中，不会误取内部 indicators 之类的 list[str]）。
+    支持纯 JSON / markdown 围栏 / 解释文字 + JSON 嵌套（如 {"strategies":[...]}）。
+    diag = {"raw_len", "preview", "extracted", "error", "arrays", "selected", "selected_reason"}。
     """
     diag = {"raw_len": len(text or ""), "preview": (text or "")[:500],
-            "extracted": None, "error": None}
+            "extracted": None, "error": None, "arrays": [],
+            "selected": None, "selected_reason": None}
     if not text:
         diag["error"] = "空输入"
         return [], diag
@@ -868,20 +888,28 @@ def parse_hypothesis_array_diag(text):
     if not subs:
         diag["error"] = "未找到 JSON 数组（无 '[...]' 结构）"
         return [], diag
-    # 优先最外层数组（最长，能容纳全部候选），逐个尝试解析
-    last_err = None
-    for sub in sorted(subs, key=len, reverse=True):
+    # 先扫描全部数组（完整诊断），再选第一个 list[dict]（顶层数组最先出现，优先命中）
+    selected_idx = None
+    selected_arr = None
+    for idx, sub in enumerate(subs):
         arr, err = _try_parse_json(sub)
-        if err:
-            last_err = err
-        if isinstance(arr, list):
+        diag["arrays"].append({
+            "index": idx, "type": _describe_array(arr),
+            "length": len(arr) if isinstance(arr, list) else None,
+            "error": err,
+        })
+        if selected_idx is None and isinstance(arr, list) and arr and all(isinstance(x, dict) for x in arr):
+            selected_idx = idx
+            selected_arr = arr
             diag["extracted"] = sub
-            out = [x for x in arr if isinstance(x, dict)]
-            if not out:
-                diag["error"] = "数组内无有效候选对象（需为 JSON 对象数组）"
-            return out, diag
+            diag["selected_reason"] = f"index{idx} 是 list[dict]（len={len(arr)}），符合候选策略结构"
+    if selected_idx is not None:
+        diag["selected"] = selected_idx
+        return selected_arr, diag
+    # 无 list[dict] 命中：汇总诊断
+    found = ", ".join(f"index{i['index']}:{i['type']}(len={i['length']})" for i in diag["arrays"])
     diag["extracted"] = subs[0]
-    diag["error"] = "无法解析 JSON: " + (last_err or "未知原因")
+    diag["error"] = f"未找到 list[dict] 候选数组。发现数组：{found}"
     return [], diag
 
 
