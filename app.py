@@ -33,6 +33,8 @@ from i18n import (
     INDICATOR_I18N, CATEGORY_I18N, PARAM_LABEL_I18N, PARAM_HELP_I18N,
     of_risk_label, trend_dep_label,
 )
+from strategy_models import DynamicStrategy
+from llm_client import call_unified_api
 
 # ============================================================
 # 登录
@@ -188,113 +190,6 @@ def _phelp(help_text):
     return PARAM_HELP_I18N.get(help_text, help_text)
 
 
-# ============================================================
-# 动态策略 (从注册表组装)
-# ============================================================
-class DynamicStrategy(StrategyBase):
-    def __init__(self, selected: dict, use_and: bool = True, mf_params: dict = None):
-        super().__init__("DynamicStrategy")
-        self.selected = selected  # {name: {enabled: True, params: {...}}}
-        self.use_and = use_and
-        self.mf = mf_params or {}
-
-    def generate_signals(self, df):
-        df = df.copy(); long_conds = []; short_conds = []
-        for name, cfg in self.selected.items():
-            # 类型安全检查: 跳过元数据键(_weighted/_resonance_factors等)
-            if not isinstance(cfg, dict): continue
-            if not cfg.get("enabled", True): continue
-            info = INDICATOR_REGISTRY.get(name)
-            if not info: continue
-            try:
-                info["compute"](df, cfg.get("params", {}))
-                if "_long" in df.columns: long_conds.append(df["_long"]); df.drop("_long", axis=1, inplace=True)
-                if "_short" in df.columns: short_conds.append(df["_short"]); df.drop("_short", axis=1, inplace=True)
-            except: pass
-
-        if not long_conds and not short_conds:
-            df['signal'] = 0
-        elif self.selected.get("_weighted", False):
-            # 加权打分模式: 统计满足的指标数, 超过阈值才触发
-            threshold = self.selected.get("_weighted_threshold", 2)
-            long_score = pd.Series(0, index=df.index)
-            short_score = pd.Series(0, index=df.index)
-            for c in long_conds:
-                long_score += c.fillna(False).astype(int)
-            for c in short_conds:
-                short_score += c.fillna(False).astype(int)
-            df['signal'] = 0
-            df.loc[(long_score >= threshold) & (short_score < threshold), 'signal'] = 1
-            df.loc[(short_score >= threshold) & (long_score < threshold), 'signal'] = -1
-            df['long_score'] = long_score; df['short_score'] = short_score
-        else:
-            ls = long_conds[0].fillna(False) if long_conds else pd.Series(False, index=df.index)
-            for c in long_conds[1:]:
-                c = c.fillna(False)
-                ls = (ls & c) if self.use_and else (ls | c)
-            ss = short_conds[0].fillna(False) if short_conds else pd.Series(False, index=df.index)
-            for c in short_conds[1:]:
-                c = c.fillna(False)
-                ss = (ss & c) if self.use_and else (ss | c)
-            ls = ls.fillna(False); ss = ss.fillna(False)
-            df['signal'] = 0
-            df.loc[ls & ~ss, 'signal'] = 1; df.loc[ss & ~ls, 'signal'] = -1
-
-        # 多因子牛熊
-        if self.mf.get("enabled", True):
-            mf = MultiFactorRegime(
-                ema_weight=self.mf.get("ema_w", 0.40), adx_weight=self.mf.get("adx_w", 0.35),
-                adx_threshold=self.mf.get("adx_th", 25), bull_threshold=self.mf.get("bull_th", 0.30),
-            )
-            df = mf.evaluate(df); df['regime'] = df.get('regime_mf', 'range'); df['br'] = df.get('br_mf', 0)
-        else:
-            c = df['close'].shift(1); ema50 = c.ewm(span=50, adjust=False).mean()
-            slope = (ema50 - ema50.shift(20)) / ema50.shift(20).replace(0, np.nan)
-            df['regime'] = 'range'; df.loc[slope > 0.02, 'regime'] = 'bull'; df.loc[slope < -0.02, 'regime'] = 'bear'
-            df['br'] = (df['regime'] == 'bear').astype(int).rolling(200, min_periods=1).mean()
-
-        # === 交易方向过滤: 牛熊绑定 + 交易模式 ===
-        trade_mode = self.selected.get("_trade_mode", "双向")
-        regime_filter = self.selected.get("_regime_filter", True)
-
-        if regime_filter:
-            # 牛市: 禁止做空
-            if 'regime' in df.columns:
-                df.loc[(df['regime'] == 'bull') & (df['signal'] == -1), 'signal'] = 0
-            # 熊市: 禁止做多
-            if 'regime' in df.columns:
-                df.loc[(df['regime'] == 'bear') & (df['signal'] == 1), 'signal'] = 0
-
-        # 交易模式覆盖
-        if trade_mode == "仅做多":
-            df.loc[df['signal'] == -1, 'signal'] = 0
-        elif trade_mode == "仅做空":
-            df.loc[df['signal'] == 1, 'signal'] = 0
-
-        # === 共振评分: 统计用户指定的3个因子同时触发的情况 ===
-        res_factors = self.selected.get("_resonance_factors")
-        if not isinstance(res_factors, list): res_factors = []
-        df['resonance_score'] = 0
-        if res_factors:
-            for fname in res_factors:
-                if not fname: continue
-                info = INDICATOR_REGISTRY.get(fname)
-                if not info: continue
-                fcfg = self.selected.get(fname)
-                if not isinstance(fcfg, dict): continue
-                try:
-                    info["compute"](df, fcfg.get("params", {}))
-                    has_l = "_long" in df.columns
-                    has_s = "_short" in df.columns
-                    if has_l or has_s:
-                        long_col = df["_long"].fillna(False) if has_l else pd.Series(False, index=df.index)
-                        short_col = df["_short"].fillna(False) if has_s else pd.Series(False, index=df.index)
-                        df['resonance_score'] += (long_col | short_col).astype(int)
-                        if has_l: df.drop("_long", axis=1, inplace=True)
-                        if has_s: df.drop("_short", axis=1, inplace=True)
-                except: pass
-        df['score'] = df['resonance_score'] if res_factors else abs(df['signal'])
-        return df
 
 
 # ============================================================
@@ -813,53 +708,6 @@ with tc4:
 
 st.divider()
 
-# ============================================================
-# ============================================================
-# 统一 API 调用 (DeepSeek / OpenAI / Anthropic / Gemini)
-# ============================================================
-def _call_unified_api(messages: list, api_key: str, model_name: str, trading_notes: str) -> dict:
-    import requests
-    if trading_notes.strip():
-        np = {"role": "system", "content": t("unified_api_prompt", notes=trading_notes.strip())}
-        hs = any(m["role"] == "system" for m in messages)
-        if hs:
-            for m in messages:
-                if m["role"] == "system": m["content"] = np["content"] + "\n\n" + m["content"]
-        else: messages.insert(0, np)
-    if "DeepSeek" in model_name:
-        mdl = "deepseek-chat" if "V3" in model_name else "deepseek-reasoner"
-        r = requests.post("https://api.deepseek.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": mdl, "messages": messages, "max_tokens": 2000, "temperature": 0.7}, timeout=45)
-        if r.status_code == 200: d = r.json(); return {"success": True, "content": d["choices"][0]["message"]["content"], "model": d.get("model", mdl)}
-        return {"success": False, "error": f"DeepSeek {r.status_code}: {r.text[:200]}"}
-    if "OpenAI" in model_name or "GPT" in model_name:
-        mdl = "gpt-4o" if "mini" not in model_name else "gpt-4o-mini"
-        r = requests.post("https://api.openai.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={"model": mdl, "messages": messages, "max_tokens": 2000}, timeout=45)
-        if r.status_code == 200: d = r.json(); return {"success": True, "content": d["choices"][0]["message"]["content"], "model": d.get("model", mdl)}
-        return {"success": False, "error": f"OpenAI {r.status_code}: {r.text[:200]}"}
-    if "Claude" in model_name or "Anthropic" in model_name:
-        sm = next((m for m in messages if m["role"] == "system"), None)
-        cm = [m for m in messages if m["role"] != "system"]
-        body = {"model": "claude-sonnet-4-20250514", "max_tokens": 2000, "messages": cm}
-        if sm: body["system"] = sm["content"]
-        r = requests.post("https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": api_key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json=body, timeout=45)
-        if r.status_code == 200: d = r.json(); return {"success": True, "content": d["content"][0]["text"], "model": d.get("model", "claude")}
-        return {"success": False, "error": f"Claude {r.status_code}: {r.text[:200]}"}
-    if "Gemini" in model_name:
-        mdl = "gemini-2.0-flash"
-        contents = [{"role": "user" if m["role"] != "assistant" else "model", "parts": [{"text": m["content"]}]} for m in messages]
-        r = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{mdl}:generateContent?key={api_key}",
-            headers={"Content-Type": "application/json"}, json={"contents": contents}, timeout=45)
-        if r.status_code == 200:
-            d = r.json(); txt = d["candidates"][0]["content"]["parts"][0]["text"]
-            return {"success": True, "content": txt, "model": mdl}
-        return {"success": False, "error": f"Gemini {r.status_code}: {r.text[:200]}"}
-    return {"success": False, "error": f"Unknown model: {model_name}"}
 
 # Tab 2: 翔哥 AI 研究仓（研究状态 + 记忆 + 持久化）
 # ============================================================
@@ -950,7 +798,7 @@ if "AI" in st.session_state.active_tab:
             with st.spinner(t("rl_generating")):
                 msgs = [{"role": "system", "content": t("rl_sys_prompt")},
                         {"role": "user", "content": rl.hypothesis_prompt(goal.strip())}]
-                res = _call_unified_api(msgs, ai_key, ai_model_name, "")
+                res = call_unified_api(msgs, ai_key, ai_model_name, "")
                 if res["success"]:
                     spec = rl.parse_hypothesis_json(res["content"])
                     if not spec:
@@ -2655,7 +2503,7 @@ if submitted:
                                     total=metrics.get('total_return',0), annual=metrics.get('annual_return',0),
                                     dd=metrics.get('max_drawdown',0), sharpe=metrics.get('sharpe_ratio',0),
                                     wr=metrics.get('win_rate',0), trades=metrics.get('total_trades',0), ytd=ytd)
-                    result = _call_unified_api(
+                    result = call_unified_api(
                         [{"role": "user", "content": diag_prompt}],
                         ai_k, t("model_dsv3"), st.session_state.get("trading_notes", ""))
                     if result["success"]:

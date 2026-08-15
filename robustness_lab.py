@@ -244,7 +244,7 @@ class RobustnessLab:
                 if 'app' in sys.modules:
                     DynamicStrategyCls = sys.modules['app'].DynamicStrategy
                 else:
-                    from app import DynamicStrategy as DynamicStrategyCls
+                    from strategy_models import DynamicStrategy as DynamicStrategyCls
             except Exception as import_err:
                 raise RuntimeError(
                     t('err_import_strategy')

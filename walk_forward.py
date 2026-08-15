@@ -282,7 +282,7 @@ class WalkForwardAnalyzer:
         if strategy_class is None:
             # 尝试动态导入
             try:
-                from app import DynamicStrategy
+                from strategy_models import DynamicStrategy
                 strategy_class = DynamicStrategy
             except ImportError:
                 result["error"] = _t("wf_import_failed")

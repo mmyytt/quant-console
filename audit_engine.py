@@ -439,8 +439,8 @@ class AIReportGenerator:
 
         # 调用统一API (复用app.py的 _call_unified_api)
         try:
-            from app import _call_unified_api
-            result = _call_unified_api(
+            from llm_client import call_unified_api
+            result = call_unified_api(
                 [{"role": "user", "content": prompt}],
                 api_key, model_name, ""
             )

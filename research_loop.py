@@ -280,7 +280,7 @@ def build_selected(indicator_names, param_overrides=None):
 
 
 def _default_strategy_factory(selected):
-    from app import DynamicStrategy
+    from strategy_models import DynamicStrategy
     return DynamicStrategy(selected, use_and=True, mf_params={"enabled": False})
 
 
