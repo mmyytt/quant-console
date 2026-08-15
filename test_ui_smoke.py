@@ -80,13 +80,13 @@ def main():
     assert m, "验证按钮缺少唯一 key"
     print("[OK] 5. 验证按钮已绑定唯一 key（key=verify_{hypothesis_id}）")
 
-    # 5b) 侧边栏非表单按钮必须包裹在 `with st.sidebar.container():`（独立容器，脱离 form 上下文）
-    # Streamlit form 上下文误判会把 st.sidebar.form 外的按钮当成 form 内 → StreamlitAPIException
+    # 5b) 侧边栏非表单按钮必须走 `with st.sidebar:`，禁止 st.sidebar.button()（form 误判）
+    # 且禁止 with st.sidebar.container(): 嵌套（会触发 StreamlitDuplicateElementKey）
     bad_sb = re.findall(r'st\.sidebar\.button\s*\(', src)
     assert not bad_sb, f"仍存在 st.sidebar.button 直接调用（易触发 form 误判）: {bad_sb}"
-    n_container = len(re.findall(r'with\s+st\.sidebar\.container\s*\(\s*\)\s*:', src))
-    assert n_container >= 4, f"侧边栏动作按钮未全部包裹进 st.sidebar.container（仅 {n_container} 处）"
-    print("[OK] 5b. 侧边栏按钮全部包裹在 with st.sidebar.container(): 中（脱离 form 上下文）")
+    bad_cont = re.findall(r'with\s+st\.sidebar\.container\s*\(\s*\)\s*:', src)
+    assert not bad_cont, f"存在 with st.sidebar.container(): 嵌套（易触发 StreamlitDuplicateElementKey）: {bad_cont}"
+    print("[OK] 5b. 侧边栏按钮走 with st.sidebar: 结构，无 container 嵌套（规避 form 误判 + DuplicateElementKey）")
 
     # 6) Streamlit AppTest：登录页渲染无异常（鉴权门禁先于业务 UI）
     from streamlit.testing.v1 import AppTest
@@ -174,6 +174,50 @@ def main():
         db.DB_PATH = _orig_path2
         rl.run_research_task = _orig_run
         engine_core.DataEngine.get_multi_timeframe = _orig_mtf
+
+    # 9) DuplicateElementKey 回归：登录→AI研究仓→点击验证→rerun，无 StreamlitDuplicateElementKey
+    _orig_verify = rl.verify_hypothesis
+    _orig_path3 = db.DB_PATH
+    _orig_mtf2 = engine_core.DataEngine.get_multi_timeframe
+    try:
+        tmp3 = tempfile.mkdtemp()
+        db.DB_PATH = os.path.join(tmp3, "smoke3.db")
+        db.init_db()
+        hid = db.add_hypothesis("测试假设：EMA 金叉", related_indicators=["EMA 双均线"],
+                                status="new", asset="ETH", timeframe="4h", leverage=3,
+                                tp_pct=5.0, sl_pct=2.0)
+        rl.verify_hypothesis = lambda hyp, df, coin, strategy_factory=None: {
+            "passed": True, "failures": [],
+            "score": {"total": 82, "grade": "B", "return": 12.0, "sharpe": 1.5, "mdd": 9.0,
+                      "oos": 6.0, "param_stability": 60, "monte_carlo": 70},
+            "metrics": {"sharpe": 1.5, "total_return": 12.0, "max_drawdown": 9.0,
+                        "win_rate": 0.52, "trade_count": 35, "oos_return": 6.0},
+            "indicators": ["EMA 双均线"], "params": {}, "coin": "ETH",
+            "leverage": 3, "tp_pct": 5.0, "sl_pct": 2.0,
+            "fingerprint": "", "experiment_id": 1, "report": "smoke stub",
+        }
+        _idx3 = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 04:00"])
+        _fake3 = pd.DataFrame({"open": [100.0, 101.0], "high": [102.0, 103.0],
+                               "low": [99.0, 98.0], "close": [101.0, 102.0],
+                               "volume": [1000.0, 1100.0]}, index=_idx3)
+        engine_core.DataEngine.get_multi_timeframe = lambda self, asset: {tf: _fake3 for tf in ("15m", "1h", "4h", "1d")}
+
+        at.session_state["logged_in"] = True
+        at.session_state["active_tab"] = "AI 对话舱"
+        at.run()
+        assert not list(getattr(at, "exception", []) or []), "AI 研究仓渲染异常"
+
+        verify_btns = [b for b in at.button if str(getattr(b, "key", "")).startswith("verify_")]
+        assert verify_btns, "未找到验证按钮（key=verify_{id}）"
+        verify_btns[0].click()
+        at.run()
+        errs9 = list(getattr(at, "exception", []) or [])
+        assert not errs9, f"点击验证→rerun 触发 DuplicateElementKey/异常: {errs9}"
+        print("[OK] 9. 点击验证→rerun 回归：无 StreamlitDuplicateElementKey / StreamlitAPIException")
+    finally:
+        db.DB_PATH = _orig_path3
+        rl.verify_hypothesis = _orig_verify
+        engine_core.DataEngine.get_multi_timeframe = _orig_mtf2
 
     print("\nALL UI SMOKE TESTS PASSED")
 
