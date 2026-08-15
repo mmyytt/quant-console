@@ -79,6 +79,9 @@ _CATEGORY_ROLE = {
 # 交易频率 / 策略风格（供假设列表展示 + research_context）
 _FREQ_OF = {"5m": "高频", "15m": "高频", "1h": "日内", "4h": "波段", "1d": "低频"}
 _STYLE_OF = {"trend": "趋势跟踪", "momentum": "动量", "volatility": "均值回归", "volume": "量价配合"}
+# 指标分类（INDICATOR_SCHEMA.category）→ 因子大类（供 build_strategy_config 推断默认风格）
+_CATEGORY_TO_CLASS = {"趋势类": "trend", "摆动类": "momentum", "通道/支撑": "volatility", "成交量": "volume"}
+_PRIMARY_CLASSES = ("trend", "momentum", "volatility")
 
 
 def _freq_of(timeframe):
@@ -105,6 +108,8 @@ def parse_research_context(goal):
     low = g.lower()
     if "15m" in low or "15分钟" in g or "15分" in g:
         timeframe = "15m"
+    elif "5m" in low or "5分钟" in g or "5分" in g:
+        timeframe = "5m"
     elif "1h" in low or "1小时" in g or "小时" in g:
         timeframe = "1h"
     elif "4h" in low or "4小时" in g:
@@ -137,7 +142,7 @@ def build_strategy_config(indicators, asset="ETH", timeframe="4h",
     缺省时按指标角色 + TP/SL 自动生成，绝不返回空列表。
     """
     indicators = [n for n in (indicators or []) if n]
-    cats = [_class_of(n) for n in indicators]
+    cats = [_CATEGORY_TO_CLASS.get(INDICATOR_REGISTRY[n]["category"]) for n in indicators if n in INDICATOR_REGISTRY]
     primary = next((c for c in cats if c in _PRIMARY_CLASSES), (cats[0] if cats else None))
     style = strategy_style or _style_of(primary)
     if not entry_rules:
@@ -227,115 +232,6 @@ def indicator_roles(indicator_names):
         roles[name] = _ROLE_OVERRIDES.get(k) or _CATEGORY_ROLE.get(
             INDICATOR_REGISTRY[name]["category"], "辅助信号")
     return roles
-
-
-def param_proximity(params_a, params_b):
-    """两个参数字典的数值相似度 0~1。无重叠参数返回 None（无法比较）。"""
-    pa = params_a or {}
-    pb = params_b or {}
-    keys = set(pa) & set(pb)
-    if not keys:
-        return None
-    scores = []
-    for k in keys:
-        a, b = pa.get(k), pb.get(k)
-        try:
-            a, b = float(a), float(b)
-        except (TypeError, ValueError):
-            continue
-        denom = max(abs(a), abs(b), 1e-9)
-        scores.append(max(0.0, 1.0 - abs(a - b) / denom))
-    return sum(scores) / len(scores) if scores else None
-
-
-def strategy_similarity(new_indicators, new_params, old_indicators, old_params=None):
-    """综合相似度 0~1：指标集合 Jaccard 80% + 参数邻近 20%。"""
-    nk = set(indicator_keys(new_indicators))
-    ok = set(indicator_keys(old_indicators))
-    if not nk or not ok:
-        return 0.0
-    jaccard = len(nk & ok) / len(nk | ok)
-    prox = param_proximity(new_params, old_params)
-    if prox is None:
-        return round(jaccard, 3)
-    return round(0.8 * jaccard + 0.2 * prox, 3)
-
-
-# ============================================================
-# 〇.五、因子探索引擎（逻辑约束组合，防随机堆砌/过拟合）
-# ============================================================
-# 核心研究因子池（4 类 17 个，从 INDICATOR_SCHEMA 精选，排除 K线形态等噪音指标）
-RESEARCH_POOL = {
-    "trend":      ["EMA 双均线", "SMA 三均线", "ADX/DMI 趋势强度", "SuperTrend 超级趋势", "Ichimoku 一目均衡"],
-    "momentum":   ["RSI 相对强弱", "MACD 异同均线", "KDJ 随机指标", "CCI 商品通道"],
-    "volatility": ["布林带 Bollinger", "Keltner 通道", "斐波那契回调", "Donchian 通道"],
-    "volume":     ["量比 Volume Ratio", "OBV 能量潮", "CMF 柴金流量", "MFI 资金流量"],
-}
-_PRIMARY_CLASSES = ("trend", "momentum", "volatility")   # 可做主信号的类
-_REGIME_BY_CLASS = {"trend": "趋势行情", "momentum": "趋势/震荡", "volatility": "震荡/均值回归", "volume": "通用"}
-
-
-def _class_of(name):
-    for c, names in RESEARCH_POOL.items():
-        if name in names:
-            return c
-    return None
-
-
-def factor_pool():
-    """因子池元数据（名称/类别/作用），供 UI 展示与假设生成。"""
-    return [{"name": n, "category": c, "role": indicator_roles([n]).get(n, "")}
-            for c, names in RESEARCH_POOL.items() for n in names]
-
-
-def generate_factor_combos(min_factors=2, max_factors=4):
-    """逻辑约束生成因子组合：
-      1. 同类最多 1 个（防冗余堆叠，如 EMA+SMA 都做趋势）
-      2. 必须有主信号（趋势/动量/波动），成交量不能单独成策略
-      3. 因子数 2~4（≤5 防过拟合）
-    返回按「因子数→名称」排序的组合列表（list of list[显示名]）。"""
-    from itertools import combinations
-    names = [n for ns in RESEARCH_POOL.values() for n in ns]
-    combos = []
-    for k in range(min_factors, max_factors + 1):
-        for combo in combinations(names, k):
-            cats = [_class_of(n) for n in combo]
-            if len(set(cats)) != len(cats):                    # 同类冗余因子不堆叠
-                continue
-            if not any(c in _PRIMARY_CLASSES for c in cats):   # 必须有主信号
-                continue
-            combos.append(sorted(combo))
-    combos.sort(key=lambda c: (len(c), c))
-    return combos
-
-
-def combo_to_hypothesis(combo_names, goal, asset="ETH", timeframe="4h",
-                        leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL):
-    """因子组合 → 研究假设 dict（含每指标作用/预期环境/风险假设，可直接喂 verify_hypothesis）。"""
-    roles = indicator_roles(combo_names)
-    params = {n: {pk: pv["default"] for pk, pv in INDICATOR_REGISTRY[n]["params"].items()}
-              for n in combo_names}
-    cats = [_class_of(n) for n in combo_names]
-    primary = next((c for c in cats if c in _PRIMARY_CLASSES), cats[0])
-    regime = _REGIME_BY_CLASS.get(primary, "通用")
-    logic = "；".join(f"{n}：{roles.get(n, '辅助信号')}" for n in combo_names)
-    strategy_config = build_strategy_config(combo_names, asset, timeframe, leverage,
-                                            tp_pct, sl_pct, strategy_style=_style_of(primary))
-    return {
-        "hypothesis_text": f"{' + '.join(combo_names)}组合",
-        "user_goal": goal,
-        "related_indicators": combo_names,
-        "parameters": params,
-        "asset": asset, "timeframe": timeframe, "leverage": leverage,
-        "tp_pct": tp_pct, "sl_pct": sl_pct,
-        "expected_logic": logic,
-        "expected_market_condition": regime,
-        "failure_environment": "震荡市" if regime != "趋势行情" else "趋势反转/低波动",
-        "risk_assumption": f"预期 Sharpe ≥ {CRITERIA['sharpe_min']}，最大回撤 < {CRITERIA['mdd_max']:.0f}%",
-        "strategy_style": strategy_config["strategy_style"],
-        "frequency": strategy_config["frequency"],
-        "strategy_config": strategy_config,
-    }
 
 
 # ============================================================
@@ -549,17 +445,6 @@ def grade_from(total):
     return "D"
 
 
-def overfitting_risk(stability):
-    """参数稳定性(0~100) → 过拟合风险标签。"""
-    if stability is None:
-        return "Unknown"
-    if stability >= 70:
-        return "Low"
-    if stability >= 40:
-        return "Medium"
-    return "High"
-
-
 GRADE_MEANING = {
     "A": "进入模拟盘观察",
     "B": "继续优化",
@@ -569,108 +454,16 @@ GRADE_MEANING = {
 
 
 # ============================================================
-# 五、防重复研究（指纹 + 参数邻近 + 失败记忆）
-# ============================================================
-_SIMILARITY_THRESHOLD = 0.8   # 相似度 ≥ 80% 判定「同一思想」
-
-
-def check_duplicate(indicator_names, param_overrides=None):
-    """查历史假设/实验/失败记忆，识别高度相似记录。返回命中列表（含失败原因/相似度）。"""
-    keys = indicator_keys(indicator_names)
-    if not keys:
-        return []
-    hits = []
-    # 历史假设
-    for h in db.list_hypotheses(200):
-        rel = _loads(h.get("related_indicators"))
-        sim = strategy_similarity(indicator_names, param_overrides, rel,
-                                  _loads(h.get("parameters")))
-        if sim >= _SIMILARITY_THRESHOLD:
-            hits.append({
-                "type": "hypothesis", "id": h["id"], "overlap": sim,
-                "text": h.get("hypothesis_text"), "status": h.get("status"),
-                "indicators": rel, "failure_reason": None,
-            })
-    # 历史实验
-    for e in db.list_experiments(200):
-        ic = _loads(e.get("indicator_combination"))
-        sim = strategy_similarity(indicator_names, param_overrides, ic,
-                                  _loads(e.get("parameters")))
-        if sim >= _SIMILARITY_THRESHOLD:
-            hits.append({
-                "type": "experiment", "id": e["id"], "overlap": sim,
-                "text": e.get("strategy_name") or "未命名", "status": e.get("grade") or "-",
-                "indicators": ic, "failure_reason": e.get("failure_reason"),
-            })
-    # 失败记忆（关键：避免重复验证已失败策略）
-    for fm in db.search_failure_memory(fingerprint=fingerprint(indicator_names),
-                                       indicator_combination=indicator_names):
-        hits.append({
-            "type": "failure_memory", "id": fm["id"], "overlap": 1.0,
-            "text": fm.get("strategy_name") or "历史失败策略", "status": "failed",
-            "indicators": _loads(fm.get("indicator_combination")),
-            "failure_reason": fm.get("failure_reason"), "failure_env": fm.get("failure_env"),
-        })
-    hits.sort(key=lambda x: -x["overlap"])
-    return hits
-
-
-def failure_memory_context(limit=15):
-    """失败记忆的文本摘要，注入 AI 提示，避免重复失败方向。"""
-    rows = db.list_failure_memory(limit)
-    if not rows:
-        return "（尚无失败研究记录）"
-    lines = []
-    for r in rows:
-        ic = "、".join(_loads(r.get("indicator_combination")) or []) or "未命名组合"
-        reason = r.get("failure_reason") or "-"
-        env = r.get("failure_env") or "-"
-        lines.append(f"- [{r.get('fingerprint') or ic}] {ic}｜失败原因:{reason}｜失效环境:{env}")
-    return "\n".join(lines)
-
-
-def duplicate_warning(indicator_names, param_overrides=None):
-    """生成重复研究提醒文案；无命中返回 None。"""
-    hits = check_duplicate(indicator_names, param_overrides)
-    if not hits:
-        return None
-    lines = ["⚠️ 该假设与历史研究高度相似，可能已在过去验证："]
-    for h in hits[:5]:
-        if h["type"] == "failure_memory":
-            tag, status = "失败记忆", "failed"
-        elif h["type"] == "hypothesis":
-            tag, status = "假设", h["status"]
-        else:
-            tag, status = "实验", h["status"]
-        lines.append(f"- [{tag}#{h['id']} · 状态 {status} · 相似度 {int(h['overlap']*100)}%] "
-                     f"{h['text']}")
-        if h.get("failure_reason"):
-            lines.append(f"    失败原因：{h['failure_reason']}")
-        if h.get("failure_env"):
-            lines.append(f"    失效环境：{h['failure_env']}")
-    return "\n".join(lines)
-
-
-# ============================================================
 # 六、AI 假设生成提示 + 解析
 # ============================================================
-def indicator_catalog() -> str:
-    lines = []
-    for name, info in INDICATOR_REGISTRY.items():
-        ps = info.get("params", {})
-        if ps:
-            plist = ", ".join(f"{pk}({pv['label']}默认{pv['default']})" for pk, pv in ps.items())
-        else:
-            plist = "无参数"
-        lines.append(f"- {name} [{info['category']}]: {info['desc']}; 参数: {plist}")
-    return "\n".join(lines)
 
 
 def hypothesis_prompt(goal, assets="ETH, BTC, SOL", timeframes="5m, 15m, 1h, 4h, 1d"):
-    return f"""你是 QuantCode 的量化研究员（主动研究模式）。用户研究目标是：
+    from platform_context import format_context_text
+    return f"""你是 QuantCode 的量化研究助手。用户研究目标是：
 "{goal}"
 
-请先分析下方「失败研究记忆」，避免重复已经失败的策略方向；再输出一个全新的、可回测的研究假设。
+你的任务：解析研究目标 → 生成一个全新的、可回测的研究假设。
 严格要求：只输出 JSON，不要输出任何其他文字或解释。
 
 JSON 结构（字段名固定）：
@@ -695,18 +488,14 @@ JSON 结构（字段名固定）：
 
 约束：
 - 可用资产: {assets}；可用周期: {timeframes}。
-- indicators 必须从下方清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
+- indicators 必须从下方「平台能力」的指标清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
 - params 的 key 必须用清单中给出的参数 key；值必须是数字。
 - entry_rules / exit_rules 各 1~3 条，描述具体开仓 / 平仓条件（不能为空）。
 - strategy_style 取：趋势跟踪 / 动量 / 均值回归 / 量价配合 / 高频 / 日内 之一。
 - 最多 3 个核心指标，避免堆叠冗余因子。
-- 不得生成与「失败研究记忆」指纹相同的指标组合。
 
-## 失败研究记忆（禁止重复这些方向）
-{failure_memory_context()}
-
-## 可用指标清单（名称 | 分类 | 参数）
-{indicator_catalog()}
+## 平台能力（quant_context，必须以此为准）
+{format_context_text()}
 """
 
 
@@ -722,105 +511,6 @@ def parse_hypothesis_json(text):
         return json.loads(t[s:e + 1])
     except Exception:
         return None
-
-
-# ============================================================
-# 六.五、参数敏感性分析（重点：参数稳定区域 + 过拟合风险）
-# ============================================================
-def _viable(m, base_trades=30):
-    """宽松生存判定：附近参数点是否仍具备统计意义（不崩塌即视为有效）。"""
-    trades = m.get("trade_count") or 0
-    if trades < max(15, int((base_trades or 0) * 0.4)):
-        return False
-    sharpe = m.get("sharpe") or 0.0
-    mdd = m.get("max_drawdown") if m.get("max_drawdown") is not None else 100.0
-    return (sharpe >= 0.3) or (mdd < 60.0 and (m.get("total_return") or 0) > 0)
-
-
-def _neighborhood(pmeta, base_val):
-    """在 base 附近生成 ±1/±2 步长邻域点（clamp 到 min/max，整型参数保留整型）。"""
-    step = pmeta.get("step", 1) or 1
-    lo, hi = pmeta.get("min"), pmeta.get("max")
-    base = float(base_val)
-    is_int = float(step).is_integer() and float(base_val).is_integer()
-    out = []
-    for mult in (-2, -1, 1, 2):
-        v = base + mult * step
-        if lo is not None and v < lo:
-            continue
-        if hi is not None and v > hi:
-            continue
-        out.append(int(round(v)) if is_int else round(v, 6))
-    return sorted(set(out))
-
-
-def run_sensitivity_point(df, coin, indicators, params, lev, tp, sl, strategy_factory=None):
-    """单点回测（只跑全周期 run_single，不跑 WF/MC，省算力）。返回指标 dict。"""
-    base_selected = build_selected(indicators, params)
-    kw = make_engine_kwargs(lev, tp, sl)
-    _, m = run_single(df, coin, _make_strategy(dict(base_selected), strategy_factory), kw)
-    return {
-        "total_return": m.get("total_return"), "sharpe": m.get("sharpe_ratio"),
-        "max_drawdown": m.get("max_drawdown"), "trade_count": m.get("total_trades"),
-        "win_rate": m.get("win_rate"), "profit_factor": m.get("profit_factor"),
-    }
-
-
-def sensitivity_analysis(df, coin, indicators, base_params, lev, tp, sl,
-                         strategy_factory=None):
-    """OAT 参数敏感性：逐参数扰动附近值，统计生存率 → 稳定区域 + 过拟合风险。
-
-    返回 dict：stable_ranges / param_viability / stability(0~100) / overfitting /
-    points_tested / points_viable / base_metrics / grid（供热力图）。
-    """
-    base = run_sensitivity_point(df, coin, indicators, base_params, lev, tp, sl, strategy_factory)
-    base_trades = base.get("trade_count") or 0
-    grid = [dict(base, params=base_params, viable=_viable(base, base_trades))]
-    param_viability = {}
-    stable_ranges = {}
-
-    for name in indicators:
-        info = INDICATOR_REGISTRY.get(name)
-        if not info:
-            continue
-        pvals = (base_params or {}).get(name) or {}
-        for pk, base_val in pvals.items():
-            pmeta = info["params"].get(pk)
-            if not pmeta:
-                continue
-            label = f"{name}.{pk}"
-            pv = {base_val: _viable(base, base_trades)}
-            for v in _neighborhood(pmeta, base_val):
-                perturb = json.loads(json.dumps(base_params))  # 深拷贝
-                perturb[name][pk] = v
-                try:
-                    pm = run_sensitivity_point(df, coin, indicators, perturb,
-                                               lev, tp, sl, strategy_factory)
-                except Exception:
-                    pm = {"trade_count": 0, "sharpe": 0.0, "max_drawdown": 100.0,
-                          "total_return": 0.0, "win_rate": 0.0, "profit_factor": 0.0}
-                ok = _viable(pm, base_trades)
-                pv[v] = ok
-                grid.append(dict(pm, params=perturb, viable=ok))
-            param_viability[label] = pv
-            viable_vals = sorted([k for k, ok in pv.items() if ok])
-            if viable_vals:
-                stable_ranges[label] = [viable_vals[0], viable_vals[-1]]
-
-    total_points = sum(len(pv) for pv in param_viability.values())
-    viable_points = sum(sum(1 for ok in pv.values() if ok) for pv in param_viability.values())
-    stability = round(100.0 * viable_points / max(total_points, 1), 1)
-
-    return {
-        "base_metrics": base,
-        "stable_ranges": stable_ranges,
-        "param_viability": param_viability,
-        "stability": stability,
-        "overfitting": overfitting_risk(stability),
-        "points_tested": total_points,
-        "points_viable": viable_points,
-        "grid": grid,
-    }
 
 
 # ============================================================
@@ -1012,140 +702,3 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
     verdict["experiment_id"] = exp_id
     verdict["report"] = report_text
     return verdict
-
-
-def run_sensitivity(hyp, m, df, coin, exp_id, strategy_factory=None):
-    """对已完成实验跑参数敏感性分析：更新实验记录（过拟合风险/参数稳定性/重评分），
-    并重建含「参数稳定性」章节的报告。返回 sensitivity dict。"""
-    indicators = _loads(hyp.get("related_indicators")) or []
-    params = _loads(hyp.get("parameters")) or {}
-    lev = hyp.get("leverage") or DEFAULT_LEVERAGE
-    tp = hyp.get("tp_pct") if hyp.get("tp_pct") is not None else DEFAULT_TP
-    sl = hyp.get("sl_pct") if hyp.get("sl_pct") is not None else DEFAULT_SL
-
-    sen = sensitivity_analysis(df, coin, indicators, params, lev, tp, sl, strategy_factory)
-    score = research_score(m, param_stability=sen["stability"])
-
-    db.update_experiment(exp_id, overfitting_risk=sen["overfitting"],
-                         param_stability=sen["stability"],
-                         research_score=score["total"], grade=score["grade"])
-
-    # 重建报告（带参数稳定性章节），并补一条报告记录
-    passed, failures = judge_pass(m)
-    verdict = {
-        "passed": passed, "failures": failures, "score": score,
-        "metrics": m, "indicators": indicators, "params": params,
-        "coin": coin, "leverage": lev, "tp_pct": tp, "sl_pct": sl,
-    }
-    report_text = build_report(hyp, indicators, params, m, verdict, sensitivity=sen)
-    db.add_report(experiment_id=exp_id, hypothesis_id=hyp.get("id"),
-                  grade=score["grade"], report_text=report_text)
-
-    sen["score"] = score
-    sen["report"] = report_text
-    return sen
-
-
-# ============================================================
-# 九、智能参数搜索（IS-only）+ 研究任务模式（批量自主研究）
-# ============================================================
-def parameter_search(df, coin, indicators, base_params, lev, tp, sl,
-                     strategy_factory=None, is_end_year=IS_END_YEAR):
-    """IS-only 参数搜索：只在训练集(df.year<=is_end_year)做贪心坐标下降寻优，禁止偷看 OOS。
-
-    每个参数在其邻域(±1/±2 步)扫描，用 IS Sharpe 选最优（无交易候选直接淘汰），
-    返回 best_params + 搜索轨迹 history。OOS 仅由调用方在最终验证时使用一次。
-    """
-    is_df = df[df.index.year <= is_end_year]
-    if len(is_df) < 100:
-        return {"best_params": base_params, "is_end_year": is_end_year, "history": [], "note": "IS 样本不足"}
-    best = json.loads(json.dumps(base_params or {}))
-    history = []
-    for name in indicators:
-        info = INDICATOR_REGISTRY.get(name)
-        if not info:
-            continue
-        pvals = (best or {}).get(name) or {}
-        for pk, base_val in list(pvals.items()):
-            pmeta = info["params"].get(pk)
-            if not pmeta:
-                continue
-            best_v, best_score = base_val, None
-            for v in [base_val] + _neighborhood(pmeta, base_val):
-                trial = json.loads(json.dumps(best))
-                trial[name][pk] = v
-                try:
-                    pm = run_sensitivity_point(is_df, coin, indicators, trial, lev, tp, sl, strategy_factory)
-                except Exception:
-                    continue
-                trades = pm.get("trade_count") or 0
-                history.append({"param": f"{name}.{pk}", "value": v,
-                                "sharpe": round(pm.get("sharpe") or 0, 3),
-                                "return": round(pm.get("total_return") or 0, 2),
-                                "trades": trades})
-                if trades < 10:
-                    continue
-                score = pm.get("sharpe") or 0.0
-                if best_score is None or score > best_score:
-                    best_score, best_v = score, v
-            if best_v is not None:
-                best[name][pk] = best_v
-    return {"best_params": best, "is_end_year": is_end_year, "history": history}
-
-
-def run_research_task(goal, df, coin, timeframe="4h", strategy_factory=None,
-                      max_hypotheses=20, min_factors=2, max_factors=3,
-                      leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL,
-                      progress=None):
-    """研究任务模式：目标 → 生成因子组合 → 建假设 → 回测验证 → 排名 → 优秀策略进候选库。
-
-    progress(done, total, label): 可选进度回调（供 UI 展示）。
-    返回 {goal, coin, timeframe, ranked(按综合分降序), summary, library_added}。
-    """
-    combos = generate_factor_combos(min_factors, max_factors)[:max_hypotheses]
-    ranked = []
-    total = len(combos)
-    for i, combo in enumerate(combos, 1):
-        hyp = combo_to_hypothesis(combo, goal, coin, timeframe, leverage, tp_pct, sl_pct)
-        hid = db.add_hypothesis(
-            hyp["hypothesis_text"], related_indicators=combo, user_goal=goal,
-            asset=coin, timeframe=timeframe, leverage=leverage,
-            parameters=hyp["parameters"], tp_pct=tp_pct, sl_pct=sl_pct,
-            expected_logic=hyp["expected_logic"],
-            expected_market_condition=hyp["expected_market_condition"],
-            risk_assumption=hyp["risk_assumption"],
-            failure_environment=hyp["failure_environment"],
-            strategy_config=hyp["strategy_config"])
-        hyp["id"] = hid
-        if progress:
-            progress(i, total, " + ".join(combo[:2]))
-        try:
-            v = verify_hypothesis(hyp, df, coin, strategy_factory)
-        except Exception as e:
-            ranked.append({"combo": combo, "hypothesis_id": hid, "passed": False,
-                           "score": {"total": 0, "grade": "D"}, "metrics": {},
-                           "failures": [], "error": str(e), "hyp": hyp})
-            continue
-        ranked.append({"combo": combo, "hypothesis_id": hid, "passed": v["passed"],
-                       "score": v["score"], "metrics": v["metrics"],
-                       "failures": v["failures"], "report": v["report"],
-                       "fingerprint": v["fingerprint"], "hyp": hyp})
-    ranked.sort(key=lambda r: -(r["score"].get("total") or 0))
-
-    # 优秀策略（通过门禁）进候选库
-    added = []
-    for r in [x for x in ranked if x.get("passed")][:5]:
-        entry = library_entry(r["hyp"], r["combo"], _loads(r["hyp"].get("parameters")),
-                              r["metrics"], {"passed": True, "score": r["score"],
-                                             "coin": coin, "leverage": leverage,
-                                             "tp_pct": tp_pct, "sl_pct": sl_pct})
-        db.add_strategy(**entry)
-        added.append(entry["name"])
-
-    passed = sum(1 for r in ranked if r.get("passed"))
-    top = ranked[0]
-    summary = (f"目标「{goal}」：生成 {total} 个假设，通过门禁 {passed} 个，"
-               f"Top1 = {' + '.join(top['combo'])}（{top['score']['total']} 分）。"
-               f"进候选库 {len(added)} 个。")
-    return {"goal": goal, "coin": coin, "timeframe": timeframe,
-            "ranked": ranked, "summary": summary, "library_added": added}

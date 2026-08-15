@@ -860,72 +860,12 @@ def _call_unified_api(messages: list, api_key: str, model_name: str, trading_not
 # Tab 2: 翔哥 AI 研究仓（研究状态 + 记忆 + 持久化）
 # ============================================================
 if "AI" in st.session_state.active_tab:
-    from ai_assistant import build_context, DEFAULT_TRADING_NOTES, get_quick_prompts
-    import research_agent as ra
     from research_storage import db
     import research_loop as rl
+    import api_config
     set_lang(st.session_state.lang)
 
-    # ---- 持久化初始化 + 会话管理（退出重进仍保留） ----
     db.init_db()
-    if "research_session_id" not in st.session_state:
-        recent = db.list_sessions(1)
-        st.session_state.research_session_id = recent[0]["id"] if recent else db.create_session()
-    sid = st.session_state.research_session_id
-    cur_session = db.get_session(sid)
-    if "ai_chat_history" not in st.session_state:
-        st.session_state.ai_chat_history = [
-            {"role": m["role"], "content": m["content"]} for m in db.list_messages(sid)
-        ]
-
-    # ---- 研究状态展示 ----
-    memory = ra.load_memory_summary()
-    stats = ra.memory_stats(memory)
-    st.markdown(f"### {t('research_current_project')}")
-    gcol, bcol = st.columns([4, 1])
-    with gcol:
-        if "research_goal" not in st.session_state:
-            st.session_state.research_goal = (cur_session["user_goal"] if cur_session and cur_session["user_goal"] else "")
-        def _on_goal_change():
-            db.update_session(st.session_state.research_session_id, user_goal=st.session_state.research_goal)
-            ctx = rl.parse_research_context(st.session_state.research_goal)
-            db.update_session(st.session_state.research_session_id,
-                              research_context=json.dumps(ctx, ensure_ascii=False))
-        st.text_input(t("research_goal_label"), key="research_goal",
-                      placeholder=t("research_goal_placeholder"), on_change=_on_goal_change)
-    with bcol:
-        if st.button(t("research_new_session")):
-            st.session_state.research_session_id = db.create_session()
-            st.session_state.ai_chat_history = []
-            st.session_state.pop("research_goal", None)
-            st.rerun()
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric(t("research_stats_hypotheses"), stats["hypotheses"])
-    m2.metric(t("research_stats_passed"), stats["passed"])
-    m3.metric(t("research_stats_failed"), stats["failed"])
-    m4.metric(t("research_stats_pending"), stats["pending"])
-    m5.metric(t("research_stats_experiments"), stats["experiments"])
-
-    with st.expander(t("research_experiments_title"), expanded=False):
-        if memory["experiments"]:
-            st.dataframe(pd.DataFrame([{
-                "策略": e["strategy_name"] or "未命名", "资产": e["asset"], "周期": e["timeframe"],
-                "收益%": round(e["total_return"] or 0, 2), "Sharpe": round(e["sharpe"] or 0, 2),
-                "MDD%": round(e["max_drawdown"] or 0, 2), "交易数": e["trade_count"], "评级": e["final_rating"] or "-",
-            } for e in memory["experiments"]]))
-        else:
-            st.caption(t("research_no_data"))
-
-    with st.expander(t("research_hypotheses_title"), expanded=False):
-        if memory["hypotheses"]:
-            st.dataframe(pd.DataFrame([{
-                "假设": h["hypothesis_text"], "状态": h["status"], "创建": h["created_time"],
-            } for h in memory["hypotheses"]]))
-        else:
-            st.caption(t("research_no_data"))
-
-    st.caption(t("research_memory_note", n=len(memory["recent_sessions"]), h=stats["hypotheses"], e=stats["experiments"]))
 
     # 模型预设 (整合所有主流API)
     ALL_MODELS = {
@@ -940,22 +880,16 @@ if "AI" in st.session_state.active_tab:
     with st.expander(t("ai_config"), expanded=not st.session_state.get("ai_configured", False)):
         c1, c2 = st.columns(2)
         ai_key = c1.text_input(t("api_key_input"), type="password",
-                               value=os.environ.get("AI_API_KEY", ""),
+                               value=api_config.load()["key"],
                                key="ai_main_key", placeholder=t("api_key_placeholder"))
         ai_model_name = c2.selectbox(t("model_select"), list(ALL_MODELS.keys()), index=0, key="ai_mdl",
             format_func=lambda x: {"DeepSeek-V3 (推荐)": t("model_dsv3"),
                                    "DeepSeek-R1 (推理)": t("model_dsr1")}.get(x, x))
 
-        if "trading_notes" not in st.session_state:
-            st.session_state.trading_notes = DEFAULT_TRADING_NOTES
-        st.caption(t("trading_notes_caption"))
-        trading_notes = st.text_area(t("notes_area"), value=st.session_state.trading_notes, height=100,
-                                      key="tnotes", label_visibility="collapsed")
-        st.session_state.trading_notes = trading_notes
-
     if not ai_key:
         st.info(t("ai_key_hint"))
     else:
+        api_config.save(ai_key, ai_model_name)
         st.session_state.ai_configured = True
 
     # ============================================================
@@ -967,14 +901,14 @@ if "AI" in st.session_state.active_tab:
 
     def _norm_tf(tf):
         tf = str(tf or "4h").strip().lower()
-        return tf if tf in ("15m", "1h", "4h", "1d") else "4h"
+        return tf if tf in ("5m", "15m", "1h", "4h", "1d") else "4h"
 
     def _norm_asset(a):
         a = str(a or "ETH").strip().upper()
         return a if a in ("ETH", "BTC", "SOL") else "ETH"
 
     def _freq_of(tf):
-        return {"15m": "高频", "1h": "日内", "4h": "波段", "1d": "低频"}.get(str(tf or "").lower(), "波段")
+        return {"5m": "高频", "15m": "高频", "1h": "日内", "4h": "波段", "1d": "低频"}.get(str(tf or "").lower(), "波段")
 
     def _js(v):
         if isinstance(v, (list, dict)):
@@ -989,109 +923,14 @@ if "AI" in st.session_state.active_tab:
     def _load_research_df(asset, timeframe):
         de = DataEngine()
         all_tf = de.get_multi_timeframe(asset)
-        df = all_tf.get(timeframe, all_tf["4h"])
+        # 引擎最小粒度键为 "15m"（内部优先加载 5m 数据）；"5m" 复用该基座
+        base_tf = "15m" if timeframe == "5m" else timeframe
+        df = all_tf.get(base_tf, all_tf["4h"])
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
-
-    # ============================================================
-    # Phase 3B: 研究任务模式（批量自主研究：目标 → 组合 → 回测 → 排名）
-    # ============================================================
-    with st.expander(t("rl_task_title"), expanded=False):
-        st.caption(t("rl_task_hint"))
-        tc1, tc2, tc3 = st.columns([3, 1, 1])
-        with tc1:
-            task_goal = st.text_input(t("research_goal_label"), key="rl_task_goal",
-                                      placeholder=t("rl_task_placeholder"))
-        with tc2:
-            task_asset = st.selectbox(t("rl_task_asset_label"), ["ETH", "BTC", "SOL"], key="rl_task_asset")
-        with tc3:
-            task_tf = st.selectbox(t("timeframe_select"), ["15m", "1h", "4h", "1d"], index=2, key="rl_task_tf")
-        tc4, tc5 = st.columns([1, 1])
-        with tc4:
-            task_n = st.slider(t("rl_task_count"), 5, 50, 20, key="rl_task_n")
-        with tc5:
-            task_maxf = st.slider(t("rl_task_max_factors"), 2, 4, 3, key="rl_task_maxf")
-
-        if st.button(t("rl_task_start"), key="rl_task_start",
-                     disabled=not task_goal.strip()):
-            task_id = db.create_task(task_goal.strip(), task_asset, task_tf)
-            st.session_state.rl_task_id = task_id
-
-            def _run_task(task_id, goal, asset, tf, n, maxf):
-                db.update_task(task_id, status="running", total=n)
-                try:
-                    df = _load_research_df(asset, tf)
-                    def _progress(done, total, label):
-                        db.update_task(task_id, done=done, total=total, current=label)
-                    result = rl.run_research_task(goal, df, asset, tf,
-                                                  max_hypotheses=n, max_factors=maxf,
-                                                  progress=_progress)
-                    db.update_task(task_id, status="done",
-                                   result=json.dumps(result, ensure_ascii=False))
-                except Exception as e:
-                    db.update_task(task_id, status="failed", result=str(e))
-
-            import threading
-            threading.Thread(target=_run_task, args=(task_id, task_goal.strip(),
-                              task_asset, task_tf, task_n, task_maxf), daemon=True).start()
-            st.rerun()
-
-        if st.button(t("rl_task_refresh"), key="rl_task_refresh"):
-            st.rerun()
-        for tk in db.list_tasks(5):
-            pct = (tk["done"] / tk["total"] * 100) if tk["total"] else 0
-            status = tk.get("status") or "pending"
-            st.markdown(f"**#{tk['id']}** `{tk['goal']}` · {tk['asset']} {tk['timeframe']} · "
-                        f"**{t('rl_task_status_' + status)}** ({tk['done']}/{tk['total']})")
-            if tk["status"] == "running":
-                st.progress(min(pct / 100.0, 1.0))
-                if tk.get("current"):
-                    st.caption(t("rl_task_current") + ": " + tk["current"])
-            if tk["status"] == "done" and tk.get("result"):
-                try:
-                    res = json.loads(tk["result"])
-                    st.success(res.get("summary", ""))
-                    if st.button(t("rl_task_view"), key=f"task_view_{tk['id']}"):
-                        st.session_state.rl_task_result = res
-                        st.rerun()
-                except Exception:
-                    st.error(tk["result"][:500])
-            if tk["status"] == "failed":
-                st.error(f"{t('rl_task_failed')}: {(tk.get('result') or '')[:500]}")
-
-    if "rl_task_result" in st.session_state:
-        res = st.session_state.rl_task_result
-        st.divider()
-        st.subheader(t("rl_task_ranking"))
-        st.caption(res.get("summary", ""))
-        rows = []
-        for rank, r in enumerate(res.get("ranked", []), 1):
-            sc = r.get("score", {})
-            m = r.get("metrics", {})
-            rows.append({
-                "#": rank, "策略": " + ".join(r.get("combo", [])),
-                "评分": sc.get("total"), "等级": sc.get("grade"),
-                "判定": t("rl_verdict_pass") if r.get("passed") else t("rl_verdict_fail"),
-                "收益%": round(m.get("total_return") or 0, 1),
-                "Sharpe": round(m.get("sharpe") or 0, 2),
-                "OOS%": round(m.get("oos_return") or 0, 1),
-                "MDD%": round(m.get("max_drawdown") or 0, 1),
-            })
-        if rows:
-            st.dataframe(pd.DataFrame(rows))
-            st.caption(t("rl_indicator_roles"))
-            for r in res.get("ranked", [])[:5]:
-                label = f"{'✅' if r.get('passed') else '❌'} {' + '.join(r.get('combo', []))} · {r.get('score', {}).get('total')} 分"
-                with st.expander(label):
-                    if r.get("report"):
-                        st.markdown(r["report"])
-                    elif r.get("error"):
-                        st.error(r["error"])
-                    else:
-                        st.caption("；".join(r.get("failures", [])))
 
     # --- 一、创建研究任务 ---
     with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
@@ -1107,7 +946,7 @@ if "AI" in st.session_state.active_tab:
             with st.spinner(t("rl_generating")):
                 msgs = [{"role": "system", "content": t("rl_sys_prompt")},
                         {"role": "user", "content": rl.hypothesis_prompt(goal.strip())}]
-                res = _call_unified_api(msgs, ai_key, ai_model_name, trading_notes)
+                res = _call_unified_api(msgs, ai_key, ai_model_name, "")
                 if res["success"]:
                     spec = rl.parse_hypothesis_json(res["content"])
                     if not spec:
@@ -1118,7 +957,6 @@ if "AI" in st.session_state.active_tab:
                         if not indicators:
                             st.error(t("rl_no_valid_indicators"))
                         else:
-                            warn = rl.duplicate_warning(indicators, spec.get("params"))
                             _h_asset = _norm_asset(spec.get("asset"))
                             _h_tf = _norm_tf(spec.get("timeframe"))
                             _h_lev = float(spec.get("leverage") or 2)
@@ -1149,7 +987,7 @@ if "AI" in st.session_state.active_tab:
                             )
                             st.session_state.rl_created = {
                                 "hid": hid, "spec": spec, "indicators": indicators,
-                                "warn": warn, "invalid": invalid,
+                                "invalid": invalid,
                             }
                             st.rerun()
                 else:
@@ -1165,10 +1003,6 @@ if "AI" in st.session_state.active_tab:
                     f"{c['spec'].get('leverage')}x · TP {c['spec'].get('tp_pct')}% / SL {c['spec'].get('sl_pct')}%")
         if c["invalid"]:
             st.warning(t("rl_invalid_indicators") + "：" + "、".join(c["invalid"]))
-        if c["warn"]:
-            st.warning(c["warn"])
-        else:
-            st.caption(t("rl_no_dup"))
 
     # --- 二、验证假设 ---
     st.markdown(f"**{t('rl_hypotheses_title')}**")
@@ -1195,7 +1029,6 @@ if "AI" in st.session_state.active_tab:
                         df = _load_research_df(asset, tf)
                         verdict = rl.verify_hypothesis(h, df, asset)
                         st.session_state.rl_last_verdict = verdict
-                        st.session_state.rl_last_hyp = h
                         st.session_state.pop("rl_added", None)
                         # 自动填充回测参数栏（品种/周期/杠杆/TP/SL/指标）
                         st.session_state["coin"] = asset
@@ -1216,12 +1049,11 @@ if "AI" in st.session_state.active_tab:
                     except Exception as e:
                         st.error(f"{t('rl_verify_error')}: {e}")
 
-    # --- 三、验证结果 + 参数敏感性 + 加入策略库 ---
+    # --- 三、验证结果 + 加入策略库 ---
     if "rl_last_verdict" in st.session_state:
         v = st.session_state.rl_last_verdict
-        h = st.session_state.rl_last_hyp
         sc = v["score"]
-        sen = st.session_state.get("rl_sensitivity")
+        m = v["metrics"]
         st.divider()
         st.subheader(t("rl_verdict_title"))
         vc1, vc2, vc3 = st.columns(3)
@@ -1232,39 +1064,17 @@ if "AI" in st.session_state.active_tab:
             st.metric(t("rl_grade"), sc["grade"])
             st.metric(t("rl_grade_meaning"), rl.GRADE_MEANING.get(sc["grade"], "-"))
         with vc3:
-            _ofit = {"Low": "rl_overfit_low", "Medium": "rl_overfit_medium",
-                     "High": "rl_overfit_high", "Unknown": "rl_not_evaluated"}
-            risk = t(_ofit.get((sen or {}).get("overfitting"), "rl_not_evaluated"))
-            st.metric(t("rl_overfitting"), risk)
-            st.metric(t("rl_param_stability"), f"{(sen or {}).get('stability', sc.get('param_stability', '-'))}")
+            st.metric(t("total_return"), f"{round(m.get('total_return') or 0, 1)}%")
+            st.metric(t("max_drawdown"), f"{round(m.get('max_drawdown') or 0, 1)}%")
         if not v["passed"]:
             st.error("；".join(v["failures"]))
         st.caption(t("rl_score_breakdown", ret=sc["return"], sharpe=sc["sharpe"], mdd=sc["mdd"],
                      oos=sc["oos"], param=sc["param_stability"], mc=sc["monte_carlo"]))
 
-        sc1, sc2 = st.columns([1, 3])
-        with sc1:
-            if st.button(t("rl_sensitivity_btn"), key="rl_sensitivity_run"):
-                with st.spinner(t("rl_sensitivity_running")):
-                    asset = _norm_asset(h.get("asset"))
-                    df = _load_research_df(asset, _norm_tf(h.get("timeframe")))
-                    st.session_state.rl_sensitivity = rl.run_sensitivity(
-                        h, v["metrics"], df, asset, v["experiment_id"])
-                    st.rerun()
-        if sen:
-            st.success(t("rl_sensitivity_done") + f" · {t('rl_param_stability')} {sen['stability']} / 100")
-            if sen.get("stable_ranges"):
-                st.markdown("**" + t("rl_stable_ranges") + "**")
-                for lab, rng in sen["stable_ranges"].items():
-                    st.markdown(f"- `{lab}` → [{rng[0]}, {rng[1]}]")
-            else:
-                st.warning(t("rl_no_stable_region"))
-
         if st.session_state.get("rl_added"):
             st.success(t("rl_added_library") + ": " + st.session_state.rl_added)
-        report_to_show = (sen or {}).get("report") or v["report"]
         with st.expander(t("rl_report"), expanded=True):
-            st.markdown(report_to_show)
+            st.markdown(v["report"])
 
     # --- 四、策略库 + 研究报告 + 失败记忆 ---
     with st.expander(t("rl_library_title"), expanded=False):
@@ -1313,86 +1123,6 @@ if "AI" in st.session_state.active_tab:
                     st.markdown(r["report_text"] or "-")
         else:
             st.caption(t("research_no_data"))
-
-    # 快捷按钮行
-    qcols = st.columns(5)
-    quick_msgs = get_quick_prompts()
-    quick_clicked = None
-    for i, (label, prompt) in enumerate(quick_msgs):
-        if qcols[i].button(label, key=f"qp_{i}", disabled=not ai_key):
-            quick_clicked = prompt
-
-    # 一键诊断按钮
-    dcol, _ = st.columns([1, 3])
-    if dcol.button(t("btn_diagnose"), type="primary", disabled=not ai_key):
-        quick_clicked = t("diagnose_report_prompt")
-
-    # 聊天记录
-    for msg in st.session_state.ai_chat_history:
-        with st.chat_message(msg["role"]):
-            st.write(msg["content"])
-
-    user_msg = st.chat_input(t("chat_input_placeholder"), key="ai_main_chat", disabled=not ai_key)
-    if quick_clicked:
-        user_msg = quick_clicked
-
-    if user_msg and ai_key:
-        st.session_state.ai_chat_history.append({"role": "user", "content": user_msg})
-        db.add_message(sid, "user", user_msg)
-        if cur_session and not (cur_session["conversation_title"] or "").strip():
-            db.update_session(sid, conversation_title=user_msg[:30])
-        with st.chat_message("user"): st.write(user_msg)
-
-        # 构建实时上下文
-        try:
-            df_ctx = load_cached_15min(coin)
-            if not isinstance(df_ctx.index, pd.DatetimeIndex):
-                df_ctx.index = pd.to_datetime(df_ctx.index)
-            if hasattr(df_ctx.index, 'tz') and df_ctx.index.tz is not None:
-                df_ctx.index = df_ctx.index.tz_localize(None)
-            px = float(df_ctx['close'].iloc[-1])
-            ind_ctx = {}
-            for name, cfg in st.session_state.selected_indicators.items():
-                if not cfg.get("enabled"): continue
-                info = INDICATOR_REGISTRY.get(name)
-                if not info: continue
-                try:
-                    dft = df_ctx.tail(200).copy()
-                    info["compute"](dft, cfg.get("params", {}))
-                    l = "_long" in dft.columns and dft["_long"].iloc[-1]
-                    s = "_short" in dft.columns and dft["_short"].iloc[-1]
-                    ind_ctx[name] = t("signal_long") if l else (t("signal_short") if s else t("signal_none"))
-                except: ind_ctx[name] = t("diag_abnormal")
-        except: px = 0; ind_ctx = {}
-
-        bt = {}
-        btf = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backtest_result.json")
-        if os.path.exists(btf):
-            try:
-                with open(btf) as f: bt = json.load(f)
-            except: pass
-
-        system_prompt = ra.build_system_prompt(None, memory)
-        try:
-            system_prompt += "\n\n## 当前市场快照\n" + build_context(coin, timeframe, px, ind_ctx, bt)
-        except Exception:
-            pass
-        msgs = [{"role": "system", "content": system_prompt}] + st.session_state.ai_chat_history[-8:]
-
-        with st.chat_message("assistant"):
-            with st.spinner(t("spinner_thinking")):
-                result = _call_unified_api(msgs, ai_key, ai_model_name, trading_notes)
-                if result["success"]:
-                    st.write(result["content"])
-                    st.caption(t("model_caption", model=result.get('model','?')))
-                    st.session_state.ai_chat_history.append({"role": "assistant", "content": result["content"]})
-                    db.add_message(sid, "assistant", result["content"])
-                else:
-                    st.error(result["error"])
-
-    if st.session_state.ai_chat_history:
-        if st.button(t("btn_clear_chat")):
-            st.session_state.ai_chat_history = []; st.rerun()
 
     st.stop()
 

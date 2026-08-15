@@ -4,8 +4,8 @@ UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 版本�
       无 use_container_width / width="stretch" 残留（版本无关默认布局）·
       AppTest 完整启动 + 侧边栏按钮 + AI 研究仓页面加载 ·
       验证按钮唯一 key + 多验证按钮共存（防 auto-generated ID 冲突）·
-      登录→AI 研究仓→create_session→输入目标→update_session（防 AttributeError）·
-      创建任务→启动研究→重渲染（防 st.form 嵌套 button 的 StreamlitAPIException）
+      AI 研究舱 V1：登录→研究仓→目标输入框→验证按钮（无 AttributeError）·
+      API Key 持久化 save/load 往返 + 环境变量回退
 运行: python test_ui_smoke.py
 """
 import os
@@ -96,7 +96,7 @@ def main():
     assert not errs, f"启动异常: {errs}"
     print("[OK] 6. AppTest 启动（登录页）无异常")
 
-    # 7) 登录 → AI 研究仓：验证按钮唯一 key + create_session + 输入目标触发 update_session（无 AttributeError）
+    # 7) 登录 → AI 研究仓：验证按钮唯一 key + 研究目标输入框（V1 单目标入口）
     _orig_path = db.DB_PATH
     try:
         tmp = tempfile.mkdtemp()
@@ -121,61 +121,41 @@ def main():
         for _k in ("clear_cache_btn", "all_history_btn", "apply_date_btn", "logout_btn"):
             assert _k in sb_keys, f"侧边栏按钮缺少 key={_k}（现有 {sb_keys}）"
 
-        # 进入研究仓自动 create_session（无 AttributeError）
-        sessions = db.list_sessions(1)
-        assert sessions, "进入研究仓未自动创建 session"
-        sid = sessions[0]["id"]
-
-        # 输入研究目标 → 触发 on_change → db.update_session（无 AttributeError 且生效）
-        at.text_input(key="research_goal").set_value("寻找 ETH 趋势策略")
+        # 研究目标输入框（V1 单目标入口 key=rl_goal），set_value 触发正常 rerun
+        at.text_input(key="rl_goal").set_value("寻找 ETH 趋势策略")
         at.run()
         errs = list(getattr(at, "exception", []) or [])
-        assert not errs, f"输入研究目标触发 update_session 异常: {errs}"
-        assert db.get_session(sid)["user_goal"] == "寻找 ETH 趋势策略", "update_session 未生效"
+        assert not errs, f"输入研究目标异常: {errs}"
 
-        print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + create_session + update_session 均无 AttributeError")
+        print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + 目标输入框 均无异常")
     finally:
         db.DB_PATH = _orig_path
 
-    # 8) 创建任务 + 启动研究：登录→AI研究仓→输入目标→点启动→重新渲染，无 StreamlitAPIException（form 嵌套回归）
+    # 7b) API Key 持久化：save → load 往返一致 + 环境变量回退
+    import api_config
+    _orig_cfg_path = api_config._CONFIG_PATH
+    _orig_env = os.environ.get("AI_API_KEY")
+    try:
+        api_config._CONFIG_PATH = os.path.join(tempfile.mkdtemp(), "ai_config.json")
+        api_config.save("sk-test-123", "DeepSeek-V3 (推荐)")
+        cfg = api_config.load()
+        assert cfg["key"] == "sk-test-123", f"load 未返回已保存 key: {cfg}"
+        assert cfg["model"] == "DeepSeek-V3 (推荐)", "load 未返回已保存 model"
+        api_config._CONFIG_PATH = os.path.join(tempfile.mkdtemp(), "missing.json")
+        os.environ["AI_API_KEY"] = "sk-env-456"
+        assert api_config.load()["key"] == "sk-env-456", "环境变量回退失败"
+        print("[OK] 7b. API Key 持久化：save/load 往返 + 环境变量回退")
+    finally:
+        api_config._CONFIG_PATH = _orig_cfg_path
+        if _orig_env is None:
+            os.environ.pop("AI_API_KEY", None)
+        else:
+            os.environ["AI_API_KEY"] = _orig_env
+
+    # 9) DuplicateElementKey 回归：登录→AI研究仓→点击验证→rerun，无 StreamlitDuplicateElementKey
     import pandas as pd
     import research_loop as rl
     import engine_core
-    _orig_path2 = db.DB_PATH
-    _orig_run = rl.run_research_task
-    _orig_mtf = engine_core.DataEngine.get_multi_timeframe
-    try:
-        tmp2 = tempfile.mkdtemp()
-        db.DB_PATH = os.path.join(tmp2, "smoke2.db")
-        db.init_db()
-        # 桩替换：smoke test 只验证 UI 渲染，不触发真实回测 + 网络数据刷新
-        rl.run_research_task = lambda *a, **k: {"summary": "smoke stub", "ranked": [], "passed": 0}
-        _idx = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 04:00"])
-        _fake = pd.DataFrame({"open": [100.0, 101.0], "high": [102.0, 103.0],
-                              "low": [99.0, 98.0], "close": [101.0, 102.0],
-                              "volume": [1000.0, 1100.0]}, index=_idx)
-        engine_core.DataEngine.get_multi_timeframe = lambda self, asset: {tf: _fake for tf in ("15m", "1h", "4h", "1d")}
-
-        at.session_state["logged_in"] = True
-        at.session_state["active_tab"] = "AI 对话舱"
-        at.run()
-        assert not list(getattr(at, "exception", []) or []), "AI 研究仓渲染异常"
-
-        at.text_input(key="rl_task_goal").set_value("寻找 ETH 趋势策略")
-        at.run()
-        assert not list(getattr(at, "exception", []) or []), "输入任务目标异常"
-
-        at.button(key="rl_task_start").click()
-        at.run()
-        assert not list(getattr(at, "exception", []) or []), "启动研究触发 StreamlitAPIException"
-        assert db.list_tasks(1), "启动研究未创建任务"
-        print("[OK] 8. 创建任务 + 启动研究：登录→AI研究仓→输入目标→启动→重渲染，无 StreamlitAPIException")
-    finally:
-        db.DB_PATH = _orig_path2
-        rl.run_research_task = _orig_run
-        engine_core.DataEngine.get_multi_timeframe = _orig_mtf
-
-    # 9) DuplicateElementKey 回归：登录→AI研究仓→点击验证→rerun，无 StreamlitDuplicateElementKey
     _orig_verify = rl.verify_hypothesis
     _orig_path3 = db.DB_PATH
     _orig_mtf2 = engine_core.DataEngine.get_multi_timeframe

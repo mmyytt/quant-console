@@ -75,6 +75,34 @@ def get_platform_context_json() -> str:
     return json.dumps(build_platform_context(), ensure_ascii=False, indent=2)
 
 
+def format_context_text() -> str:
+    """把平台能力地图格式化为可注入 AI 提示的文本块（研究助手 V1 的 quant_context）。"""
+    ctx = build_platform_context()
+    caps = ctx["backtest_capabilities"]
+    rc = ctx["risk_controls"]
+    lines = ["## 平台能力（quant_context，必须以此为准）",
+             f"- 可交易资产: {'、'.join(caps['assets'])}",
+             f"- 回测周期: {'、'.join(caps['timeframes'])}",
+             f"- 指标组合方式: {'、'.join(ctx['strategies']['combination_modes'])}",
+             f"- 方向: {'、'.join(ctx['strategies']['directions'])}",
+             f"- 验证手段: {'、'.join(caps['validation'])}",
+             "",
+             "## 风控能力",
+             f"- 仓位模式: {'、'.join(rc['position_modes'])}",
+             f"- 止盈止损模式: {'、'.join(rc['tp_sl_modes'])}",
+             f"- 风控参数: {'、'.join(rc['parameters'])}",
+             "",
+             "## 可用指标清单（名称 | 分类 | 默认参数）"]
+    for ind in ctx["indicators"]:
+        params = ind["params"]
+        if params:
+            plist = ", ".join(f"{pv['label']}={pv['default']}" for pv in params.values())
+        else:
+            plist = "无参数"
+        lines.append(f"- {ind['name']} [{ind['category']}]: {ind['desc']}；参数: {plist}")
+    return "\n".join(lines)
+
+
 def refresh_platform_context_file(path=None):
     """将能力地图落盘为 platform_context.json（供交付/调试可见）。"""
     path = path or os.path.join(_BASE_DIR, "platform_context.json")

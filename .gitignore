@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 .env
+.ai_config.json
 data/
 *.pkl
 *.zip
