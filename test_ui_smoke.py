@@ -3,7 +3,8 @@ UI 冒烟测试：研究闭环页面文字 / 存储层导出 / Streamlit 版本�
 覆盖：i18n 静态 key 完整 · 动态状态 key 解析 · research_storage 导出齐全 ·
       无 use_container_width / width="stretch" 残留（版本无关默认布局）·
       AppTest 完整启动 + 侧边栏按钮 + AI 研究仓页面加载 ·
-      验证按钮唯一 key + 多验证按钮共存（防 auto-generated ID 冲突）
+      验证按钮唯一 key + 多验证按钮共存（防 auto-generated ID 冲突）·
+      登录→AI 研究仓→create_session→输入目标→update_session（防 AttributeError）
 运行: python test_ui_smoke.py
 """
 import os
@@ -86,7 +87,7 @@ def main():
     assert not errs, f"启动异常: {errs}"
     print("[OK] 6. AppTest 启动（登录页）无异常")
 
-    # 7) 多个验证按钮共存：临时 DB 注入 3 条假设 → AI 研究仓同时渲染多个 key=verify_{id}
+    # 7) 登录 → AI 研究仓：验证按钮唯一 key + create_session + 输入目标触发 update_session（无 AttributeError）
     _orig_path = db.DB_PATH
     try:
         tmp = tempfile.mkdtemp()
@@ -99,11 +100,26 @@ def main():
         at.session_state["active_tab"] = "AI 对话舱"
         at.run()
         errs = list(getattr(at, "exception", []) or [])
-        assert not errs, f"多验证按钮共存异常: {errs}"
+        assert not errs, f"AI 研究仓渲染异常: {errs}"
+
+        # 验证按钮：多条假设同时渲染多个 key=verify_{id}，不重复 ID
         verify_keys = [b.key for b in at.button
                        if str(getattr(b, "key", "")).startswith("verify_")]
         assert len(verify_keys) >= 3, f"预期 ≥3 个验证按钮，实际 {len(verify_keys)}"
-        print(f"[OK] 7. 多个验证按钮共存（{len(seeded)} 条假设 → {len(verify_keys)} 个 key=verify_*）无重复 ID 异常")
+
+        # 进入研究仓自动 create_session（无 AttributeError）
+        sessions = db.list_sessions(1)
+        assert sessions, "进入研究仓未自动创建 session"
+        sid = sessions[0]["id"]
+
+        # 输入研究目标 → 触发 on_change → db.update_session（无 AttributeError 且生效）
+        at.text_input(key="research_goal").set_value("寻找 ETH 趋势策略")
+        at.run()
+        errs = list(getattr(at, "exception", []) or [])
+        assert not errs, f"输入研究目标触发 update_session 异常: {errs}"
+        assert db.get_session(sid)["user_goal"] == "寻找 ETH 趋势策略", "update_session 未生效"
+
+        print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + create_session + update_session 均无 AttributeError")
     finally:
         db.DB_PATH = _orig_path
 
