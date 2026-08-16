@@ -11,6 +11,7 @@ import json
 import random
 
 from indicator_schema import INDICATOR_REGISTRY, INDICATOR_SCHEMA
+import research_memory as rmem
 from research_storage import db
 from research_phase1 import (
     make_engine_kwargs, run_single, simple_walk_forward,
@@ -1744,6 +1745,16 @@ def _pos_label(pos):
     return f"{pos.get('_init_alloc_pct', 30):g}%不加仓"
 
 
+def _search_log(i, total, combo):
+    """[SEARCH] 日志：候选序号 + 指标参数（验证搜索空间真实展开，非全默认）。"""
+    po = combo.get("param_overrides") or {}
+    parts = []
+    for name, kv in po.items():
+        for pk, v in kv.items():
+            parts.append(f"{pk}={v}")
+    return f"[SEARCH] {i + 1}/{total} " + (" ".join(parts) if parts else "(默认参数)")
+
+
 def _linspace_idx(length, n):
     """等距抽样 n 个索引 (0..length-1)。"""
     if length <= 0:
@@ -1753,10 +1764,26 @@ def _linspace_idx(length, n):
     return sorted(set(int(round(i * (length - 1) / (n - 1))) for i in range(n)))
 
 
-def _grid_values(schema_key, n=5):
-    """对指标 schema 的每个带 min/max 参数生成确定性等距网格（整型取整、尊重 step）。
+def _uniform_grid(pv, n=5):
+    """回退：对单个参数做 min-max 均匀采样（整型取整、尊重 step）。"""
+    lo, hi = pv["min"], pv["max"]
+    step = pv.get("step", 1) or 1
+    is_int = _param_type_int(pv)
+    vals = []
+    v = lo
+    while v <= hi + 1e-9:
+        vals.append(int(round(v)) if is_int else round(v, 6))
+        v += step
+    if len(vals) > n:
+        vals = [vals[i] for i in _linspace_idx(len(vals), n)]
+    return vals
 
-    返回 [(参数key, [网格值...]), ...]，每个值都在 [min,max] 内，始终含 default。
+
+def _grid_values(schema_key, n=5, timeframe=None, style=None):
+    """对指标 schema 的每个带 min/max 参数生成网格。
+
+    优先用研究先验记忆（research_memory，70% 经验优先 + 30% 探索），
+    无先验的参数回退到 min-max 均匀采样。每个值都在 [min,max] 内，始终含 default。
     n 为目标网格点数（standard 5 / deep 10）。禁止生成 schema 之外的参数。
     """
     s = INDICATOR_SCHEMA.get(schema_key)
@@ -1766,16 +1793,9 @@ def _grid_values(schema_key, n=5):
     for pk, pv in s["params"].items():
         if "min" not in pv or "max" not in pv:
             continue
-        lo, hi = pv["min"], pv["max"]
-        step = pv.get("step", 1) or 1
-        is_int = _param_type_int(pv)
-        vals = []
-        v = lo
-        while v <= hi + 1e-9:
-            vals.append(int(round(v)) if is_int else round(v, 6))
-            v += step
-        if len(vals) > n:
-            vals = [vals[i] for i in _linspace_idx(len(vals), n)]
+        vals = rmem.prior_grid(schema_key, pk, n, timeframe=timeframe, style=style)
+        if vals is None:
+            vals = _uniform_grid(pv, n)
         dft = pv["default"]
         if dft not in vals:
             vals.append(dft)
@@ -1846,16 +1866,36 @@ def _is_extreme_params(param_overrides):
     return False
 
 
-# 风险/仓位搜索网格（值均在引擎允许范围，禁止硬编码超范围/不存在参数）
-_LEVERAGE_GRID = [1, 2, 3, 5]
-_TP_SL_GRID = [(8.0, 3.0), (12.0, 5.0), (16.0, 5.0), (20.0, 8.0), (12.0, 8.0)]
-_POSITION_PRESETS = [
-    {"_init_alloc_pct": 30.0, "_enable_pyramiding": False},
-    {"_init_alloc_pct": 50.0, "_enable_pyramiding": True, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_pyr_trail": False},
-    {"_init_alloc_pct": 50.0, "_enable_pyramiding": True, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_pyr_trail": True},
-    {"_init_alloc_pct": 70.0, "_enable_pyramiding": True, "_pyr_add_pct": 0.25, "_pyr_max": 3, "_pyr_trail": False},
-    {"_init_alloc_pct": 70.0, "_enable_pyramiding": True, "_pyr_add_pct": 0.5, "_pyr_max": 3, "_pyr_trail": True},
-]
+# 风险/仓位搜索网格统一由 research_memory（研究先验记忆）派生，禁止在此硬编码。
+_LEVERAGE_GRID = rmem.LEVERAGE_GRID
+_TP_SL_GRID = rmem.TP_SL_GRID
+_POSITION_PRESETS = rmem.POSITION_PRESETS
+
+
+def _candidate_prior_score(combo):
+    """候选整体参数合理性评分（0~1）。空覆盖=默认参数=1.0（最稳健）。
+
+    对每个被覆盖的指标参数调用 research_memory.param_prior_score，
+    取平均；极端边界值（schema min/max）判为 0.1。只评估指标参数，不含风控。
+    """
+    po = combo.get("param_overrides") or {}
+    if not po:
+        return 1.0
+    scores = []
+    for name, kv in po.items():
+        key = _NAME_TO_KEY.get(name)
+        s = INDICATOR_SCHEMA.get(key) if key else None
+        for pk, v in kv.items():
+            pv = (s or {}).get("params", {}).get(pk) if s else None
+            extreme = False
+            if pv and "min" in pv and "max" in pv:
+                try:
+                    val = float(v)
+                    extreme = abs(val - pv["min"]) < 1e-9 or abs(val - pv["max"]) < 1e-9
+                except (TypeError, ValueError):
+                    pass
+            scores.append(rmem.param_prior_score(key, pk, v, is_extreme=extreme))
+    return sum(scores) / len(scores) if scores else 1.0
 
 
 def build_search_space(directions, mode="standard"):
@@ -1879,17 +1919,20 @@ def build_search_space(directions, mode="standard"):
         pos0 = _position_params_from(spec) or {"_init_alloc_pct": 30.0, "_enable_pyramiding": False}
 
         def _add(label, params, lev, tp, sl, pos):
-            combos.append({"spec": spec, "indicators": indicators,
-                           "param_overrides": params, "leverage": lev,
-                           "tp_pct": tp, "sl_pct": sl, "position_params": pos,
-                           "label": label})
+            combo = {"spec": spec, "indicators": indicators,
+                     "param_overrides": params, "leverage": lev,
+                     "tp_pct": tp, "sl_pct": sl, "position_params": pos,
+                     "label": label}
+            combo["prior_score"] = _candidate_prior_score(combo)
+            combos.append(combo)
 
         # 1. 基准
         _add("基准", base_params, lev0, tp0, sl0, pos0)
         # 2. 指标参数网格（一次只动一个参数）；深度模式额外交叉 3x 杠杆以补齐样本量
         for name in indicators:
             key = _NAME_TO_KEY.get(name)
-            for pk, vals in _grid_values(key, grid_n):
+            for pk, vals in _grid_values(key, grid_n, timeframe=spec.get("timeframe"),
+                                         style=spec.get("strategy_style")):
                 for v in vals:
                     po = {n: dict(p) for n, p in base_params.items()}
                     po.setdefault(name, {})[pk] = v
@@ -1959,6 +2002,10 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
             "样本外失败": 0, "过拟合": 0, "风险过高": 0, "回测异常": 0}
     stage_counts = {"pool": total}
 
+    # 研究先验统计：经验参数（prior_score>=0.8）vs 探索参数（<0.8），供报告展示「非随机测试」
+    _pref = sum(1 for c in pool if (c.get("prior_score") or 0.0) >= 0.8)
+    prior_stats = {"preferred": _pref, "exploration": total - _pref, "total": total}
+
     def _notify(i, n, label):
         if progress:
             progress(i, n, label)
@@ -1970,6 +2017,7 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     s1 = []
     for i, c in enumerate(pool):
         _notify(i, total, f"快速回测 {c['label']}（通过{len(s1)} 淘汰{sum(elim.values())}）")
+        print(_search_log(i, total, c), flush=True)
         if _is_extreme_params(c["param_overrides"]):
             elim["参数极端"] += 1
             continue
@@ -2096,6 +2144,7 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
             "robustness": item["robustness"],
             "label": c["label"],
             "spec": c["spec"],
+            "prior_score": c.get("prior_score", 1.0),
         })
 
     result = {
@@ -2103,6 +2152,7 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
         "pool_size": total,
         "stage_counts": stage_counts,
         "elimination": elim,
+        "prior_stats": prior_stats,
         "top": top_out,
     }
     result["report"] = build_research_report(result, coin)
@@ -2114,10 +2164,15 @@ def build_research_report(result, coin):
     sc = result["stage_counts"]
     elim = result["elimination"]
     plan = result.get("plan") or {}
+    ps = result.get("prior_stats") or {}
     L = ["# 量化研究实验报告", "",
          f"- 研究目标：{plan.get('goal') or '-'}",
          f"- 标的：{coin} · 资产池：{plan.get('universe') or '-'}",
          f"- 搜索规模：{plan.get('search_scale') or '-'}",
+         "", "## 研究经验（先验记忆）",
+         f"- 经验参数：**{ps.get('preferred', 0)}** 个（机构常用区域）",
+         f"- 探索参数：{ps.get('exploration', 0)} 个（边缘探索，不关闭）",
+         f"- 总候选：{ps.get('total', sc.get('pool', 0))} 个",
          "", "## 搜索与淘汰",
          f"- 生成候选池：**{sc.get('pool', 0)}** 个",
          f"- 阶段1（快速回测）通过：{sc.get('stage1_pass', 0)}",
@@ -2139,6 +2194,7 @@ def build_research_report(result, coin):
         L.append(f"### #{i} {s['grade']} · {t['hypothesis'] or inds}")
         L.append(f"- 指标：{inds}")
         L.append(f"- 参数：{_params_text(t['param_overrides'])}")
+        L.append(f"- 参数合理性：{rmem.prior_rating(t.get('prior_score', 1.0))}")
         L.append(f"- 仓位：{_pos_label(t['position_params'])}")
         L.append(f"- 杠杆 {t['leverage']}x · TP {t['tp_pct']}% · SL {t['sl_pct']}%")
         L.append(f"- 收益：总收益 {_f(m.get('total_return'))}% · 年化 {_f(m.get('annual_return'))}% · 样本外 {_f(m.get('oos_return'))}%")
