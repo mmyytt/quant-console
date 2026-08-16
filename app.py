@@ -772,6 +772,16 @@ if "AI" in st.session_state.active_tab:
         except Exception:
             return []
 
+    def _params_text(params):
+        """把 {指标名: {参数key: 值}} 压成可读文本，用于策略配置摘要。"""
+        parts = []
+        for name, kv in (params or {}).items():
+            if kv:
+                parts.append(f"{name}({', '.join(f'{k}={v}' for k, v in kv.items())})")
+            else:
+                parts.append(f"{name}(默认)")
+        return "；".join(parts) or "默认参数"
+
     def _load_research_df(asset, timeframe):
         de = DataEngine()
         all_tf = de.get_multi_timeframe(asset)
@@ -784,10 +794,10 @@ if "AI" in st.session_state.active_tab:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
 
-    # --- 零、策略搜索（V2：目标 → 10 候选 → 自动回测 → 排名） ---
+    # ========== 模块1：策略发现（目标 → AI 探索 → 参数搜索 → 排名） ==========
     st.divider()
-    st.subheader(t("rl_search_title"))
-    st.caption(t("rl_search_hint"))
+    st.subheader(t("rl_module_discovery"))
+    st.caption(t("rl_module_discovery_hint"))
     sgoal, sbtn = st.columns([4, 1])
     with sgoal:
         search_goal = st.text_input(t("research_goal_label"), key="rl_search_goal",
@@ -853,6 +863,7 @@ if "AI" in st.session_state.active_tab:
         st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
         ranked = [r for r in results if not r.get("skipped")]
         skipped = [r for r in results if r.get("skipped")]
+        st.caption(t("rl_search_meta", n=len(results), d=len(ranked)))
         st.caption(t("rl_search_hint_rank"))
         if ranked:
             rows = []
@@ -884,8 +895,17 @@ if "AI" in st.session_state.active_tab:
             for idx, r in enumerate(ranked[:10], 1):
                 v = r["verdict"]
                 combo = r.get("combo") or {}
+                spec = r.get("spec") or {}
                 title = f"#{idx} {v['score']['grade']} · {' + '.join(v['indicators'][:3])} · {combo.get('label') or '基准'} · 评分 {v['score']['total']}"
                 with st.expander(title):
+                    # 配置摘要卡片（指标/参数/杠杆/TP/SL/建仓平仓），供人工复制到主回测页
+                    st.markdown(
+                        f"**指标**：{' + '.join(v['indicators']) or '-'}  \n"
+                        f"**参数**：{_params_text(v.get('params'))}  \n"
+                        f"**杠杆**：{v.get('leverage')}x · **TP** {v.get('tp_pct')}% · **SL** {v.get('sl_pct')}%  \n"
+                        f"**建仓**：{'、'.join(spec.get('entry_rules') or []) or '固定单仓（引擎默认）'}  \n"
+                        f"**平仓**：{'、'.join(spec.get('exit_rules') or []) or '固定单仓（引擎默认）'}"
+                    )
                     st.markdown(v["report"])
         if skipped:
             st.markdown(f"**{t('rl_search_skipped')}**")
@@ -895,13 +915,16 @@ if "AI" in st.session_state.active_tab:
                 tail = f"（{combo}）" if combo else ""
                 st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）{tail}：{r.get('reason')}")
 
-    # --- 一、创建研究任务 ---
+    # ========== 模块2：策略验证（验证已有策略假设） ==========
+    st.divider()
+    st.subheader(t("rl_module_verify"))
+    st.caption(t("rl_module_verify_hint"))
     with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
         st.caption(t("rl_create_hint"))
         cgoal, cbtn = st.columns([4, 1])
         with cgoal:
-            goal = st.text_input(t("research_goal_label"), key="rl_goal",
-                                 placeholder=t("research_goal_placeholder"))
+            goal = st.text_input(t("rl_verify_input_label"), key="rl_goal",
+                                 placeholder=t("rl_verify_input_placeholder"))
         with cbtn:
             create_clicked = st.button(t("rl_create_btn"), key="rl_create",
                                        disabled=not ai_key)
