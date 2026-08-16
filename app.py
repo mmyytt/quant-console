@@ -264,6 +264,19 @@ if _pending_bt:
         st.session_state["tp_pct"] = float(min(max(float(_pending_bt["tp_pct"]), 2.0), 50.0))
     if _pending_bt.get("sl_pct") is not None:
         st.session_state["sl_pct"] = float(min(max(float(_pending_bt["sl_pct"]), 1.0), 30.0))
+    # 仓位参数预填（研究实验室「载入策略参数」）：_init_alloc_pct 用 fixed_capital 生效
+    if _pending_bt.get("position"):
+        pos = _pending_bt["position"] or {}
+        if pos.get("_init_alloc_pct") is not None:
+            st.session_state["pyr_init_pct"] = int(min(max(float(pos["_init_alloc_pct"]), 10.0), 100.0))
+        if pos.get("_enable_pyramiding") is not None:
+            st.session_state["enable_pyramiding"] = bool(pos["_enable_pyramiding"])
+        if pos.get("_pyr_add_pct") is not None:
+            st.session_state["pyr_add_pct"] = int(min(max(float(pos["_pyr_add_pct"]) * 100.0, 10.0), 100.0))
+        if pos.get("_pyr_max") is not None:
+            st.session_state["pyr_max"] = int(min(max(int(pos["_pyr_max"]), 1), 10))
+        if pos.get("_pyr_trail") is not None:
+            st.session_state["pyr_trail"] = bool(pos["_pyr_trail"])
 
 # ============================================================
 # 配置表单: 所有参数控件包在form里, 勾选/拖动不触发重渲染
@@ -312,17 +325,17 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         st.caption(t("classic_mode_caption"))
         # 加仓子面板
         with st.expander(t("pyramiding_title"), expanded=False):
-            enable_pyramiding = st.checkbox(t("enable_pyramiding"), False)
+            enable_pyramiding = st.checkbox(t("enable_pyramiding"), False, key="enable_pyramiding")
             pyr_trigger_pct = 2.0; pyr_add_pct = 0.5; pyr_max = 3; pyr_trail = False
             if enable_pyramiding:
                 c1, c2 = st.columns(2)
                 pyr_trigger_pct = c1.number_input(t("pyr_trigger_pct"), 0.5, 20.0, 2.0, 0.5,
                     help=t("pyr_trigger_help"))
                 pyr_add_pct = c2.slider(t("pyr_add_pct"), 10, 100, 50, 5,
-                    help=t("pyr_add_help")) / 100
-                pyr_max = st.number_input(t("pyr_max"), 1, 10, 3)
+                    help=t("pyr_add_help"), key="pyr_add_pct") / 100
+                pyr_max = st.number_input(t("pyr_max"), 1, 10, 3, key="pyr_max")
                 pyr_trail = st.checkbox(t("pyr_trail"), False,
-                    help=t("pyr_trail_help"))
+                    help=t("pyr_trail_help"), key="pyr_trail")
     elif strat_mode_key == "hedging":
         st.caption(t("hedge_legs_caption"))
         hedge_ratio = st.slider(t("spot_futures_ratio"), 0.1, 1.0, 0.5, 0.1)
@@ -353,7 +366,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         st.caption(t("pos_mode_caption"))
         _pos_mode_options = ["固定资金比例 (Fixed Capital)", "固定风险比例 (Fixed Risk)", "动态止损 (Dynamic Stop)"]
         pos_mode = st.radio(t("pos_mode_label"), _pos_mode_options,
-            index=0, horizontal=True,
+            index=0, horizontal=True, key="pos_mode",
             format_func=lambda x: (t("pos_mode_dynamic_stop_opt") if "Dynamic" in x
                                    else t("pos_mode_fixed_capital_opt") if "Capital" in x
                                    else t("pos_mode_fixed_risk_opt")))
@@ -375,7 +388,7 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
         else:
             alloc_label = t("init_capital_pct")
             alloc_help = t("alloc_help_capital")
-        pyr_init_pct = st.slider(alloc_label, 10, 100, 30, 5, help=alloc_help)
+        pyr_init_pct = st.slider(alloc_label, 10, 100, 30, 5, help=alloc_help, key="pyr_init_pct")
         if use_fixed_risk:
             st.caption(t("example_risk"))
         else:
@@ -1025,6 +1038,100 @@ if "AI" in st.session_state.active_tab:
                 combo = (r.get("combo") or {}).get("label")
                 tail = f"（{combo}）" if combo else ""
                 st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）{tail}：{r.get('reason')}")
+
+    # ============================================================
+    # Phase 6: 自动量化研究实验室（研究计划 → 候选池 → 四阶段漏斗 → 报告）
+    # ============================================================
+    st.divider()
+    st.subheader(t("rl_lab_title"))
+    st.caption(t("rl_lab_hint"))
+    _lc1, _lc2 = st.columns([3, 1])
+    _lab_goal = _lc1.text_input(t("research_goal_label"), key="rl_lab_goal",
+                                placeholder=t("rl_task_placeholder"))
+    _lab_mode = _lc2.selectbox(t("rl_lab_mode_label"), ["standard", "deep"], key="rl_lab_mode",
+        format_func=lambda x: t("rl_lab_mode_standard") if x == "standard" else t("rl_lab_mode_deep"))
+    _lab_clicked = st.button(t("rl_lab_btn"), key="rl_lab_btn", disabled=not ai_key,
+                             use_container_width=True)
+
+    if _lab_clicked and _lab_goal.strip():
+        _goal = _lab_goal.strip()
+        plan, directions, diag = {}, [], None
+        last_content = ""
+        # 严格 schema + 解析失败自动修正重试一次（不再把内部解析乱码抛给用户）
+        for attempt in (1, 2):
+            if attempt > 1:
+                st.caption(t("rl_lab_retry_note", n=attempt))
+            with st.spinner(t("rl_lab_running")):
+                prompt = rl.strict_search_prompt(_goal, mode=_lab_mode)
+                if attempt > 1:
+                    prompt += ("\n\n【修正要求】你上一条输出无法被解析为 JSON。请严格只输出一个 JSON 对象，"
+                               "字段名与结构完全照抄示例，不要输出 JSON 以外的任何文字或代码围栏。")
+                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                        {"role": "user", "content": prompt}]
+                res = call_unified_api(msgs, ai_key, ai_model_name, "")
+            if not res.get("success"):
+                last_content = ""
+                break
+            last_content = res.get("content", "")
+            plan, directions, diag = rl.parse_research_plan(last_content)
+            if directions:
+                break
+        if not directions:
+            st.error(t("rl_lab_parse_fail") if last_content else t("rl_lab_no_direction"))
+            with st.expander(t("rl_lab_diag"), expanded=False):
+                st.caption(f"解析错误：{diag.get('error') if diag else '-'}")
+                st.code(last_content[:800] or "（LLM 无返回）", language=None)
+        else:
+            ctx = rl.parse_research_context(_goal)
+            asset = _norm_asset(ctx.get("symbol"))
+            tf = _norm_tf(ctx.get("timeframe"))
+            df = _load_research_df(asset, tf)
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            def _progress(i, n, label):
+                progress_bar.progress((i + 1) / n)
+                status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
+
+            result = rl.run_research_pipeline(directions, df, asset, mode=_lab_mode,
+                                              plan=plan, progress=_progress)
+            progress_bar.progress(1.0)
+            status_text.caption(t("rl_lab_report_title"))
+            st.session_state.rl_lab_result = result
+            st.session_state.rl_lab_meta = {"goal": _goal, "asset": asset, "tf": tf}
+            st.rerun()
+
+    if "rl_lab_result" in st.session_state:
+        result = st.session_state.rl_lab_result
+        meta = st.session_state.rl_lab_meta
+        st.divider()
+        st.subheader(t("rl_lab_report_title"))
+        st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
+        if st.session_state.pop("rl_lab_copy_note", None):
+            st.success(t("rl_copy_ok"))
+        st.markdown(result["report"])
+        # 人工验证入口：逐条载入 指标参数/仓位参数/杠杆/TP-SL 到主回测页
+        for idx, tp in enumerate(result["top"], 1):
+            m = tp["metrics"]
+            sc = tp["score"]
+            inds = " + ".join(tp["indicators"][:3]) or "-"
+            with st.expander(f"载入 #{idx}：{tp['label']} · {sc['grade']} · 年化 {m.get('annual_return')}%"):
+                st.markdown(
+                    f"**指标**：{inds}  \n"
+                    f"**参数**：{rl._params_text(tp['param_overrides'])}  \n"
+                    f"**仓位**：{rl._pos_label(tp['position_params'])}  \n"
+                    f"**杠杆** {tp['leverage']}x · TP {tp['tp_pct']}% · SL {tp['sl_pct']}%"
+                )
+                if st.button(t("rl_copy_backtest"), key=f"rl_lab_copy_{idx}"):
+                    st.session_state.selected_indicators = rl.build_selected(
+                        tp["indicators"], tp["param_overrides"])
+                    st.session_state["rl_pending_backtest"] = {
+                        "coin": meta["asset"], "timeframe": meta["tf"],
+                        "leverage": tp["leverage"], "tp_pct": tp["tp_pct"], "sl_pct": tp["sl_pct"],
+                        "position": tp["position_params"],
+                    }
+                    st.session_state.rl_lab_copy_note = True
+                    st.rerun()
 
     # --- 验证结果 + 加入策略库 ---
     if "rl_last_verdict" in st.session_state:
