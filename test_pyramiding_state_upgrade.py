@@ -29,6 +29,7 @@ def _make_engine(leverage=3, trigger=4.0, add_pct=0.5, max_adds=3, equity=10000.
         initial_capital=equity, leverage=leverage,
         bull_alloc=1.0, range_alloc=1.0, bear_alloc=1.0,
         max_notional_pct=1000.0,  # 放大上限, 避免干扰加仓金额断言
+        max_margin_allocation=1000.0,  # 同左: 本测试只验证加仓状态管理, 关闭累计保证金护栏 (由 test_margin_control.py 专项覆盖)
         verbose=False,
     )
     e._enable_pyramiding = True

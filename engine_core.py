@@ -625,6 +625,7 @@ class BacktestEngineV2:
                  tp_mode: str = 'margin_pct',   # P0新增: 'margin_pct'(保证金%) 或 'price_pct'(价格%)
                  sl_mode: str = 'margin_pct',   # P0新增: 'margin_pct'(保证金%) 或 'price_pct'(价格%)
                  max_notional_pct: float = 5.0, # P0新增: 最大名义仓位 = equity × 这个倍数
+                 max_margin_allocation: float = 1.0, # 累计保证金占用率上限 = equity × 这个倍数 (默认100%, 防止满仓+加仓超权益)
                  use_atr_sl: bool = False,       # 需求4: ATR入场止损开关
                  atr_period: int = 14,           # 需求4: ATR计算周期
                  atr_mult: float = 2.0,          # 需求4: ATR止损倍数
@@ -674,6 +675,7 @@ class BacktestEngineV2:
         self.tp_mode = tp_mode              # 'margin_pct'(保证金%) 或 'price_pct'(价格%)
         self.sl_mode = sl_mode              # 'margin_pct'(保证金%) 或 'price_pct'(价格%)
         self.max_notional_pct = max_notional_pct  # 最大名义仓位 = equity × 倍数
+        self.max_margin_allocation = max_margin_allocation  # 累计保证金占用率上限
         # 需求4: ATR入场止损参数
         self._use_atr_sl = use_atr_sl
         self._atr_period = atr_period
@@ -1386,9 +1388,23 @@ class BacktestEngineV2:
                       f"SL_price=${sl_price:.2f}")
 
         # Step 4: 硬风控校验
-        # 4a: 保证金不足保护
+        # 4a: 保证金不足保护 (单腿: 不超当前权益)
         if margin > self.equity:
             margin = self.equity
+            notional = margin * lev
+
+        # 4a.5: 累计保证金占用率上限 (真实资金池约束)
+        # 所有开仓/加仓必须满足: Σ持仓保证金 ≤ 权益 × max_margin_allocation
+        # 防止满仓 + 金字塔加仓累加出超过账户权益的保证金 (模拟出不存在资金)
+        used_margin = sum(p['margin'] for p in self.positions)
+        margin_budget = self.equity * self.max_margin_allocation
+        available_margin = margin_budget - used_margin
+        if margin > available_margin:
+            if self.verbose:
+                print(f"[MARGIN CAP] 本次保证金{margin:.0f}超可用{available_margin:.0f} "
+                      f"(已用{used_margin:.0f}/预算{margin_budget:.0f}), "
+                      f"裁剪至{max(0.0, available_margin):.0f}")
+            margin = max(0.0, available_margin)
             notional = margin * lev
 
         # 4b: 组合级名义仓位上限 (全组合累计, 而非同币累计)
@@ -1418,7 +1434,8 @@ class BacktestEngineV2:
             else:
                 tp_price = fill_price * (1 - self.tp_pct / lev)
 
-        # 手续费
+        # 手续费 (审计占用率按扣费前权益计算, 与保证金预算口径一致)
+        equity_before_fee = self.equity
         fee = notional * TAKER_FEE
         self.equity -= fee
 
@@ -1451,6 +1468,10 @@ class BacktestEngineV2:
             'leverage': self.leverage,
             'init_margin': init_margin if init_margin > 0 else margin,
             'position_id': position_id,
+            # 资金池审计: 本腿加仓保证金 / 累计占用保证金 / 占用率
+            'add_margin': margin,
+            'used_margin_after': used_margin + margin,
+            'margin_usage_ratio': (used_margin + margin) / equity_before_fee if equity_before_fee > 0 else 0.0,
         }
         self.positions.append(pos)
 
@@ -1460,6 +1481,11 @@ class BacktestEngineV2:
             print(f"[OPEN]  {ts} | {coin:4s} {side:5s} | "
                   f"px={price:.2f} | ctr={contracts:.4f} | "
                   f"margin={margin:.2f} | alloc={alloc*100:.0f}% | {regime}")
+            # 资金池审计日志 (验证累计保证金不超权益; usage 与 margin_usage_ratio 字段同口径)
+            print(f"[MARGIN AUDIT] pos_id={position_id} | "
+                  f"init_margin={init_margin if init_margin > 0 else margin:.2f} | "
+                  f"add_margin={margin:.2f} | total_used_margin={used_margin + margin:.2f} | "
+                  f"equity={self.equity:.2f} | usage={((used_margin + margin) / equity_before_fee * 100) if equity_before_fee > 0 else 0:.1f}%")
 
     def _close(self, pos: Dict, price: float, reason: str, ts):
         """平仓并结算盈亏"""
