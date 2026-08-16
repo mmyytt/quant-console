@@ -993,23 +993,30 @@ def run_strategy_search(candidates, df, coin, progress=None):
 # ============================================================
 # 搜索维度（有界，防组合爆炸；仓位/加仓未在引擎独立暴露，不在搜索列）
 LEVERAGE_GRID = [1, 2, 3, 5, 10, 20]
-TPSL_GRID = [(5.0, 2.0), (10.0, 5.0), (15.0, 5.0), (20.0, 10.0)]
+# 风控搜索网格：TP 覆盖 [5,10,15,20,30]，SL 覆盖 [2,5,8,10,15]，均满足 tp > sl
+TPSL_GRID = [(5.0, 2.0), (10.0, 5.0), (15.0, 8.0), (20.0, 10.0), (30.0, 15.0)]
 
 
 def _param_sample_values(schema_key):
-    """取某指标第一个带 min/max 的参数，采样 [min, 中位, default, max]（去重排序）。
+    """读取指标每个带 min/max 的参数，采样 [min, 25%, 50%, 75%, max]（合并 default，去重排序）。
 
-    不只看默认参数：min/max 边界 + 中位点一并纳入粗搜索，让 AI 探索整个参数空间而非单点。
+    不只看默认参数：覆盖整个参数空间 5 个分位点，让 AI 粗搜全区间而非单点。
+    返回 [(参数key, [采样值...]), ...]，每个含 min/max 的参数各一组。
     """
     s = INDICATOR_SCHEMA.get(schema_key)
     if not s or not s.get("params"):
         return []
+    out = []
     for pk, pv in s["params"].items():
         if "min" in pv and "max" in pv:
             lo, hi, dft = pv["min"], pv["max"], pv["default"]
-            vals = sorted({lo, round((lo + hi) / 2.0, 4), dft, hi})
-            return [(pk, vals)]
-    return []
+            vals = sorted({lo,
+                           round(lo + (hi - lo) * 0.25, 4),
+                           round(lo + (hi - lo) * 0.5, 4),
+                           round(lo + (hi - lo) * 0.75, 4),
+                           dft, hi})
+            out.append((pk, vals))
+    return out
 
 
 def expand_parameter_grid(direction, max_combos=20):
@@ -1218,3 +1225,47 @@ def run_parameter_search(directions, df, coin, progress=None, max_combos_per_dir
     results.sort(key=lambda r: (r.get("verdict") or {}).get("score", {}).get("total", -999.0),
                  reverse=True)
     return results
+
+
+def summarize_directions(results, top=10):
+    """把扁平实验结果按「研究方向」聚合，返回每个方向的最佳组合 + 测试参数数量 + 排名理由。
+
+    一个方向可能测试了 N 个参数组合（杠杆/TP·SL/主参数），排名按「该方向最佳组合」的综合分，
+    而非把同一方向的不同参数当独立策略堆在 TOP 里。
+    """
+    groups = {}
+    order = []
+    for r in results:
+        if r.get("skipped"):
+            continue
+        key = (tuple(sorted(r.get("indicators") or [])), (r.get("spec") or {}).get("hypothesis") or "")
+        if key not in groups:
+            groups[key] = {"hypothesis": (r["spec"].get("hypothesis") or ""),
+                           "indicators": r.get("indicators") or [],
+                           "results": []}
+            order.append(key)
+        groups[key]["results"].append(r)
+
+    out = []
+    for key in order:
+        g = groups[key]
+        rs = sorted(g["results"], key=lambda x: x["verdict"]["score"]["total"], reverse=True)
+        best = rs[0]
+        v = best["verdict"]
+        sc = v["score"]
+        m = v["metrics"]
+        rationale = (
+            f"综合评分 {sc['total']}（{sc['grade']}）："
+            f"收益 {round(m.get('total_return') or 0, 1)}%、Sharpe {round(m.get('sharpe') or 0, 2)}、"
+            f"回撤 {round(m.get('max_drawdown') or 0, 1)}%、OOS {round(m.get('oos_return') or 0, 1)}%，"
+            f"WF/MC 达标"
+        )
+        out.append({
+            "hypothesis": g["hypothesis"],
+            "indicators": g["indicators"],
+            "test_count": len(rs),
+            "best": best,
+            "rationale": rationale,
+        })
+    out.sort(key=lambda d: d["best"]["verdict"]["score"]["total"], reverse=True)
+    return out[:top]

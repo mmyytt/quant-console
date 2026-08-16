@@ -78,7 +78,7 @@ def main():
     # 5) 验证按钮必须带唯一 key（防 auto-generated ID 冲突）
     m = re.search(r'st\.button\(\s*t\(\s*"rl_verify_btn"\s*\)\s*,\s*key=', src)
     assert m, "验证按钮缺少唯一 key"
-    print("[OK] 5. 验证按钮已绑定唯一 key（key=verify_{hypothesis_id}）")
+    print("[OK] 5. 验证按钮已绑定唯一 key（key=rl_verify_now）")
 
     # 5b) 侧边栏非表单按钮必须走 `with st.sidebar:`，禁止 st.sidebar.button()（form 误判）
     # 且禁止 with st.sidebar.container(): 嵌套（会触发 StreamlitDuplicateElementKey）
@@ -96,44 +96,40 @@ def main():
     assert not errs, f"启动异常: {errs}"
     print("[OK] 6. AppTest 启动（登录页）无异常")
 
-    # 7) 登录 → AI 研究仓：验证按钮唯一 key + 研究目标输入框（V1 单目标入口）
+    # 7) 登录 → AI 研究中心：策略探索 + 策略验证 双模块 + 唯一 key
     _orig_path = db.DB_PATH
     try:
         tmp = tempfile.mkdtemp()
         db.DB_PATH = os.path.join(tmp, "smoke.db")
         db.init_db()
-        seeded = [db.add_hypothesis(f"假设 {i}：EMA 金叉 + 量比确认",
-                                    related_indicators=["EMA 双均线", "量比 Volume Ratio"])
-                  for i in range(3)]
         at.session_state["logged_in"] = True
         at.session_state["active_tab"] = "AI 对话舱"
         at.run()
         errs = list(getattr(at, "exception", []) or [])
-        assert not errs, f"AI 研究仓渲染异常: {errs}"
+        assert not errs, f"AI 研究中心渲染异常: {errs}"
 
-        # 验证按钮：多条假设同时渲染多个 key=verify_{id}，不重复 ID
-        verify_keys = [b.key for b in at.button
-                       if str(getattr(b, "key", "")).startswith("verify_")]
-        assert len(verify_keys) >= 3, f"预期 ≥3 个验证按钮，实际 {len(verify_keys)}"
+        # 策略验证按钮：单次验证入口 key=rl_verify_now
+        assert any(str(getattr(b, "key", "")) == "rl_verify_now" for b in at.button), \
+            "缺少策略验证按钮（key=rl_verify_now）"
 
         # 侧边栏 4 个按钮均带唯一 key 且渲染正常（无 StreamlitAPIException / 无 auto-ID 冲突）
         sb_keys = [str(b.key) for b in at.sidebar.button]
         for _k in ("clear_cache_btn", "all_history_btn", "apply_date_btn", "logout_btn"):
             assert _k in sb_keys, f"侧边栏按钮缺少 key={_k}（现有 {sb_keys}）"
 
-        # 研究目标输入框（V1 单目标入口 key=rl_goal），set_value 触发正常 rerun
-        at.text_input(key="rl_goal").set_value("寻找 ETH 趋势策略")
+        # 完整策略输入框（策略验证 key=rl_goal），set_value 触发正常 rerun
+        at.text_input(key="rl_goal").set_value("EMA20 上穿 EMA60 做多，杠杆5倍，TP15%/SL5%")
         at.run()
         errs = list(getattr(at, "exception", []) or [])
-        assert not errs, f"输入研究目标异常: {errs}"
+        assert not errs, f"输入完整策略异常: {errs}"
 
-        # 策略搜索区块（V2）：目标输入框 + 开始搜索按钮，渲染无异常且 key 唯一
+        # 策略探索区块：目标输入框 + 开始搜索按钮，渲染无异常且 key 唯一
         assert "rl_search_goal" in [str(ti.key) for ti in at.text_input], \
-            f"缺少策略搜索目标输入框（现有 {[str(ti.key) for ti in at.text_input]}）"
+            f"缺少策略探索目标输入框（现有 {[str(ti.key) for ti in at.text_input]}）"
         assert any(str(getattr(b, "key", "")) == "rl_search" for b in at.button), \
-            "缺少策略搜索按钮（key=rl_search）"
+            "缺少策略探索搜索按钮（key=rl_search）"
 
-        print(f"[OK] 7. 登录→AI 研究仓：{len(verify_keys)} 个验证按钮 + 目标输入框 + 策略搜索区块 均无异常")
+        print("[OK] 7. 登录→AI 研究中心：策略探索 + 策略验证 双模块 均无异常")
     finally:
         db.DB_PATH = _orig_path
 
@@ -158,52 +154,47 @@ def main():
         else:
             os.environ["AI_API_KEY"] = _orig_env
 
-    # 9) DuplicateElementKey 回归：登录→AI研究仓→点击验证→rerun，无 StreamlitDuplicateElementKey
+    # 9) DuplicateElementKey 回归：登录→AI研究中心→渲染搜索 TOP（动态 copy 按钮）→点击复制→rerun，无异常
     import pandas as pd
     import research_loop as rl
-    import engine_core
-    _orig_verify = rl.verify_hypothesis
     _orig_path3 = db.DB_PATH
-    _orig_mtf2 = engine_core.DataEngine.get_multi_timeframe
     try:
         tmp3 = tempfile.mkdtemp()
         db.DB_PATH = os.path.join(tmp3, "smoke3.db")
         db.init_db()
-        hid = db.add_hypothesis("测试假设：EMA 金叉", related_indicators=["EMA 双均线"],
-                                status="new", asset="ETH", timeframe="4h", leverage=3,
-                                tp_pct=5.0, sl_pct=2.0)
-        rl.verify_hypothesis = lambda hyp, df, coin, strategy_factory=None: {
+
+        _mock_verdict = {
             "passed": True, "failures": [],
             "score": {"total": 82, "grade": "B", "return": 12.0, "sharpe": 1.5, "mdd": 9.0,
                       "oos": 6.0, "param_stability": 60, "monte_carlo": 70},
             "metrics": {"sharpe": 1.5, "total_return": 12.0, "max_drawdown": 9.0,
-                        "win_rate": 0.52, "trade_count": 35, "oos_return": 6.0},
+                        "win_rate": 0.52, "trade_count": 35, "oos_return": 6.0,
+                        "wf_profit_ratio": 55.0, "mc_p5": 1.0},
             "indicators": ["EMA 双均线"], "params": {}, "coin": "ETH",
             "leverage": 3, "tp_pct": 5.0, "sl_pct": 2.0,
-            "fingerprint": "", "experiment_id": 1, "report": "smoke stub",
+            "fingerprint": "", "experiment_id": 1, "failure_level": None, "report": "smoke stub",
         }
-        _idx3 = pd.to_datetime(["2024-01-01 00:00", "2024-01-01 04:00"])
-        _fake3 = pd.DataFrame({"open": [100.0, 101.0], "high": [102.0, 103.0],
-                               "low": [99.0, 98.0], "close": [101.0, 102.0],
-                               "volume": [1000.0, 1100.0]}, index=_idx3)
-        engine_core.DataEngine.get_multi_timeframe = lambda self, asset: {tf: _fake3 for tf in ("15m", "1h", "4h", "1d")}
+        _mock_result = {"spec": {"hypothesis": "EMA 趋势"}, "indicators": ["EMA 双均线"],
+                        "combo": {"label": "基准参数", "param_overrides": {}, "leverage": 3,
+                                  "tp_pct": 5.0, "sl_pct": 2.0},
+                        "verdict": _mock_verdict, "skipped": False}
 
         at.session_state["logged_in"] = True
         at.session_state["active_tab"] = "AI 对话舱"
+        at.session_state["rl_search_results"] = [_mock_result]
+        at.session_state["rl_search_meta"] = {"goal": "测试", "asset": "ETH", "tf": "4h"}
         at.run()
-        assert not list(getattr(at, "exception", []) or []), "AI 研究仓渲染异常"
+        assert not list(getattr(at, "exception", []) or []), "AI 研究中心渲染异常"
 
-        verify_btns = [b for b in at.button if str(getattr(b, "key", "")).startswith("verify_")]
-        assert verify_btns, "未找到验证按钮（key=verify_{id}）"
-        verify_btns[0].click()
+        copy_btns = [b for b in at.button if str(getattr(b, "key", "")).startswith("rl_copy_")]
+        assert copy_btns, "未找到复制到回测页按钮（key=rl_copy_{idx}）"
+        copy_btns[0].click()
         at.run()
         errs9 = list(getattr(at, "exception", []) or [])
-        assert not errs9, f"点击验证→rerun 触发 DuplicateElementKey/异常: {errs9}"
-        print("[OK] 9. 点击验证→rerun 回归：无 StreamlitDuplicateElementKey / StreamlitAPIException")
+        assert not errs9, f"点击复制到回测页→rerun 触发 DuplicateElementKey/异常: {errs9}"
+        print("[OK] 9. 点击复制到回测页→rerun 回归：无 StreamlitDuplicateElementKey / StreamlitAPIException")
     finally:
         db.DB_PATH = _orig_path3
-        rl.verify_hypothesis = _orig_verify
-        engine_core.DataEngine.get_multi_timeframe = _orig_mtf2
 
     print("\nALL UI SMOKE TESTS PASSED")
 

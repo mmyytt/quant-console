@@ -250,6 +250,21 @@ res_f1 = res_f2 = res_f3 = ""
 unlock_indicator = "price"; use_ema_unlock = True; use_rsi_unlock = False; use_vol_unlock = False
 is_dual_leg = False
 
+# AI 研究舱「复制到回测页」预填：必须在下方 coin/timeframe/leverage/tp/sl 控件实例化前写入，
+# 否则 Streamlit 拒绝修改已绑定 widget 的 session_state key（StreamlitAPIException）。
+_pending_bt = st.session_state.pop("rl_pending_backtest", None)
+if _pending_bt:
+    if _pending_bt.get("coin") in ("ETH", "BTC", "SOL"):
+        st.session_state["coin"] = _pending_bt["coin"]
+    if _pending_bt.get("timeframe") in ("5m", "15m", "1h", "4h", "1d"):
+        st.session_state["timeframe"] = _pending_bt["timeframe"]
+    if _pending_bt.get("leverage") is not None:
+        st.session_state["leverage"] = int(min(max(int(_pending_bt["leverage"]), 1), 20))
+    if _pending_bt.get("tp_pct") is not None:
+        st.session_state["tp_pct"] = float(min(max(float(_pending_bt["tp_pct"]), 2.0), 50.0))
+    if _pending_bt.get("sl_pct") is not None:
+        st.session_state["sl_pct"] = float(min(max(float(_pending_bt["sl_pct"]), 1.0), 30.0))
+
 # ============================================================
 # 配置表单: 所有参数控件包在form里, 勾选/拖动不触发重渲染
 # ============================================================
@@ -861,51 +876,70 @@ if "AI" in st.session_state.active_tab:
         st.divider()
         st.subheader(t("rl_search_rank"))
         st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
-        ranked = [r for r in results if not r.get("skipped")]
+        if st.session_state.pop("rl_copy_note", None):
+            st.success(t("rl_copy_ok"))
+        directions = rl.summarize_directions(results)
+        tested = [r for r in results if not r.get("skipped")]
         skipped = [r for r in results if r.get("skipped")]
-        st.caption(t("rl_search_meta", n=len(results), d=len(ranked)))
+        st.caption(t("rl_search_meta", n=len(tested), d=len(directions)))
         st.caption(t("rl_search_hint_rank"))
-        if ranked:
+        if directions:
             rows = []
-            for idx, r in enumerate(ranked[:10], 1):
-                v = r["verdict"]
+            for idx, d in enumerate(directions, 1):
+                v = d["best"]["verdict"]
                 m = v["metrics"]
                 sc = v["score"]
-                combo = r.get("combo") or {}
+                combo = d["best"].get("combo") or {}
                 rows.append({
                     "排名": idx,
+                    "研究方向": d["hypothesis"] or "-",
                     "指标组合": " + ".join(v["indicators"][:3]) or "-",
-                    "参数变体": combo.get("label") or "基准",
+                    "最佳参数": combo.get("label") or "基准",
+                    "测试参数数": d["test_count"],
                     "杠杆": v.get("leverage"),
                     "TP%": v.get("tp_pct"),
                     "SL%": v.get("sl_pct"),
-                    "总收益%": round(m.get("total_return") or 0, 1),
-                    "年化%": round(m.get("annual_return") or 0, 1),
+                    "收益%": round(m.get("total_return") or 0, 1),
                     "Sharpe": round(m.get("sharpe") or 0, 2),
                     "回撤%": round(m.get("max_drawdown") or 0, 1),
-                    "胜率%": round(m.get("win_rate") or 0, 1),
-                    "交易数": m.get("trade_count") or 0,
                     "OOS%": round(m.get("oos_return") or 0, 1),
+                    "WF%": round(m.get("wf_profit_ratio") or 0, 1),
+                    "MC5%": round(m.get("mc_p5") or 0, 1),
                     "评分": sc["total"],
                     "等级": sc["grade"],
                     "判定": "✅" if v["passed"] else "❌",
                     "失败分类": v.get("failure_level") or "-",
                 })
             st.dataframe(pd.DataFrame(rows))
-            for idx, r in enumerate(ranked[:10], 1):
-                v = r["verdict"]
-                combo = r.get("combo") or {}
-                spec = r.get("spec") or {}
-                title = f"#{idx} {v['score']['grade']} · {' + '.join(v['indicators'][:3])} · {combo.get('label') or '基准'} · 评分 {v['score']['total']}"
+            for idx, d in enumerate(directions, 1):
+                v = d["best"]["verdict"]
+                combo = d["best"].get("combo") or {}
+                spec = d["best"].get("spec") or {}
+                inds = " + ".join(v["indicators"]) or "-"
+                title = f"#{idx} {v['score']['grade']} · {d['hypothesis'] or inds} · 评分 {v['score']['total']}"
                 with st.expander(title):
-                    # 配置摘要卡片（指标/参数/杠杆/TP/SL/建仓平仓），供人工复制到主回测页
+                    # 排名理由 + 待人工复核状态（AI 发现策略不直接入生产库）
+                    st.info(f"**{t('rl_why_top')}**：{d['rationale']}")
+                    st.caption(f"🟡 {t('rl_status_pending_review')}")
                     st.markdown(
-                        f"**指标**：{' + '.join(v['indicators']) or '-'}  \n"
-                        f"**参数**：{_params_text(v.get('params'))}  \n"
-                        f"**杠杆**：{v.get('leverage')}x · **TP** {v.get('tp_pct')}% · **SL** {v.get('sl_pct')}%  \n"
-                        f"**建仓**：{'、'.join(spec.get('entry_rules') or []) or '固定单仓（引擎默认）'}  \n"
-                        f"**平仓**：{'、'.join(spec.get('exit_rules') or []) or '固定单仓（引擎默认）'}"
+                        f"**{t('rl_direction')}**：{d['hypothesis'] or '-'}  \n"
+                        f"**{t('rl_indicators')}**：{inds}  \n"
+                        f"**{t('rl_params')}**：{_params_text(v.get('params'))}  \n"
+                        f"**{t('rl_risk')}**：杠杆 {v.get('leverage')}x · TP {v.get('tp_pct')}% · SL {v.get('sl_pct')}%  \n"
+                        f"**{t('rl_entry')}**：{'、'.join(spec.get('entry_rules') or []) or '固定单仓（引擎默认）'}  \n"
+                        f"**{t('rl_exit')}**：{'、'.join(spec.get('exit_rules') or []) or '固定单仓（引擎默认）'}  \n"
+                        f"**{t('rl_test_count')}**：{d['test_count']}"
                     )
+                    if st.button(t("rl_copy_backtest"), key=f"rl_copy_{idx}"):
+                        # 复制完整参数到主回测页：指标立即写入，coin/杠杆/TP/SL 走 pending 预填（下次渲染前消费）
+                        if v.get("indicators"):
+                            st.session_state.selected_indicators = rl.build_selected(v["indicators"])
+                        st.session_state["rl_pending_backtest"] = {
+                            "coin": meta["asset"], "timeframe": meta["tf"],
+                            "leverage": v.get("leverage"), "tp_pct": v.get("tp_pct"), "sl_pct": v.get("sl_pct"),
+                        }
+                        st.session_state.rl_copy_note = True
+                        st.rerun()
                     st.markdown(v["report"])
         if skipped:
             st.markdown(f"**{t('rl_search_skipped')}**")
@@ -915,125 +949,77 @@ if "AI" in st.session_state.active_tab:
                 tail = f"（{combo}）" if combo else ""
                 st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）{tail}：{r.get('reason')}")
 
-    # ========== 模块2：策略验证（验证已有策略假设） ==========
+    # ========== 模块2：策略验证（验证用户已有完整策略，单次验证，与策略探索禁止混合） ==========
     st.divider()
     st.subheader(t("rl_module_verify"))
     st.caption(t("rl_module_verify_hint"))
-    with st.expander(t("rl_create_title"), expanded=not bool(db.list_hypotheses(1))):
-        st.caption(t("rl_create_hint"))
-        cgoal, cbtn = st.columns([4, 1])
-        with cgoal:
-            goal = st.text_input(t("rl_verify_input_label"), key="rl_goal",
-                                 placeholder=t("rl_verify_input_placeholder"))
-        with cbtn:
-            create_clicked = st.button(t("rl_create_btn"), key="rl_create",
-                                       disabled=not ai_key)
-        if create_clicked and goal.strip():
-            with st.spinner(t("rl_generating")):
-                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
-                        {"role": "user", "content": rl.hypothesis_prompt(goal.strip())}]
-                res = call_unified_api(msgs, ai_key, ai_model_name, "")
-                if res["success"]:
-                    spec = rl.parse_hypothesis_json(res["content"])
-                    if not spec:
-                        st.error(t("rl_parse_fail"))
-                        st.write(res["content"][:500])
-                    else:
-                        indicators, invalid = rl.normalize_indicators(spec.get("indicators"))
-                        if not indicators:
-                            st.error(t("rl_no_valid_indicators"))
-                        else:
-                            _h_asset = _norm_asset(spec.get("asset"))
-                            _h_tf = _norm_tf(spec.get("timeframe"))
-                            _h_lev = float(spec.get("leverage") or 2)
-                            _h_tp = float(spec.get("tp_pct") or 8.0)
-                            _h_sl = float(spec.get("sl_pct") or 4.0)
-                            ctx = rl.parse_research_context(goal.strip())
-                            strategy_config = rl.build_strategy_config(
-                                indicators, _h_asset, _h_tf, _h_lev, _h_tp, _h_sl,
-                                strategy_style=spec.get("strategy_style") or ctx.get("strategy_style"),
-                                entry_rules=spec.get("entry_rules"),
-                                exit_rules=spec.get("exit_rules"),
-                                target_return=ctx.get("target_return"),
-                            )
-                            hid = db.add_hypothesis(
-                                text=spec.get("hypothesis") or spec.get("goal") or goal.strip(),
-                                related_indicators=indicators, status="new",
-                                user_goal=spec.get("goal") or goal.strip(),
-                                asset=_h_asset,
-                                timeframe=_h_tf,
-                                leverage=_h_lev,
-                                parameters=spec.get("params") or {},
-                                tp_pct=_h_tp,
-                                sl_pct=_h_sl,
-                                expected_logic=spec.get("expected_logic"),
-                                expected_market_condition=spec.get("expected_market_condition"),
-                                risk_assumption=spec.get("risk_assumption"),
-                                strategy_config=strategy_config,
-                            )
-                            st.session_state.rl_created = {
-                                "hid": hid, "spec": spec, "indicators": indicators,
-                                "invalid": invalid,
-                            }
-                            st.rerun()
+    vgoal, vbtn = st.columns([4, 1])
+    with vgoal:
+        goal = st.text_input(t("rl_verify_input_label"), key="rl_goal",
+                             placeholder=t("rl_verify_input_placeholder"))
+    with vbtn:
+        verify_clicked = st.button(t("rl_verify_btn"), key="rl_verify_now", disabled=not ai_key)
+
+    if verify_clicked and goal.strip():
+        with st.spinner(t("rl_generating")):
+            msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                    {"role": "user", "content": rl.hypothesis_prompt(goal.strip())}]
+            res = call_unified_api(msgs, ai_key, ai_model_name, "")
+        if not res.get("success"):
+            st.error(res.get("error") or t("rl_parse_fail"))
+        else:
+            spec = rl.parse_hypothesis_json(res.get("content", ""))
+            if not spec:
+                st.error(t("rl_parse_fail"))
+                st.write((res.get("content") or "")[:500])
+            else:
+                indicators, invalid = rl.normalize_indicators(spec.get("indicators"))
+                if not indicators:
+                    st.error(t("rl_no_valid_indicators"))
                 else:
-                    st.error(res["error"])
-
-    if "rl_created" in st.session_state:
-        c = st.session_state.rl_created
-        st.success(t("rl_created_ok", id=c["hid"]))
-        st.markdown(f"**{t('rl_hypothesis')}** {c['spec'].get('hypothesis')}")
-        st.markdown(f"**{t('rl_indicators')}** {'、'.join(c['indicators'])}")
-        st.markdown(f"**{t('rl_design')}** {_norm_asset(c['spec'].get('asset'))} "
-                    f"{_norm_tf(c['spec'].get('timeframe'))} · "
-                    f"{c['spec'].get('leverage')}x · TP {c['spec'].get('tp_pct')}% / SL {c['spec'].get('sl_pct')}%")
-        if c["invalid"]:
-            st.warning(t("rl_invalid_indicators") + "：" + "、".join(c["invalid"]))
-
-    # --- 二、验证假设 ---
-    st.markdown(f"**{t('rl_hypotheses_title')}**")
-    hyps = [h for h in db.list_hypotheses(50) if h["status"] in ("new", "testing")]
-    if not hyps:
-        st.caption(t("rl_no_hypotheses"))
-    for h in hyps[:8]:
-        sc = _js(h.get("strategy_config"))
-        freq = (sc or {}).get("frequency") or _freq_of(h.get("timeframe"))
-        inds = "、".join(_js(h.get("related_indicators")) or [])
-        r1, r2 = st.columns([4, 1])
-        with r1:
-            st.markdown(f"**#{h['id']}** {h['hypothesis_text']}  \n"
-                        f"<small>{h.get('asset') or '?'} · {h.get('timeframe') or '?'} · {freq} · "
-                        f"{h.get('leverage') or 2}x · 状态 {h['status']}  \n"
-                        f"指标: {inds or '-'}</small>",
-                        unsafe_allow_html=True)
-        with r2:
-            if st.button(t("rl_verify_btn"), key=f"verify_{h['id']}"):
-                with st.spinner(t("rl_verify_running")):
-                    try:
-                        asset = _norm_asset(h.get("asset"))
-                        tf = _norm_tf(h.get("timeframe"))
-                        df = _load_research_df(asset, tf)
-                        verdict = rl.verify_hypothesis(h, df, asset)
-                        st.session_state.rl_last_verdict = verdict
-                        st.session_state.pop("rl_added", None)
-                        # 自动填充回测参数栏（品种/周期/杠杆/TP/SL/指标）
-                        st.session_state["coin"] = asset
-                        st.session_state["timeframe"] = tf
-                        st.session_state["leverage"] = int(min(max(float(h.get("leverage") or 2), 1), 20))
-                        st.session_state["tp_pct"] = min(max(float(h.get("tp_pct") or 8.0), 2.0), 50.0)
-                        st.session_state["sl_pct"] = min(max(float(h.get("sl_pct") or 4.0), 1.0), 30.0)
-                        if _js(h.get("related_indicators")):
-                            st.session_state.selected_indicators = rl.build_selected(
-                                _js(h.get("related_indicators")))
-                        # 验证成功自动沉淀策略库
-                        if verdict["passed"]:
-                            entry = rl.library_entry(h, verdict["indicators"], verdict["params"],
-                                                     verdict["metrics"], verdict)
-                            db.add_strategy(**entry)
-                            st.session_state.rl_added = entry["name"]
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"{t('rl_verify_error')}: {e}")
+                    _h_asset = _norm_asset(spec.get("asset"))
+                    _h_tf = _norm_tf(spec.get("timeframe"))
+                    _h_lev = float(spec.get("leverage") or 2)
+                    _h_tp = float(spec.get("tp_pct") or 8.0)
+                    _h_sl = float(spec.get("sl_pct") or 4.0)
+                    if invalid:
+                        st.warning(t("rl_invalid_indicators") + "：" + "、".join(invalid))
+                    hyp = {
+                        "related_indicators": indicators,
+                        "parameters": spec.get("params") or {},
+                        "leverage": _h_lev, "tp_pct": _h_tp, "sl_pct": _h_sl,
+                        "timeframe": _h_tf, "asset": _h_asset,
+                        "failure_environment": spec.get("failure_environment"),
+                        "risk_assumption": spec.get("risk_assumption"),
+                        "hypothesis_text": spec.get("hypothesis") or goal.strip(),
+                        "expected_logic": spec.get("expected_logic"),
+                        "expected_market_condition": spec.get("expected_market_condition"),
+                        "user_goal": spec.get("goal") or goal.strip(),
+                        "strategy_style": spec.get("strategy_style"),
+                        "entry_rules": spec.get("entry_rules"),
+                        "exit_rules": spec.get("exit_rules"),
+                    }
+                    with st.spinner(t("rl_verify_running")):
+                        try:
+                            df = _load_research_df(_h_asset, _h_tf)
+                            verdict = rl.verify_hypothesis(hyp, df, _h_asset)
+                            st.session_state.rl_last_verdict = verdict
+                            st.session_state.pop("rl_added", None)
+                            # 自动填充回测参数栏（品种/周期/杠杆/TP/SL/指标），供人工复核
+                            st.session_state["coin"] = _h_asset
+                            st.session_state["timeframe"] = _h_tf
+                            st.session_state["leverage"] = int(min(max(_h_lev, 1), 20))
+                            st.session_state["tp_pct"] = min(max(_h_tp, 2.0), 50.0)
+                            st.session_state["sl_pct"] = min(max(_h_sl, 1.0), 30.0)
+                            st.session_state.selected_indicators = rl.build_selected(indicators)
+                            if verdict["passed"]:
+                                entry = rl.library_entry(hyp, verdict["indicators"], verdict["params"],
+                                                         verdict["metrics"], verdict)
+                                db.add_strategy(**entry)
+                                st.session_state.rl_added = entry["name"]
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"{t('rl_verify_error')}: {e}")
 
     # --- 三、验证结果 + 加入策略库 ---
     if "rl_last_verdict" in st.session_state:
