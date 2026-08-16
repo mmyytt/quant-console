@@ -1050,8 +1050,7 @@ if "AI" in st.session_state.active_tab:
                                 placeholder=t("rl_task_placeholder"))
     _lab_mode = _lc2.selectbox(t("rl_lab_mode_label"), ["standard", "deep"], key="rl_lab_mode",
         format_func=lambda x: t("rl_lab_mode_standard") if x == "standard" else t("rl_lab_mode_deep"))
-    _lab_clicked = st.button(t("rl_lab_btn"), key="rl_lab_btn", disabled=not ai_key,
-                             use_container_width=True)
+    _lab_clicked = st.button(t("rl_lab_btn"), key="rl_lab_btn", disabled=not ai_key)
 
     if _lab_clicked and _lab_goal.strip():
         _goal = _lab_goal.strip()
