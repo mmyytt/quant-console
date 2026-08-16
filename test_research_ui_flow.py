@@ -65,6 +65,27 @@ def main():
     assert len(deep_pool) > len(std_pool), "深度模式应大于标准模式"
     print(f"[OK] 2. 搜索规模: 标准 {len(std_pool)} / 深度 {len(deep_pool)} 候选（真实展开）")
 
+    # 2b) 搜索空间真实性：EMA 参数真实展开为多个值（不能所有候选参数相同）
+    ema_dir = {"hypothesis": "EMA 趋势", "indicators": ["EMA 双均线"], "params": {},
+               "risk": {"leverage": 2, "tp_pct": 8.0, "sl_pct": 4.0},
+               "position": {"_init_alloc_pct": 50.0}}
+    ema_pool = rl.build_search_space([ema_dir], mode="standard")
+    shorts, longs = set(), set()
+    for c in ema_pool:
+        po = (c["param_overrides"] or {}).get("EMA 双均线") or {}
+        if "EMA_short" in po:
+            shorts.add(po["EMA_short"])
+        if "EMA_long" in po:
+            longs.add(po["EMA_long"])
+    assert len(shorts) >= 5, f"标准池 EMA_short 应 ≥5 个不同值, 实际 {sorted(shorts)}"
+    assert len(longs) >= 5, f"标准池 EMA_long 应 ≥5 个不同值, 实际 {sorted(longs)}"
+    fps = [rl.full_fingerprint(c["indicators"], c["param_overrides"], c["leverage"],
+                               c["tp_pct"], c["sl_pct"], position_params=c["position_params"])
+           for c in ema_pool]
+    assert len(fps) == len(set(fps)), "候选池应无重复指纹（不能所有候选参数相同）"
+    print(f"[OK] 2b. EMA 参数真实展开: EMA_short {sorted(shorts)} / EMA_long {sorted(longs)} "
+          f"（{len(ema_pool)} 候选, 去重后指纹数 {len(set(fps))}）")
+
     # 3) 完整链路（用 2 个方向跑四阶段漏斗，避免过慢）：输入目标 → 生成候选 → 过滤 → Top
     df = _synthetic_df()
     progress_log = []
@@ -113,11 +134,12 @@ def main():
     assert src.count('key="rl_goal"') == 1, "应只有一个研究目标输入框 key=rl_goal"
     assert src.count('key="rl_run"') == 1, "应只有一个启动研究按钮 key=rl_run"
     assert "rl.schema_search_directions" in src, "探索分支应使用 schema_search_directions"
-    assert "rl.run_research_pipeline" in src, "探索分支应使用 run_research_pipeline"
+    assert "rjobs.run_job" in src, "探索分支应通过后台持久化任务 rjobs.run_job 执行四阶段漏斗"
+    assert "rjobs.create_job" in src, "探索分支应创建持久化任务 job"
     for banned in ("strict_search_prompt", "parse_research_plan", "run_parameter_search",
                    "rl.search_prompt", "rl_lab_goal", "rl_lab_btn"):
         assert banned not in src, f"app.py 不应再引用 {banned}"
-    print("[OK] 5. app.py 唯一入口 + schema 生成方向（已移除 LLM 复杂 JSON / 重复输入）")
+    print("[OK] 5. app.py 唯一入口 + schema 生成方向 + 后台持久化任务（已移除 LLM 复杂 JSON / 重复输入）")
 
     print("\nALL RESEARCH UI FLOW TESTS PASSED")
 

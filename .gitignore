@@ -33,6 +33,7 @@ server.py
 # 研究数据持久化（用户数据，禁止提交）
 research.db
 *.db
+research_jobs/
 
 # 发布排除: 密钥 / 备份 / 本地生成产物
 *.key

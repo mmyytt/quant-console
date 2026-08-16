@@ -4,7 +4,7 @@
 启动: streamlit run app.py
 """
 import streamlit as st
-import pandas as pd, numpy as np, os, sys, time, json, base64, copy
+import pandas as pd, numpy as np, os, sys, time, json, base64, copy, threading
 from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -739,6 +739,7 @@ st.divider()
 if "AI" in st.session_state.active_tab:
     from research_storage import db
     import research_loop as rl
+    import research_jobs as rjobs
     import api_config
     set_lang(st.session_state.lang)
 
@@ -823,6 +824,17 @@ if "AI" in st.session_state.active_tab:
         if hasattr(df.index, "tz") and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
+
+    def _fmt_eta(sec):
+        """把预计剩余秒数格式化为可读文本（None → —）。"""
+        if sec is None:
+            return "—"
+        sec = int(sec)
+        if sec < 60:
+            return f"{sec}s"
+        if sec < 3600:
+            return f"{sec // 60}m{sec % 60}s"
+        return f"{sec // 3600}h{(sec % 3600) // 60}m"
 
     # ========== 唯一入口：研究目标 + 搜索规模 + 启动研究（AI 自动判断 探索 / 验证） ==========
     st.divider()
@@ -914,32 +926,86 @@ if "AI" in st.session_state.active_tab:
                                 st.error(f"{t('rl_verify_error')}: {e}")
         elif intent == "explore":
             st.caption(t("rl_intent_explore"))
-            # 探索新策略：LLM 只解析研究意图 → Python schema 生成候选方向 → 四阶段漏斗
+            # 探索新策略：LLM 只解析研究意图 → Python schema 生成候选方向 → 后台线程跑四阶段漏斗
             ctx = rl.parse_research_context(_goal)
             asset = _norm_asset(ctx.get("symbol"))
             tf = _norm_tf(ctx.get("timeframe"))
             df = _load_research_df(asset, tf)
             directions = rl.schema_search_directions(ctx, mode=research_scale)
+            pool = rl.build_search_space(directions, mode=research_scale)
             plan = {
                 "goal": _goal,
                 "universe": f"{asset}·{tf}",
                 "strategy_classes": [ctx.get("strategy_style") or "综合"],
                 "search_scale": t("rl_lab_mode_standard") if research_scale != "deep" else t("rl_lab_mode_deep"),
             }
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            def _progress(i, n, label):
-                progress_bar.progress((i + 1) / n)
-                status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
-
-            result = rl.run_research_pipeline(directions, df, asset, mode=research_scale,
-                                              plan=plan, progress=_progress)
-            progress_bar.progress(1.0)
-            status_text.caption(t("rl_lab_report_title"))
-            st.session_state.rl_lab_result = result
-            st.session_state.rl_lab_meta = {"goal": _goal, "asset": asset, "tf": tf}
+            # 创建持久化任务（落盘）+ 后台线程执行：刷新/断连不丢进度
+            job_id = rjobs.create_job(_goal, len(pool), asset=asset, timeframe=tf, mode=research_scale)
+            threading.Thread(
+                target=rjobs.run_job,
+                args=(job_id, directions, df, asset, research_scale, plan),
+                daemon=True,
+            ).start()
+            st.session_state.rl_job_id = job_id
             st.rerun()
+
+    # ========== 后台研究任务：进度 / 刷新恢复 / 历史（源真相=本地 JSON 文件） ==========
+    _job_id = st.session_state.get("rl_job_id")
+    if not _job_id:
+        _rj = rjobs.find_running_job()
+        if _rj:
+            _job_id = _rj["job_id"]
+            st.session_state.rl_job_id = _job_id
+
+    if _job_id:
+        job = rjobs.get_job(_job_id)
+        if job and job.get("status") == rjobs.STATUS_RUNNING:
+            st.divider()
+            st.subheader(t("rl_job_running_title"))
+            st.caption(f"{job.get('target')} · {job.get('asset')} · {job.get('timeframe')}")
+            _si = job.get("stage_index", 0)
+            st.caption("  →  ".join(
+                ("✅ " if j < _si else ("▶ " if j == _si else "⏳ ")) + s
+                for j, s in enumerate(rjobs.STAGES)))
+            _total = job.get("candidate_total") or 1
+            _cur = job.get("current_index") or 0
+            _passed = job.get("passed") or 0
+            _failed = job.get("failed") or 0
+            st.progress(min(1.0, _cur / _total) if _total else 0.0)
+            _c1, _c2, _c3, _c4 = st.columns(4)
+            _c1.metric(t("rl_job_done"), f"{_cur}/{_total}")
+            _c2.metric(t("rl_job_passed"), _passed)
+            _c3.metric(t("rl_job_failed"), _failed)
+            _c4.metric(t("rl_job_eta"), _fmt_eta(job.get("eta_seconds")))
+            if st.button(t("rl_job_stop"), key="rl_job_stop_btn"):
+                rjobs.set_status(_job_id, rjobs.STATUS_STOPPED)
+                st.rerun()
+            _errs = job.get("errors") or []
+            if _errs:
+                with st.expander(t("rl_job_errors") + f"（{len(_errs)}）"):
+                    for e in _errs[-10:]:
+                        st.caption(f"#{e.get('candidate_id')} {e.get('label') or ''}：{e.get('error')}")
+            st.info(t("rl_job_refresh_hint"))
+            st.stop()
+        elif job and job.get("status") == rjobs.STATUS_COMPLETED:
+            if job.get("result") and not st.session_state.get("rl_lab_result"):
+                st.session_state.rl_lab_result = job["result"]
+                st.session_state.rl_lab_meta = {"goal": job.get("target"), "asset": job.get("asset"),
+                                                "tf": job.get("timeframe")}
+        elif job and job.get("status") in (rjobs.STATUS_FAILED, rjobs.STATUS_STOPPED):
+            st.divider()
+            st.subheader(t("rl_job_failed_title") if job["status"] == rjobs.STATUS_FAILED
+                         else t("rl_job_stopped_title"))
+            st.caption(f"{job.get('target')} · {job.get('asset')} · {job.get('timeframe')}")
+            _errs = job.get("errors") or []
+            if _errs:
+                st.error("；".join(str(e.get("error")) for e in _errs[:5]))
+            st.caption(f"{t('rl_job_done')} {job.get('current_index') or 0}/{job.get('candidate_total') or 0} · "
+                       f"{t('rl_job_passed')} {job.get('passed') or 0} · {t('rl_job_failed')} {job.get('failed') or 0}")
+            if st.button(t("rl_job_new"), key="rl_job_new_btn"):
+                st.session_state.pop("rl_job_id", None)
+                st.session_state.pop("rl_lab_result", None)
+                st.rerun()
 
     if "rl_lab_result" in st.session_state:
         result = st.session_state.rl_lab_result
@@ -1049,6 +1115,32 @@ if "AI" in st.session_state.active_tab:
             for r in reps:
                 with st.expander(f"{t('rl_report')} #{r['id']} · {t('rl_grade')} {r.get('grade') or '-'} · {r['created_time']}"):
                     st.markdown(r["report_text"] or "-")
+        else:
+            st.caption(t("research_no_data"))
+
+    # 历史研究任务（本地 JSON 持久化，关闭浏览器后仍可查看）
+    with st.expander(t("rl_job_history_title"), expanded=False):
+        _jobs = rjobs.list_jobs(50)
+        if _jobs:
+            for _j in _jobs:
+                _stat = _j.get("status") or "-"
+                _lbl = f"{_j.get('started_time') or '-'} · {_stat} · {_j.get('target') or '-'} · {_j.get('asset')}·{_j.get('timeframe')}"
+                with st.expander(_lbl):
+                    _res = _j.get("result")
+                    if _stat == rjobs.STATUS_COMPLETED and _res:
+                        if st.button(t("rl_job_view"), key=f"rl_job_view_{_j['job_id']}"):
+                            st.session_state.rl_job_id = _j["job_id"]
+                            st.session_state.rl_lab_result = _res
+                            st.session_state.rl_lab_meta = {"goal": _j.get("target"),
+                                                            "asset": _j.get("asset"),
+                                                            "tf": _j.get("timeframe")}
+                            st.rerun()
+                        st.caption(f"{t('rl_job_done')} {_j.get('current_index') or 0}/{_j.get('candidate_total') or 0} · "
+                                   f"{t('rl_job_passed')} {_j.get('passed') or 0} · {t('rl_job_failed')} {_j.get('failed') or 0}")
+                    elif _res:
+                        st.markdown(_res.get("report") or "-")
+                    else:
+                        st.caption(t("rl_job_no_report"))
         else:
             st.caption(t("research_no_data"))
 

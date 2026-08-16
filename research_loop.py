@@ -1986,7 +1986,8 @@ def _quick_backtest(df, coin, indicator_names, param_overrides, leverage, tp_pct
     }
 
 
-def run_research_pipeline(directions, df, coin, mode="standard", plan=None, progress=None):
+def run_research_pipeline(directions, df, coin, mode="standard", plan=None, progress=None,
+                          pool=None, stage_cb=None, on_error=None, should_stop=None):
     """四阶段自动量化研究漏斗（真实回测引擎，不绕过、不虚构资金）。
 
     阶段1 快速筛选（样本内 run_single）：淘汰收益为负/交易过少/回撤过大。
@@ -1994,9 +1995,15 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     阶段3 鲁棒性（邻域精搜索）：对幸存者测试附近参数，标记过拟合（单点有效）。
     阶段4 风险审查（_position_metrics）：保证金占用率/有效杠杆/连亏 兜底检查。
 
+    可选回调（供后台任务 / UI 进度，不改变回测与过滤逻辑）：
+      pool        预构建的候选池（调用方提前算 candidate_total 用）。
+      stage_cb(stage, i, n, passed, failed)  阶段级进度（候选生成/快速回测/样本外验证/风险审查）。
+      on_error(i, combo, err)                单候选回测异常（记录后继续下一条，不中断）。
+      should_stop() -> bool                  返回 True 则提前终止（外部「停止」请求）。
+
     返回 {plan, pool_size, stage_counts, elimination, top, report}
     """
-    pool = build_search_space(directions, mode)
+    pool = pool if pool is not None else build_search_space(directions, mode)
     total = len(pool)
     elim = {"收益不足": 0, "交易次数过少": 0, "回撤过大": 0, "Sharpe不足": 0, "参数极端": 0,
             "样本外失败": 0, "过拟合": 0, "风险过高": 0, "回测异常": 0}
@@ -2012,20 +2019,28 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
 
     # 阶段0：候选生成（由 Python schema 确定性展开，非 LLM JSON）
     _notify(0, max(total, 1), f"候选生成完成（{total} 个候选）")
+    if stage_cb:
+        stage_cb("候选生成", 0, total, 0, 0)
 
     # --- 阶段1: 快速回测（收益/Sharpe/回撤/交易次数/参数极端 硬过滤） ---
     s1 = []
     for i, c in enumerate(pool):
+        if should_stop and should_stop():
+            break
         _notify(i, total, f"快速回测 {c['label']}（通过{len(s1)} 淘汰{sum(elim.values())}）")
         print(_search_log(i, total, c), flush=True)
+        if stage_cb:
+            stage_cb("快速回测", i + 1, total, len(s1), sum(elim.values()))
         if _is_extreme_params(c["param_overrides"]):
             elim["参数极端"] += 1
             continue
         try:
             m = _quick_backtest(df, coin, c["indicators"], c["param_overrides"],
                                 c["leverage"], c["tp_pct"], c["sl_pct"], c["position_params"])
-        except Exception:
+        except Exception as e:
             elim["回测异常"] += 1
+            if on_error:
+                on_error(i, c, e)
             continue
         tr = m.get("total_return") or 0.0
         trades = m.get("trade_count") or 0
@@ -2049,13 +2064,19 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     s2 = []
     for i, item in enumerate(s1):
         c = item["combo"]
+        if should_stop and should_stop():
+            break
         _notify(i, len(s1), f"样本外验证 {c['label']}（通过{len(s2)}）")
+        if stage_cb:
+            stage_cb("样本外验证", i + 1, len(s1), len(s2), sum(elim.values()))
         try:
             m = run_hypothesis_backtest(df, coin, c["indicators"], c["param_overrides"],
                                         c["leverage"], c["tp_pct"], c["sl_pct"],
                                         position_params=c["position_params"])
-        except Exception:
+        except Exception as e:
             elim["回测异常"] += 1
+            if on_error:
+                on_error(i, c, e)
             continue
         oos = m.get("oos_return")
         wf_ratio = m.get("wf_profit_ratio")
@@ -2084,7 +2105,11 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     s3 = []
     for i, item in enumerate(s2[:refine_top]):
         c = item["combo"]
+        if should_stop and should_stop():
+            break
         _notify(i, refine_top, f"风险过滤·鲁棒性 {c['label']}")
+        if stage_cb:
+            stage_cb("风险审查", i + 1, refine_top, len(s3), sum(elim.values()))
         neighbors = expand_refinement_grid({"indicators": c["indicators"]}, {
             "param_overrides": c["param_overrides"], "leverage": c["leverage"],
             "tp_pct": c["tp_pct"], "sl_pct": c["sl_pct"],
@@ -2112,7 +2137,11 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     top = []
     for i, item in enumerate(s3):
         full = item["full"]
+        if should_stop and should_stop():
+            break
         _notify(i, len(s3), f"风险过滤·风险审查（通过{len(top)}）")
+        if stage_cb:
+            stage_cb("风险审查", i + 1, len(s3), len(top), sum(elim.values()))
         pm = full.get("position_metrics") or {}
         risky = False
         if (pm.get("max_margin_usage") or 0) > 100.0 + 1e-6:
