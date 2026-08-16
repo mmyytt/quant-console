@@ -80,10 +80,10 @@ def main():
             {"hypothesis": "坏方向", "indicators": ["不存在的指标XYZ"], "params": {}},
         ])
         def _fake_call(messages, api_key, model_name, trading_notes):
-            # 第一次调用是意图判断（intent_prompt 只答一个词），第二次才是探索（search_prompt）
+            # 第一次调用是意图判断（intent_prompt 输出 JSON），第二次才是探索（search_prompt）
             last_user = messages[-1]["content"] if messages else ""
-            if "只回答一个英文单词" in last_user:
-                return {"success": True, "content": "explore"}
+            if "只输出一个 JSON 对象" in last_user:
+                return {"success": True, "content": '{"intent": "explore", "goal": "test"}'}
             return {"success": True, "content": fake_candidates}
         llm_client.call_unified_api = _fake_call
 

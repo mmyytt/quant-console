@@ -872,23 +872,41 @@ def _describe_array(arr):
 
 
 def intent_prompt(goal):
-    """让 LLM 判断用户输入属于「探索新策略」还是「验证已有完整策略」，只回答一个英文单词。
+    """让 LLM 判断用户输入属于「探索新策略」还是「验证已有完整策略」，只输出 JSON 对象。
 
     单一入口的关键：用户不用理解内部是「找策略」还是「验策略」，AI 自动路由。
+    输出格式：{"intent": "explore", "goal": "<用户输入>"} 或 {"intent": "verify", "goal": "<用户输入>"}
     """
     return (
-        "判断下面这条用户输入属于哪一类，只回答一个英文单词（explore 或 verify），不要解释：\n"
-        "- explore：用户在寻找/探索策略（提目标、诉求、想找什么，但没有给出完整可回测的参数组合）\n"
-        "- verify：用户给出了一条完整的、可直接回测的策略（含具体指标+具体参数，通常带杠杆/止盈/止损）\n"
+        "判断下面这条用户输入属于哪一类，只输出一个 JSON 对象，不要输出任何其他文字：\n"
+        '如果是「寻找/探索策略」（只有目标或诉求，没有给出完整可回测的参数），输出 {"intent": "explore", "goal": "<用户输入原文>"}\n'
+        '如果是「验证一条完整可回测策略」（含具体指标+具体参数，通常带杠杆/止盈/止损），输出 {"intent": "verify", "goal": "<用户输入原文>"}\n'
         f"\n用户输入：{goal}\n"
-        "回答："
+        "输出："
     )
 
 
 def parse_intent(text):
-    """解析意图：verify 出现才算验证，否则默认探索（更安全，不会误把探索当成单次验证入库）。"""
-    t = (text or "").strip().lower()
-    if "verify" in t:
+    """从意图判断结果解析 intent：优先解析 JSON 的 "intent" 字段，失败回退关键词。
+
+    verify 才算验证，其余（含解析失败）默认 explore——更安全，不把探索误当单次验证入库。
+    """
+    t = (text or "").strip()
+    low = t.lower()
+    # 1) 直接解析 JSON（LLM 被要求只输出 JSON 对象）
+    try:
+        obj = json.loads(t)
+        if isinstance(obj, dict) and obj.get("intent") in ("verify", "explore"):
+            return obj["intent"]
+    except Exception:
+        pass
+    # 2) 容错：去掉 markdown 围栏后找 "intent": "explore"/"verify"（部分模型不遵守 JSON 输出）
+    import re
+    m = re.search(r'"intent"\s*:\s*"(explore|verify)"', re.sub(r"```[a-zA-Z]*\s*", "", t))
+    if m:
+        return m.group(1)
+    # 3) 最终回退：关键词
+    if "verify" in low:
         return "verify"
     return "explore"
 

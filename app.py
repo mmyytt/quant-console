@@ -825,7 +825,12 @@ if "AI" in st.session_state.active_tab:
             imsgs = [{"role": "system", "content": t("rl_sys_prompt")},
                      {"role": "user", "content": rl.intent_prompt(_goal)}]
             ires = call_unified_api(imsgs, ai_key, ai_model_name, "")
-        intent = rl.parse_intent(ires.get("content", "")) if ires.get("success") else "explore"
+        intent = None
+        if ires.get("success"):
+            intent = rl.parse_intent(ires.get("content", ""))
+        else:
+            # 防御：意图识别失败不崩溃，只提示配置/模型问题，不继续跑探索或验证
+            st.error(t("rl_intent_fail"))
 
         if intent == "verify":
             st.caption(t("rl_intent_verify"))
@@ -889,7 +894,7 @@ if "AI" in st.session_state.active_tab:
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"{t('rl_verify_error')}: {e}")
-        else:
+        elif intent == "explore":
             st.caption(t("rl_intent_explore"))
             # 探索新策略：生成候选方向 → 连续参数空间搜索 → 回测 → 排名
             with st.spinner(t("rl_search_generating")):
