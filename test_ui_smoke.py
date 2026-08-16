@@ -75,10 +75,10 @@ def main():
     assert not bad, f"存在版本特定布局参数: {bad}"
     print("[OK] 4. 无 use_container_width / width=\"stretch\"（全部走 Streamlit 默认布局）")
 
-    # 5) 验证按钮必须带唯一 key（防 auto-generated ID 冲突）
-    m = re.search(r'st\.button\(\s*t\(\s*"rl_verify_btn"\s*\)\s*,\s*key=', src)
-    assert m, "验证按钮缺少唯一 key"
-    print("[OK] 5. 验证按钮已绑定唯一 key（key=rl_verify_now）")
+    # 5) 研究按钮必须带唯一 key（防 auto-generated ID 冲突）
+    m = re.search(r'st\.button\(\s*t\(\s*"rl_run_btn"\s*\)\s*,\s*key=', src)
+    assert m, "研究按钮缺少唯一 key"
+    print("[OK] 5. 研究按钮已绑定唯一 key（key=rl_run）")
 
     # 5b) 侧边栏非表单按钮必须走 `with st.sidebar:`，禁止 st.sidebar.button()（form 误判）
     # 且禁止 with st.sidebar.container(): 嵌套（会触发 StreamlitDuplicateElementKey）
@@ -96,7 +96,7 @@ def main():
     assert not errs, f"启动异常: {errs}"
     print("[OK] 6. AppTest 启动（登录页）无异常")
 
-    # 7) 登录 → AI 研究中心：策略探索 + 策略验证 双模块 + 唯一 key
+    # 7) 登录 → AI 研究中心：单一入口（研究目标 + 开始研究按钮）+ 唯一 key
     _orig_path = db.DB_PATH
     try:
         tmp = tempfile.mkdtemp()
@@ -108,28 +108,22 @@ def main():
         errs = list(getattr(at, "exception", []) or [])
         assert not errs, f"AI 研究中心渲染异常: {errs}"
 
-        # 策略验证按钮：单次验证入口 key=rl_verify_now
-        assert any(str(getattr(b, "key", "")) == "rl_verify_now" for b in at.button), \
-            "缺少策略验证按钮（key=rl_verify_now）"
+        # 统一研究按钮：单一入口 key=rl_run（AI 自动路由 探索/验证）
+        assert any(str(getattr(b, "key", "")) == "rl_run" for b in at.button), \
+            "缺少统一研究按钮（key=rl_run）"
 
         # 侧边栏 4 个按钮均带唯一 key 且渲染正常（无 StreamlitAPIException / 无 auto-ID 冲突）
         sb_keys = [str(b.key) for b in at.sidebar.button]
         for _k in ("clear_cache_btn", "all_history_btn", "apply_date_btn", "logout_btn"):
             assert _k in sb_keys, f"侧边栏按钮缺少 key={_k}（现有 {sb_keys}）"
 
-        # 完整策略输入框（策略验证 key=rl_goal），set_value 触发正常 rerun
-        at.text_input(key="rl_goal").set_value("EMA20 上穿 EMA60 做多，杠杆5倍，TP15%/SL5%")
+        # 研究目标输入框（唯一入口 key=rl_goal），set_value 触发正常 rerun
+        at.text_input(key="rl_goal").set_value("寻找 ETH 趋势策略")
         at.run()
         errs = list(getattr(at, "exception", []) or [])
-        assert not errs, f"输入完整策略异常: {errs}"
+        assert not errs, f"输入研究目标异常: {errs}"
 
-        # 策略探索区块：目标输入框 + 开始搜索按钮，渲染无异常且 key 唯一
-        assert "rl_search_goal" in [str(ti.key) for ti in at.text_input], \
-            f"缺少策略探索目标输入框（现有 {[str(ti.key) for ti in at.text_input]}）"
-        assert any(str(getattr(b, "key", "")) == "rl_search" for b in at.button), \
-            "缺少策略探索搜索按钮（key=rl_search）"
-
-        print("[OK] 7. 登录→AI 研究中心：策略探索 + 策略验证 双模块 均无异常")
+        print("[OK] 7. 登录→AI 研究中心：单一入口（研究目标 + 开始研究按钮）无异常")
     finally:
         db.DB_PATH = _orig_path
 

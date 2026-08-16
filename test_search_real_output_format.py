@@ -5,7 +5,7 @@ AI 研究舱 V4 搜索链路真实输出格式回归测试
   1. parse_hypothesis_array_diag 容错：纯 JSON 数组 / markdown JSON / 中文说明+JSON / 多候选
   2. 解析失败时返回完整 diag（raw_len/preview/extracted/error），不静默返回 []
   3. 搜索链路：parse → run_parameter_search（mock 回测）全流程跑通
-  4. app.py 按钮调用链：rl_search → search_prompt/parse/run_parameter_search，不调 hypothesis_prompt
+  4. app.py 统一入口调用链：rl_run → intent_prompt/parse_intent → 探索(search_prompt/run_parameter_search) / 验证(hypothesis_prompt/verify_hypothesis)
 运行: python test_search_real_output_format.py
 """
 import os
@@ -94,15 +94,14 @@ def main():
     finally:
         rl.run_hypothesis_backtest = _orig_bt
 
-    # 4) app.py 按钮调用链：rl_search 走搜索模式，不调单策略模式
+    # 4) app.py 统一入口调用链：rl_run → intent_prompt/parse_intent → 探索(参数搜索) / 验证(单次验证)
     src = open("app.py", encoding="utf-8").read()
-    search_block = src[src.index('key="rl_search"'):src.index('rl_search_results')]
-    assert "rl.search_prompt" in search_block, "搜索按钮应调用 search_prompt"
-    assert "rl.parse_hypothesis_array_diag" in search_block, "搜索按钮应调用 parse_hypothesis_array_diag"
-    assert "rl.run_parameter_search" in search_block, "搜索按钮应调用 run_parameter_search"
-    assert "rl.hypothesis_prompt" not in search_block, "搜索按钮不应调用 hypothesis_prompt（单策略模式）"
-    assert "rl.verify_hypothesis" not in search_block, "搜索按钮不应调用 verify_hypothesis 单策略模式"
-    print("[OK] 4. app.py 按钮调用链：rl_search → search_prompt → parse_hypothesis_array_diag → run_parameter_search（非单策略）")
+    block = src[src.index('key="rl_run"'):src.index('rl_search_results')]
+    assert "rl.intent_prompt" in block, "统一入口应先调用 intent_prompt 判断意图"
+    assert "rl.parse_intent" in block, "统一入口应调用 parse_intent 路由"
+    assert "rl.search_prompt" in block and "rl.run_parameter_search" in block, "探索分支应走参数空间搜索"
+    assert "rl.hypothesis_prompt" in block and "rl.verify_hypothesis" in block, "验证分支应走单次验证"
+    print("[OK] 4. app.py 统一入口：rl_run → intent_prompt/parse_intent → 探索(search_prompt→run_parameter_search) / 验证(hypothesis_prompt→verify_hypothesis)")
 
     print("\nALL SEARCH REAL-OUTPUT-FORMAT TESTS PASSED")
 

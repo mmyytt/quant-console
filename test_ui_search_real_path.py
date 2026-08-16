@@ -79,9 +79,13 @@ def main():
              "failure_environment": "震荡", "risk_assumption": "回撤<20%"},
             {"hypothesis": "坏方向", "indicators": ["不存在的指标XYZ"], "params": {}},
         ])
-        llm_client.call_unified_api = lambda messages, api_key, model_name, trading_notes: {
-            "success": True, "content": fake_candidates,
-        }
+        def _fake_call(messages, api_key, model_name, trading_notes):
+            # 第一次调用是意图判断（intent_prompt 只答一个词），第二次才是探索（search_prompt）
+            last_user = messages[-1]["content"] if messages else ""
+            if "只回答一个英文单词" in last_user:
+                return {"success": True, "content": "explore"}
+            return {"success": True, "content": fake_candidates}
+        llm_client.call_unified_api = _fake_call
 
         # mock 回测（不跑重计算）：返回完整 metrics，让真实 run_parameter_search 编排执行
         def _fake_backtest(df, coin, indicator_names, param_overrides=None,
@@ -108,15 +112,15 @@ def main():
         at.run()
         assert not list(getattr(at, "exception", []) or []), "AI 研究舱启动异常"
 
-        # 填 API Key（启用搜索按钮）+ 研究目标
+        # 填 API Key（启用研究按钮）+ 研究目标
         at.text_input(key="ai_main_key").set_value("sk-test-search")
-        at.text_input(key="rl_search_goal").set_value("寻找 ETH 趋势策略，回撤低于20%")
+        at.text_input(key="rl_goal").set_value("寻找 ETH 趋势策略，回撤低于20%")
         at.run()
         assert not list(getattr(at, "exception", []) or []), "填参后渲染异常"
 
-        # 点击「开始搜索」按钮
-        btn = [b for b in at.button if str(getattr(b, "key", "")) == "rl_search"]
-        assert btn, "未找到搜索按钮 key=rl_search"
+        # 点击「开始研究」按钮（AI 判意图后自动路由到探索分支）
+        btn = [b for b in at.button if str(getattr(b, "key", "")) == "rl_run"]
+        assert btn, "未找到研究按钮 key=rl_run"
         btn[0].click()
         at.run()
 

@@ -809,66 +809,136 @@ if "AI" in st.session_state.active_tab:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
 
-    # ========== 模块1：策略发现（目标 → AI 探索 → 参数搜索 → 排名） ==========
+    # ========== 统一入口：研究目标（AI 自动判断 探索 / 验证，用户无需理解内部流程） ==========
     st.divider()
-    st.subheader(t("rl_module_discovery"))
-    st.caption(t("rl_module_discovery_hint"))
-    sgoal, sbtn = st.columns([4, 1])
-    with sgoal:
-        search_goal = st.text_input(t("research_goal_label"), key="rl_search_goal",
-                                    placeholder=t("research_goal_placeholder"))
-    with sbtn:
-        search_clicked = st.button(t("rl_search_btn"), key="rl_search", disabled=not ai_key)
+    gcol, rbtn = st.columns([4, 1])
+    with gcol:
+        research_goal = st.text_input(t("research_goal_label"), key="rl_goal",
+                                      placeholder=t("research_goal_placeholder"))
+    with rbtn:
+        run_clicked = st.button(t("rl_run_btn"), key="rl_run", disabled=not ai_key)
 
-    if search_clicked and search_goal.strip():
-        # 第一步：生成候选策略（搜索模式，走 search_prompt → parse_hypothesis_array → run_parameter_search）
-        with st.spinner(t("rl_search_generating")):
-            msgs = [{"role": "system", "content": t("rl_sys_prompt")},
-                    {"role": "user", "content": rl.search_prompt(search_goal.strip())}]
-            res = call_unified_api(msgs, ai_key, ai_model_name, "")
-        if not res.get("success"):
-            st.error(t("rl_search_no_candidates"))
-            st.caption(t("rl_search_diag"))
-            st.code((res.get("content") or "")[:500] or "（LLM 调用失败，无返回内容）", language=None)
-        else:
-            candidates, diag = rl.parse_hypothesis_array_diag(res.get("content", ""))
-            if not candidates:
-                # 解析失败：给出完整诊断（数组扫描 + 选择原因），而非只显示「无有效候选」
-                st.error(t("rl_search_no_candidates"))
-                with st.expander(t("rl_search_diag"), expanded=True):
-                    st.caption(f"LLM 原始返回长度：{diag['raw_len']} 字符")
-                    st.caption(f"发现数组：{len(diag.get('arrays') or [])} 个")
-                    for a in (diag.get("arrays") or []):
-                        mark = " ← 已选择" if a["index"] == diag.get("selected") else ""
-                        perr = f"（{a['error']}）" if a.get("error") else ""
-                        st.caption(f"  index{a['index']}: {a['type']} length={a['length']}{mark}{perr}")
-                    if diag.get("selected_reason"):
-                        st.caption(f"选择原因：{diag['selected_reason']}")
-                    st.caption(f"JSON 提取结果：{diag['extracted'] or '（未提取到）'}")
-                    st.caption(f"解析失败原因：{diag['error']}")
-                    st.code(diag["preview"] or "（空）", language=None)
+    if run_clicked and research_goal.strip():
+        _goal = research_goal.strip()
+        # 1. AI 判断意图：探索（找新策略）还是 验证（已有完整策略）
+        with st.spinner(t("rl_intent_running")):
+            imsgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                     {"role": "user", "content": rl.intent_prompt(_goal)}]
+            ires = call_unified_api(imsgs, ai_key, ai_model_name, "")
+        intent = rl.parse_intent(ires.get("content", "")) if ires.get("success") else "explore"
+
+        if intent == "verify":
+            st.caption(t("rl_intent_verify"))
+            # 验证已有完整策略：单次验证（hypothesis_prompt → parse → verify_hypothesis，不做参数搜索）
+            with st.spinner(t("rl_generating")):
+                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                        {"role": "user", "content": rl.hypothesis_prompt(_goal)}]
+                res = call_unified_api(msgs, ai_key, ai_model_name, "")
+            if not res.get("success"):
+                st.error(res.get("error") or t("rl_parse_fail"))
             else:
-                st.success(t("rl_search_found", n=len(candidates)))
-                ctx = rl.parse_research_context(search_goal.strip())
-                asset = _norm_asset(ctx.get("symbol"))
-                tf = _norm_tf(ctx.get("timeframe"))
-                df = _load_research_df(asset, tf)
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+                spec = rl.parse_hypothesis_json(res.get("content", ""))
+                if not spec:
+                    st.error(t("rl_parse_fail"))
+                    st.write((res.get("content") or "")[:500])
+                else:
+                    indicators, invalid = rl.normalize_indicators(spec.get("indicators"))
+                    if not indicators:
+                        st.error(t("rl_no_valid_indicators"))
+                    else:
+                        _h_asset = _norm_asset(spec.get("asset"))
+                        _h_tf = _norm_tf(spec.get("timeframe"))
+                        _h_lev = float(spec.get("leverage") or 2)
+                        _h_tp = float(spec.get("tp_pct") or 8.0)
+                        _h_sl = float(spec.get("sl_pct") or 4.0)
+                        if invalid:
+                            st.warning(t("rl_invalid_indicators") + "：" + "、".join(invalid))
+                        hyp = {
+                            "related_indicators": indicators,
+                            "parameters": spec.get("params") or {},
+                            "leverage": _h_lev, "tp_pct": _h_tp, "sl_pct": _h_sl,
+                            "timeframe": _h_tf, "asset": _h_asset,
+                            "failure_environment": spec.get("failure_environment"),
+                            "risk_assumption": spec.get("risk_assumption"),
+                            "hypothesis_text": spec.get("hypothesis") or _goal,
+                            "expected_logic": spec.get("expected_logic"),
+                            "expected_market_condition": spec.get("expected_market_condition"),
+                            "user_goal": spec.get("goal") or _goal,
+                            "strategy_style": spec.get("strategy_style"),
+                            "entry_rules": spec.get("entry_rules"),
+                            "exit_rules": spec.get("exit_rules"),
+                        }
+                        with st.spinner(t("rl_verify_running")):
+                            try:
+                                df = _load_research_df(_h_asset, _h_tf)
+                                verdict = rl.verify_hypothesis(hyp, df, _h_asset)
+                                st.session_state.rl_last_verdict = verdict
+                                st.session_state.pop("rl_added", None)
+                                # 自动填充回测参数栏（品种/周期/杠杆/TP/SL/指标），供人工复核
+                                st.session_state["coin"] = _h_asset
+                                st.session_state["timeframe"] = _h_tf
+                                st.session_state["leverage"] = int(min(max(_h_lev, 1), 20))
+                                st.session_state["tp_pct"] = min(max(_h_tp, 2.0), 50.0)
+                                st.session_state["sl_pct"] = min(max(_h_sl, 1.0), 30.0)
+                                st.session_state.selected_indicators = rl.build_selected(indicators)
+                                if verdict["passed"]:
+                                    entry = rl.library_entry(hyp, verdict["indicators"], verdict["params"],
+                                                             verdict["metrics"], verdict)
+                                    db.add_strategy(**entry)
+                                    st.session_state.rl_added = entry["name"]
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"{t('rl_verify_error')}: {e}")
+        else:
+            st.caption(t("rl_intent_explore"))
+            # 探索新策略：生成候选方向 → 连续参数空间搜索 → 回测 → 排名
+            with st.spinner(t("rl_search_generating")):
+                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
+                        {"role": "user", "content": rl.search_prompt(_goal)}]
+                res = call_unified_api(msgs, ai_key, ai_model_name, "")
+            if not res.get("success"):
+                st.error(t("rl_search_no_candidates"))
+                st.caption(t("rl_search_diag"))
+                st.code((res.get("content") or "")[:500] or "（LLM 调用失败，无返回内容）", language=None)
+            else:
+                candidates, diag = rl.parse_hypothesis_array_diag(res.get("content", ""))
+                if not candidates:
+                    # 解析失败：给出完整诊断（数组扫描 + 选择原因），而非只显示「无有效候选」
+                    st.error(t("rl_search_no_candidates"))
+                    with st.expander(t("rl_search_diag"), expanded=True):
+                        st.caption(f"LLM 原始返回长度：{diag['raw_len']} 字符")
+                        st.caption(f"发现数组：{len(diag.get('arrays') or [])} 个")
+                        for a in (diag.get("arrays") or []):
+                            mark = " ← 已选择" if a["index"] == diag.get("selected") else ""
+                            perr = f"（{a['error']}）" if a.get("error") else ""
+                            st.caption(f"  index{a['index']}: {a['type']} length={a['length']}{mark}{perr}")
+                        if diag.get("selected_reason"):
+                            st.caption(f"选择原因：{diag['selected_reason']}")
+                        st.caption(f"JSON 提取结果：{diag['extracted'] or '（未提取到）'}")
+                        st.caption(f"解析失败原因：{diag['error']}")
+                        st.code(diag["preview"] or "（空）", language=None)
+                else:
+                    st.success(t("rl_search_found", n=len(candidates)))
+                    ctx = rl.parse_research_context(_goal)
+                    asset = _norm_asset(ctx.get("symbol"))
+                    tf = _norm_tf(ctx.get("timeframe"))
+                    df = _load_research_df(asset, tf)
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
 
-                def _progress(i, n, label):
-                    progress_bar.progress((i + 1) / n)
-                    status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
+                    def _progress(i, n, label):
+                        progress_bar.progress((i + 1) / n)
+                        status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
 
-                results = rl.run_parameter_search(candidates, df, asset, progress=_progress)
-                progress_bar.progress(1.0)
-                status_text.caption(t("rl_search_done"))
-                st.session_state.rl_search_results = results
-                st.session_state.rl_search_meta = {"goal": search_goal.strip(),
-                                                   "asset": asset, "tf": tf,
-                                                   "max_drawdown": ctx.get("max_drawdown"),
-                                                   "target_return": ctx.get("target_return")}
-                st.rerun()
+                    results = rl.run_parameter_search(candidates, df, asset, progress=_progress)
+                    progress_bar.progress(1.0)
+                    status_text.caption(t("rl_search_done"))
+                    st.session_state.rl_search_results = results
+                    st.session_state.rl_search_meta = {"goal": _goal,
+                                                       "asset": asset, "tf": tf,
+                                                       "max_drawdown": ctx.get("max_drawdown"),
+                                                       "target_return": ctx.get("target_return")}
+                    st.rerun()
 
     if "rl_search_results" in st.session_state:
         results = st.session_state.rl_search_results
@@ -949,79 +1019,7 @@ if "AI" in st.session_state.active_tab:
                 tail = f"（{combo}）" if combo else ""
                 st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）{tail}：{r.get('reason')}")
 
-    # ========== 模块2：策略验证（验证用户已有完整策略，单次验证，与策略探索禁止混合） ==========
-    st.divider()
-    st.subheader(t("rl_module_verify"))
-    st.caption(t("rl_module_verify_hint"))
-    vgoal, vbtn = st.columns([4, 1])
-    with vgoal:
-        goal = st.text_input(t("rl_verify_input_label"), key="rl_goal",
-                             placeholder=t("rl_verify_input_placeholder"))
-    with vbtn:
-        verify_clicked = st.button(t("rl_verify_btn"), key="rl_verify_now", disabled=not ai_key)
-
-    if verify_clicked and goal.strip():
-        with st.spinner(t("rl_generating")):
-            msgs = [{"role": "system", "content": t("rl_sys_prompt")},
-                    {"role": "user", "content": rl.hypothesis_prompt(goal.strip())}]
-            res = call_unified_api(msgs, ai_key, ai_model_name, "")
-        if not res.get("success"):
-            st.error(res.get("error") or t("rl_parse_fail"))
-        else:
-            spec = rl.parse_hypothesis_json(res.get("content", ""))
-            if not spec:
-                st.error(t("rl_parse_fail"))
-                st.write((res.get("content") or "")[:500])
-            else:
-                indicators, invalid = rl.normalize_indicators(spec.get("indicators"))
-                if not indicators:
-                    st.error(t("rl_no_valid_indicators"))
-                else:
-                    _h_asset = _norm_asset(spec.get("asset"))
-                    _h_tf = _norm_tf(spec.get("timeframe"))
-                    _h_lev = float(spec.get("leverage") or 2)
-                    _h_tp = float(spec.get("tp_pct") or 8.0)
-                    _h_sl = float(spec.get("sl_pct") or 4.0)
-                    if invalid:
-                        st.warning(t("rl_invalid_indicators") + "：" + "、".join(invalid))
-                    hyp = {
-                        "related_indicators": indicators,
-                        "parameters": spec.get("params") or {},
-                        "leverage": _h_lev, "tp_pct": _h_tp, "sl_pct": _h_sl,
-                        "timeframe": _h_tf, "asset": _h_asset,
-                        "failure_environment": spec.get("failure_environment"),
-                        "risk_assumption": spec.get("risk_assumption"),
-                        "hypothesis_text": spec.get("hypothesis") or goal.strip(),
-                        "expected_logic": spec.get("expected_logic"),
-                        "expected_market_condition": spec.get("expected_market_condition"),
-                        "user_goal": spec.get("goal") or goal.strip(),
-                        "strategy_style": spec.get("strategy_style"),
-                        "entry_rules": spec.get("entry_rules"),
-                        "exit_rules": spec.get("exit_rules"),
-                    }
-                    with st.spinner(t("rl_verify_running")):
-                        try:
-                            df = _load_research_df(_h_asset, _h_tf)
-                            verdict = rl.verify_hypothesis(hyp, df, _h_asset)
-                            st.session_state.rl_last_verdict = verdict
-                            st.session_state.pop("rl_added", None)
-                            # 自动填充回测参数栏（品种/周期/杠杆/TP/SL/指标），供人工复核
-                            st.session_state["coin"] = _h_asset
-                            st.session_state["timeframe"] = _h_tf
-                            st.session_state["leverage"] = int(min(max(_h_lev, 1), 20))
-                            st.session_state["tp_pct"] = min(max(_h_tp, 2.0), 50.0)
-                            st.session_state["sl_pct"] = min(max(_h_sl, 1.0), 30.0)
-                            st.session_state.selected_indicators = rl.build_selected(indicators)
-                            if verdict["passed"]:
-                                entry = rl.library_entry(hyp, verdict["indicators"], verdict["params"],
-                                                         verdict["metrics"], verdict)
-                                db.add_strategy(**entry)
-                                st.session_state.rl_added = entry["name"]
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"{t('rl_verify_error')}: {e}")
-
-    # --- 三、验证结果 + 加入策略库 ---
+    # --- 验证结果 + 加入策略库 ---
     if "rl_last_verdict" in st.session_state:
         v = st.session_state.rl_last_verdict
         sc = v["score"]

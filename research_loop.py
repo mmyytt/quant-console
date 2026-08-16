@@ -8,6 +8,7 @@ Phase 2: AI 量化研究闭环（外挂模块）
 不重新实现撮合 / PnL / 未来函数检测。
 """
 import json
+import random
 
 from indicator_schema import INDICATOR_REGISTRY, INDICATOR_SCHEMA
 from research_storage import db
@@ -870,6 +871,28 @@ def _describe_array(arr):
     return "list[" + ",".join(sorted({type(x).__name__ for x in arr})) + "]"
 
 
+def intent_prompt(goal):
+    """让 LLM 判断用户输入属于「探索新策略」还是「验证已有完整策略」，只回答一个英文单词。
+
+    单一入口的关键：用户不用理解内部是「找策略」还是「验策略」，AI 自动路由。
+    """
+    return (
+        "判断下面这条用户输入属于哪一类，只回答一个英文单词（explore 或 verify），不要解释：\n"
+        "- explore：用户在寻找/探索策略（提目标、诉求、想找什么，但没有给出完整可回测的参数组合）\n"
+        "- verify：用户给出了一条完整的、可直接回测的策略（含具体指标+具体参数，通常带杠杆/止盈/止损）\n"
+        f"\n用户输入：{goal}\n"
+        "回答："
+    )
+
+
+def parse_intent(text):
+    """解析意图：verify 出现才算验证，否则默认探索（更安全，不会误把探索当成单次验证入库）。"""
+    t = (text or "").strip().lower()
+    if "verify" in t:
+        return "verify"
+    return "explore"
+
+
 def parse_hypothesis_array_diag(text):
     """从 AI 输出提取「候选策略」JSON 数组，返回 (candidates, diag)。
 
@@ -991,40 +1014,54 @@ def run_strategy_search(candidates, df, coin, progress=None):
 # ============================================================
 # 十、参数空间搜索（V3：方向探索 → 参数组合搜索 → 排名）
 # ============================================================
-# 搜索维度（有界，防组合爆炸；仓位/加仓未在引擎独立暴露，不在搜索列）
-LEVERAGE_GRID = [1, 2, 3, 5, 10, 20]
-# 风控搜索网格：TP 覆盖 [5,10,15,20,30]，SL 覆盖 [2,5,8,10,15]，均满足 tp > sl
-TPSL_GRID = [(5.0, 2.0), (10.0, 5.0), (15.0, 8.0), (20.0, 10.0), (30.0, 15.0)]
+# 搜索维度（有界，防组合爆炸；仓位/加仓未在引擎独立暴露，不在搜索列——Level 3 边界）
+_RNG_SEED = 20240816  # 固定种子：随机采样可复现（WF/回归测试稳定）
+LEVERAGE_RANGE = (1, 20)   # 杠杆 1-20 倍（连续随机采样）
+TP_RANGE = (1.0, 100.0)    # 止盈 1%-100%
+SL_RANGE = (1.0, 50.0)     # 止损 1%-50%（始终 < TP）
 
 
-def _param_sample_values(schema_key):
-    """读取指标每个带 min/max 的参数，采样 [min, 25%, 50%, 75%, max]（合并 default，去重排序）。
+def _param_type_int(pv):
+    """整型参数：min/max/default 均为整数且无小数 step（如周期）；否则视为连续浮点。"""
+    return (isinstance(pv.get("min"), int) and isinstance(pv.get("max"), int)
+            and isinstance(pv.get("default"), int)
+            and (pv.get("step") is None or pv.get("step") == 1))
 
-    不只看默认参数：覆盖整个参数空间 5 个分位点，让 AI 粗搜全区间而非单点。
+
+def _param_sample_values(schema_key, n=5, rng=None):
+    """对每个带 min/max 的参数做连续随机采样（整型取整、浮点保留精度），合并 default 去重。
+
+    随机采样替代固定分位点：覆盖参数空间任意连续值（如 EMA 周期 7/13/26/37/72/101...），
+    而非固定 5/10/20/50/100 网格。rng 默认用固定种子保证可复现。
     返回 [(参数key, [采样值...]), ...]，每个含 min/max 的参数各一组。
     """
+    rng = rng or random.Random(_RNG_SEED)
     s = INDICATOR_SCHEMA.get(schema_key)
     if not s or not s.get("params"):
         return []
     out = []
     for pk, pv in s["params"].items():
-        if "min" in pv and "max" in pv:
-            lo, hi, dft = pv["min"], pv["max"], pv["default"]
-            vals = sorted({lo,
-                           round(lo + (hi - lo) * 0.25, 4),
-                           round(lo + (hi - lo) * 0.5, 4),
-                           round(lo + (hi - lo) * 0.75, 4),
-                           dft, hi})
-            out.append((pk, vals))
+        if "min" not in pv or "max" not in pv:
+            continue
+        lo, hi, dft = pv["min"], pv["max"], pv["default"]
+        vals = {dft}
+        is_int = _param_type_int(pv)
+        for _ in range(n):
+            if is_int:
+                vals.add(rng.randint(int(lo), int(hi)))
+            else:
+                vals.add(round(rng.uniform(float(lo), float(hi)), 6))
+        out.append((pk, sorted(vals)))
     return out
 
 
-def expand_parameter_grid(direction, max_combos=20):
+def expand_parameter_grid(direction, max_combos=20, n_risk=5, rng=None):
     """把一个策略方向展开为有界参数组合列表（一次性扫描：杠杆/TP·SL/主参数）。
 
     direction: {"indicators": [...], "params": {显示名: {参数key: 值}}, "leverage", "tp_pct", "sl_pct"}
     返回: [{"label", "param_overrides", "leverage", "tp_pct", "sl_pct"}, ...]（已去重）
     """
+    rng = rng or random.Random(_RNG_SEED)
     indicators = direction.get("indicators") or []
     base_params = direction.get("params") or {}
     lev0 = direction.get("leverage") or DEFAULT_LEVERAGE
@@ -1039,16 +1076,21 @@ def expand_parameter_grid(direction, max_combos=20):
 
     # 1. 基准
     _add("基准参数", base_params, lev0, tp0, sl0)
-    # 2. 杠杆扫描（保持参数/TP·SL 默认）
-    for lev in LEVERAGE_GRID:
+    # 2. 杠杆随机扫描（1-20 连续，保持参数/TP·SL 默认）
+    for _ in range(n_risk):
+        lev = rng.randint(*LEVERAGE_RANGE)
         _add(f"杠杆 {lev}x", base_params, lev, tp0, sl0)
-    # 3. TP/SL 扫描（保持参数/杠杆默认）
-    for tp, sl in TPSL_GRID:
+    # 3. TP/SL 随机扫描（TP 1%-100%、SL 1%-50% 连续，保证 tp > sl）
+    for _ in range(n_risk):
+        tp = round(rng.uniform(*TP_RANGE), 2)
+        sl = round(rng.uniform(*SL_RANGE), 2)
+        if sl >= tp:
+            sl = round(tp * 0.5, 2)
         _add(f"TP{tp:g}%/SL{sl:g}%", base_params, lev0, tp, sl)
-    # 4. 指标主参数扫描（每个指标取主参数 min/default/max，一次只动一个维度）
+    # 4. 指标主参数随机扫描（每个指标每个参数在 [min,max] 内随机取值，一次只动一个维度）
     for name in indicators:
         key = _NAME_TO_KEY.get(name)
-        for pk, vals in _param_sample_values(key):
+        for pk, vals in _param_sample_values(key, rng=rng):
             for v in vals:
                 po = {n: dict(p) for n, p in base_params.items()}
                 po.setdefault(name, {})[pk] = v
@@ -1065,10 +1107,11 @@ def expand_parameter_grid(direction, max_combos=20):
     return out[:max_combos]
 
 
-def expand_refinement_grid(direction, combo, step_ratio=0.25):
-    """围绕一个有效组合做精搜索（二阶段）：主参数 ± 邻近值 + 杠杆 ±1 + TP/SL 邻近档。
+def expand_refinement_grid(direction, combo, step_ratio=0.06):
+    """围绕一个有效组合做精搜索（二阶段）：主参数 ±1/±2 邻近值 + 杠杆 ±1 + TP/SL 邻近档。
 
-    例：粗搜索发现 EMA_short=20 有效 → 精搜索测试 EMA_short≈15/25，而非无限组合。
+    例：粗搜索发现 EMA_short=72 有效 → 精搜索测试 EMA_short≈66/69/75/78（连续邻域），而非无限组合。
+    整型参数取整数步长，浮点参数保留连续精度（step_ratio 更小 = 更细的局部搜索）。
     """
     indicators = direction.get("indicators") or []
     base_params = combo.get("param_overrides") or {}
@@ -1081,18 +1124,25 @@ def expand_refinement_grid(direction, combo, step_ratio=0.25):
         out.append({"label": label, "param_overrides": params,
                     "leverage": lev, "tp_pct": tp, "sl_pct": sl})
 
-    # 主参数精调：每个指标首参数在当前值附近 ±step
+    # 主参数精调：每个指标首参数在当前值附近 ±1/±2 步长
     for name in indicators:
         key = _NAME_TO_KEY.get(name)
         for pk, _ in _param_sample_values(key):
             s = INDICATOR_SCHEMA[key]["params"][pk]
             lo, hi = s["min"], s["max"]
+            is_int = _param_type_int(s)
             cur = (base_params.get(name) or {}).get(pk, s["default"])
-            step = max((hi - lo) * step_ratio, s.get("step") or 0)
+            if is_int:
+                step = max(int(round((hi - lo) * step_ratio)), int(s.get("step") or 1))
+                if step <= 0:
+                    step = 1
+            else:
+                step = max((hi - lo) * step_ratio, s.get("step") or 0.0)
             if step <= 0:
                 continue
-            for delta in (-step, step):
-                v = round(cur + delta, 6)
+            for delta in (-2 * step, -step, step, 2 * step):
+                v = cur + delta
+                v = int(round(v)) if is_int else round(v, 6)
                 if lo <= v <= hi:
                     po = {n: dict(p) for n, p in base_params.items()}
                     po.setdefault(name, {})[pk] = v
