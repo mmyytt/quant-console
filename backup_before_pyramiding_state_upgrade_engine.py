@@ -619,6 +619,7 @@ class BacktestEngineV2:
         self.pyramid_step = pyramid_step
         self.unlock_pct = unlock_pct
         self.verbose = verbose
+        self._pyramid_count = 0
         self._last_entry_price = 0
         self._last_closed_bar = -1
         self._bar_idx = 0
@@ -817,7 +818,8 @@ class BacktestEngineV2:
             self._settle_funding(i)
 
             # ---- 金字塔加仓检测 (经典模式) ----
-            if self._enable_pyramiding and not paused:
+            if self._enable_pyramiding and self._pyramid_count > 0 and \
+               self._pyramid_count < self._pyr_max and not paused:
                 self._check_pyramiding(ts, dfs_with_sigs, coins)
 
             # ---- 权益曲线 + Delta暴露 ----
@@ -1009,8 +1011,8 @@ class BacktestEngineV2:
         if not candidates:
             return
 
-        # 选评分最高的 (资产轮动接口)
-        best = self._asset_selector(candidates)
+        # 选评分最高的
+        best = max(candidates, key=lambda x: x['score'])
 
         # 策略模式过滤
         regime = best['regime']
@@ -1032,76 +1034,49 @@ class BacktestEngineV2:
         atr_val = entry_row.get('_atr_14', 0) if hasattr(entry_row, 'get') else 0
         self._open(best['coin'], best['side'], best['price'], alloc, ts, regime,
                    best.get('resonance_score', 0), atr_value=atr_val, df_row=entry_row)
+        self._pyramid_count += 1
         self._last_entry_price = best['price']
 
-    def _asset_selector(self, candidates):
-        """资产轮动选币接口: 当前=信号评分最高。
-        未来可扩展为按 趋势评分/收益率/波动率/资金流 综合选币, 不改调用方。"""
-        return max(candidates, key=lambda x: x['score'])
-
     def _check_pyramiding(self, ts, dfs, coins):
-        """金字塔加仓 (架构升级版): 按 (coin, side) 分组, 每组独立状态。
-
-        触发 = 仓位保证金收益率 ≥ 触发阈值 (与 TP/SL 同量纲):
-            多仓 (px-avg)/avg×lev, 空仓 (avg-px)/avg×lev
-        加仓金额 = 初始投入保证金 × 加仓比例 (固定, 不按账户重算/不复利)。
-        状态下沉到每个 leg (pyramid_count), 平仓即销毁, 无全局计数器。
-        """
-        lev = self.leverage
-        trigger = self._pyr_trigger_pct / 100.0
-
-        # 分组去重: (coin, side) -> [legs], 保证每组每bar至多加一次
-        groups = {}
+        """金字塔加仓: 持仓浮盈达标→追加仓位+加权均价+更新TP/SL"""
         for pos in self.positions:
-            groups.setdefault((pos['coin'], pos['side']), []).append(pos)
+            side = pos['side']; coin = pos['coin']
+            row = dfs[coin].loc[ts]; px = float(row['open'])
+            regime = pos.get('regime', 'range')
+            lev = self.leverage
 
-        for (coin, side), legs in groups.items():
-            row = dfs[coin].loc[ts]
-            px = float(row['open'])
-            regime = legs[0].get('regime', 'range')
+            # 当前同向持仓加权均价 (by notional)
+            same_side = [p for p in self.positions if p['side'] == side and p['coin'] == coin]
+            total_notional = sum(p['notional'] for p in same_side)
+            if total_notional <= 0: continue
+            avg_entry = sum(p['entry'] * p['notional'] for p in same_side) / total_notional
 
-            total_notional = sum(p['notional'] for p in legs)
-            if total_notional <= 0:
-                continue
-            avg_entry = sum(p['entry'] * p['notional'] for p in legs) / total_notional
+            trigger = self._pyr_trigger_pct / 100.0
+            should_add = (side == 'LONG' and px >= avg_entry * (1 + trigger)) or \
+                         (side == 'SHORT' and px <= avg_entry * (1 - trigger))
 
-            # 本组加仓次数 (取legs最大值; leg随平仓移除, 状态自动销毁)
-            count = max(p.get('pyramid_count', 0) for p in legs)
-            max_count = legs[0].get('max_pyramid_count', self._pyr_max)
-            if count >= max_count:
-                continue
+            if should_add:
+                add_margin = self.equity * self._pyr_add_pct
+                add_notional = add_margin * lev
+                # P0新增: 传递ATR值 + 累计已有名义仓位给_open() (累计上限保护)
+                pyr_atr = row.get('_atr_14', 0) if hasattr(row, 'get') else 0
+                self._open(coin, side, px, self._pyr_add_pct, ts, regime, 0,
+                           atr_value=pyr_atr, df_row=row,
+                           existing_notional=total_notional)
+                self._pyramid_count += 1
 
-            # 量纲统一: 仓位保证金收益率 (与 TP/SL 一致)
-            if avg_entry <= 0:
-                continue
-            if side == 'LONG':
-                profit_pct = (px - avg_entry) / avg_entry * lev
-            else:
-                profit_pct = (avg_entry - px) / avg_entry * lev
-            if profit_pct < trigger:
-                continue
-
-            # 加仓金额: 固定 = 初始投入保证金 × 加仓比例 (不按账户/不复利)
-            init_margin = legs[0].get('init_margin', legs[0]['margin'])
-            add_margin = init_margin * self._pyr_add_pct
-            if add_margin <= 0:
-                continue
-
-            pyr_atr = row.get('_atr_14', 0) if hasattr(row, 'get') else 0
-            self._open(coin, side, px, self._pyr_add_pct, ts, regime, 0,
-                       atr_value=pyr_atr, df_row=row,
-                       existing_notional=total_notional,
-                       fixed_margin=add_margin,
-                       pyramid_count=count + 1,
-                       init_margin=init_margin)
-
-            # 保本止损: 已有 leg 移到自身入场价 (新leg保留自身新鲜SL)
-            if self._pyr_trail:
-                for p in legs:
-                    p['sl_price'] = p['entry']
-            if self.verbose:
-                print(f"[PYR] {ts} | {coin} {side} +{add_margin:.0f} | "
-                      f"profit={profit_pct*100:.1f}% | n={count+1}/{max_count}")
+                # P1-5: 每个 leg 独立保留自己的 entry/tp/sl, 不再覆盖同向 leg。
+                # 加权均价仅作展示字段 (new_avg), 不写入任何 leg 的 entry。
+                total_n = total_notional + add_notional
+                new_avg = (total_notional * avg_entry + add_notional * px) / max(total_n, 1)
+                # 保本止损: 每个 leg 移到自身入场价(保本), 而非合并均价
+                if self._pyr_trail:
+                    for p in self.positions:
+                        if p['side'] == side and p['coin'] == coin:
+                            p['sl_price'] = p['entry']
+                if self.verbose:
+                    print(f"[PYR] {ts} | {coin} {side} +{self._pyr_add_pct*100:.0f}% | "
+                          f"avg={new_avg:.2f} | n={self._pyramid_count}/{self._pyr_max}")
 
     # ================================================================
     # 双腿独立对冲系统 (仅 HEDGING / UNLOCKING 模式)
@@ -1218,8 +1193,7 @@ class BacktestEngineV2:
     # ================================================================
     def _open(self, coin: str, side: str, price: float, alloc: float, ts,
               regime: str = 'range', resonance_score: int = 0,
-              atr_value: float = 0, df_row=None, existing_notional: float = 0,
-              fixed_margin: float = 0, pyramid_count: int = 0, init_margin: float = 0):
+              atr_value: float = 0, df_row=None, existing_notional: float = 0):
         """
         开仓 (合约模式)。
 
@@ -1287,11 +1261,7 @@ class BacktestEngineV2:
             sl_distance = abs(fill_price - sl_price)
 
         # Step 3: 仓位计算
-        if fixed_margin > 0:
-            # 架构升级: 加仓固定保证金 (由 _check_pyramiding 基于当前仓位传入, 不按账户重算)
-            margin = fixed_margin
-            notional = margin * lev
-        elif use_fixed_risk:
+        if use_fixed_risk:
             # === Fixed Risk: risk_budget = equity × risk_pct × regime_mult ===
             # P1-3 职责分离: risk_pct=单笔最大风险比例; regime_mult=市场环境乘数。
             # init_alloc 仅用于 Fixed Capital / Dynamic Stop 的资金投入比例,
@@ -1374,10 +1344,6 @@ class BacktestEngineV2:
                 print(f"[RISK CAP] 组合名义{total_notional:.0f}超上限{max_notional:.0f}, "
                       f"缩减至本次新增={notional:.0f}")
 
-        # 零值守卫: 上限裁剪后名义/保证金为 0 时, 禁止创建幽灵仓位 (不污染 positions/交易/风险)
-        if notional <= 0 or margin <= 0:
-            return
-
         # Step 5: TP 价格计算 (不参与仓位公式, 仅用于止盈触发)
         if self.tp_mode == 'price_pct':
             if side == 'LONG':
@@ -1412,11 +1378,6 @@ class BacktestEngineV2:
             'open_time': ts, 'cost': fee,
             'highest_price': fill_price, 'lowest_price': fill_price,
             'trailing_activated': False,
-            # 架构升级: 加仓状态下沉到每个 leg (平仓即销毁, 无全局状态)
-            'pyramid_count': pyramid_count,
-            'max_pyramid_count': self._pyr_max,
-            'leverage': self.leverage,
-            'init_margin': init_margin if init_margin > 0 else margin,
         }
         self.positions.append(pos)
 
@@ -1500,6 +1461,7 @@ class BacktestEngineV2:
         self.cooldown = {}
         self.lock_until = -1
         self.losestreak = 0
+        self._pyramid_count = 0
         self._last_closed_bar = -1  # 防同Bar重开
         self._last_entry_price = 0
         self._leak_warnings = []
