@@ -31,12 +31,15 @@ warnings.filterwarnings("ignore")
 # ============================================================
 # 数据目录: 惰性检测 (不在import时下载, 避免启动超时)
 def _find_data_dir():
-    """查找数据目录: 本地eth_all > 项目data/"""
-    # 1) Windows 本地 eth_all
-    local = r"C:\Users\myt\Desktop\eth_all"
-    if os.path.isdir(local) and os.path.exists(os.path.join(local, "ETH_15m.parquet")):
+    """查找数据目录: 环境变量 QUANT_DATA_DIR > 项目 data/ (云端首次自动下载)。
+
+    不再硬编码本机绝对路径, 保证 Linux/Streamlit Cloud 可直接回退到项目目录。
+    """
+    # 1) 可选环境变量指向本地数据目录 (本地开发可设 QUANT_DATA_DIR 复用已有缓存)
+    local = os.environ.get("QUANT_DATA_DIR", "")
+    if local and os.path.isdir(local) and os.path.exists(os.path.join(local, "ETH_15m.parquet")):
         return local
-    # 2) 项目内 data/ (云端已下载)
+    # 2) 项目内 data/ (云端已下载 / 首次触发下载)
     proj = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     if os.path.isdir(proj) and os.path.exists(os.path.join(proj, "ETH_15m.parquet")):
         return proj
@@ -240,21 +243,12 @@ class DataEngine:
         if coin in self._cache:
             return self._cache[coin].copy()
 
-        # 优先5m, 降级15m
-        path_5m = os.path.join(self.data_dir, f"{coin}_5m.parquet")
+        # 仅15m基座 (5m 由 load_5min 独立加载; 修复 A4 潜伏5m分支误当15m基座)
         path_15m = os.path.join(self.data_dir, f"{coin}_15m.parquet")
-        if os.path.exists(path_5m) and os.path.getsize(path_5m) > 100000:
-            path = path_5m
-            interval = "5m"
-        elif os.path.exists(path_15m) and os.path.getsize(path_15m) > 100000:
-            path = path_15m
-            interval = "15m"
-        else:
-            path = path_15m
-            interval = "15m"
-            if not os.path.exists(path):
-                if not ensure_data_ready(coin):
-                    raise FileNotFoundError(t("err_data_file_missing", path=path))
+        path = path_15m
+        if not (os.path.exists(path_15m) and os.path.getsize(path_15m) > 100000):
+            if not ensure_data_ready(coin):
+                raise FileNotFoundError(t("err_data_file_missing", path=path))
 
         df = pd.read_parquet(path)
         # 检查数据是否过期 (>7天未更新 → 触发重新下载)
@@ -293,6 +287,36 @@ class DataEngine:
         df = df.dropna()
         self._cache[coin] = df
         return df.copy()
+
+    def load_5min(self, coin: str):
+        """
+        加载真实 5m OHLCV 数据 (P1-1, 独立于15m基座)。
+
+        无 5m 数据时先尝试 ensure_data(interval="5m") 下载; 仍无则返回 None,
+        由调用方 (app.py / walk_forward) 显式报错, 不静默回退到其他周期。
+        """
+        path_5m = os.path.join(self.data_dir, f"{coin}_5m.parquet")
+        if not (os.path.exists(path_5m) and os.path.getsize(path_5m) > 100000):
+            try:
+                from data_loader import ensure_data
+                ensure_data(coin, interval="5m")
+            except Exception as e:
+                print(f"[DataEngine] 5m download failed for {coin}: {e}", flush=True)
+        if not (os.path.exists(path_5m) and os.path.getsize(path_5m) > 100000):
+            return None
+        df = pd.read_parquet(path_5m)
+        tc = df.columns[0]
+        if tc != 'index' and df[tc].dtype == 'object':
+            df[tc] = pd.to_datetime(df[tc])
+        df = df.rename(columns={tc: 'timestamp'})
+        df = df.set_index('timestamp')
+        df = df[~df.index.duplicated()].sort_index()
+        required = ['open', 'high', 'low', 'close', 'vol']
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(t("err_missing_column", col=col))
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df.dropna()
 
     # ---- 重采样 ----
     def resample(self, df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -333,12 +357,17 @@ class DataEngine:
         每个 DataFrame 的时间戳都对齐到对应周期的标准边界。
         """
         df_15m = self.load_15min(coin)
-        return {
+        result = {
             '15m': df_15m,
             '1h': self.resample(df_15m, '1h'),
             '4h': self.resample(df_15m, '4h'),
             '1d': self.resample(df_15m, '1d'),
         }
+        # P1-1: 真实 5m 独立加载; 无 5m 时不静默回退, 由调用方显式报错
+        df_5m = self.load_5min(coin)
+        if df_5m is not None and len(df_5m) > 0:
+            result['5m'] = df_5m
+        return result
 
     # ---- 校验 ----
     def validate(self, df: pd.DataFrame, min_bars: int = 500) -> bool:
@@ -622,8 +651,8 @@ class BacktestEngineV2:
         self._last_entry_price = 0
         self._last_closed_bar = -1
         self._bar_idx = 0
+        self._position_seq = 0     # P1-2: 持仓唯一id计数器 (初始腿生成, 加仓腿复用)
         self._enable_pyramiding = False
-        self._pyr_init_pct = 30
         self._pyr_trigger_pct = 2.0
         self._pyr_add_pct = 0.5
         self._pyr_max = 3
@@ -689,7 +718,6 @@ class BacktestEngineV2:
         try:
             sel = getattr(strategy, 'selected', {})
             self._enable_pyramiding = sel.get('_enable_pyramiding', False)
-            self._pyr_init_pct = sel.get('_pyr_init_pct', 30)
             self._pyr_trigger_pct = sel.get('_pyr_trigger_pct', 2.0)
             self._pyr_add_pct = sel.get('_pyr_add_pct', 0.5)
             # P3-5: max_pyramid 构造参数作为 _pyr_max 的回退默认值 (接线, 消除死参数)
@@ -1018,14 +1046,12 @@ class BacktestEngineV2:
             if regime == 'bear' or best['side'] == 'SHORT':
                 return
 
-        # 闭环重构: alloc = 单笔建仓比例% (来自UI), 宏观系数由_open()内部根据regime查表
+        # 闭环重构: alloc = 初始建仓比例% (来自UI), 宏观系数由_open()内部根据regime查表
         alloc = self._init_alloc_pct / 100.0
 
         if alloc <= 0:
             return
 
-        # P0修复: 删除_pyr_init_pct对regime_alloc的覆盖
-        # regime_alloc 直接由市场状态决定，不受首仓比例覆盖
         # P0新增: 传递ATR值和df行数据给_open()用于入场时ATR止损定价
         coin_df = dfs[best['coin']]
         entry_row = coin_df.loc[ts]
@@ -1093,7 +1119,8 @@ class BacktestEngineV2:
                        existing_notional=total_notional,
                        fixed_margin=add_margin,
                        pyramid_count=count + 1,
-                       init_margin=init_margin)
+                       init_margin=init_margin,
+                       position_id=legs[0].get('position_id'))
 
             # 保本止损: 已有 leg 移到自身入场价 (新leg保留自身新鲜SL)
             if self._pyr_trail:
@@ -1219,7 +1246,8 @@ class BacktestEngineV2:
     def _open(self, coin: str, side: str, price: float, alloc: float, ts,
               regime: str = 'range', resonance_score: int = 0,
               atr_value: float = 0, df_row=None, existing_notional: float = 0,
-              fixed_margin: float = 0, pyramid_count: int = 0, init_margin: float = 0):
+              fixed_margin: float = 0, pyramid_count: int = 0, init_margin: float = 0,
+              position_id: int = 0):
         """
         开仓 (合约模式)。
 
@@ -1401,6 +1429,11 @@ class BacktestEngineV2:
         else:
             liq_price = fill_price * (1 + 1.0 / lev - mmr)
 
+        # P1-2: 同一仓位的初始腿与加仓腿共享 position_id (初始腿生成新id, 加仓腿复用传入id)
+        if position_id <= 0:
+            self._position_seq += 1
+            position_id = self._position_seq
+
         pos = {
             'coin': coin, 'side': side, 'entry': fill_price,
             'qty': notional / fill_price if fill_price > 0 else 0.0,  # P1-5: 独立 leg 数量
@@ -1417,6 +1450,7 @@ class BacktestEngineV2:
             'max_pyramid_count': self._pyr_max,
             'leverage': self.leverage,
             'init_margin': init_margin if init_margin > 0 else margin,
+            'position_id': position_id,
         }
         self.positions.append(pos)
 
@@ -1469,6 +1503,9 @@ class BacktestEngineV2:
             'exit': round(price, 4),
             'contracts': pos.get('contracts', pos.get('notional', 0) / (pos.get('entry', 1) * self.CONTRACT_FV.get(pos.get('coin', 'ETH'), 1.0))),
             'margin': round(margin, 2),
+            'position_id': pos.get('position_id'),
+            'init_margin': round(pos.get('init_margin', margin), 2),
+            'pyramid_count': pos.get('pyramid_count', 0),
             'regime': pos.get('regime', '?'),
             'resonance_score': pos.get('resonance_score', 0),
             'reason': reason,
@@ -1597,6 +1634,35 @@ class BacktestEngineV2:
             total += short_mg * (short_ep - px0) / short_ep * self.leverage if short_ep > 0 else 0
         return max(total, 0.0)
 
+    def _aggregate_positions(self, trades: List[Dict]) -> List[Dict]:
+        """P1-2: 按 position_id 聚合逐腿交易为持仓级汇总 (只读聚合, 不改 PnL/交易结构)。"""
+        by = {}
+        for t in trades:
+            pid = t.get('position_id')
+            if pid is None:
+                continue
+            by.setdefault(pid, []).append(t)
+
+        out = []
+        for pid, legs in by.items():
+            legs = sorted(legs, key=lambda x: str(x.get('open_time', '')))
+            init_margin = min((l.get('init_margin', l.get('margin', 0)) for l in legs), default=0)
+            total_margin = sum(l.get('margin', 0) for l in legs)
+            # 平均入场价按保证金加权 (notional = margin × lev, 与名义加权等价)
+            avg_entry = (sum(l.get('entry', 0) * l.get('margin', 0) for l in legs) / total_margin) if total_margin > 0 else 0.0
+            out.append({
+                'position_id': pid,
+                'initial_margin': round(init_margin, 2),
+                'add_margin': round(total_margin - init_margin, 2),
+                'total_margin': round(total_margin, 2),
+                'average_entry': round(avg_entry, 4),
+                'pyramid_count': max((l.get('pyramid_count', 0) for l in legs), default=0),
+                'realized_pnl': round(sum(l.get('pnl', 0) for l in legs), 2),
+                'entry_time': legs[0].get('open_time'),
+                'exit_time': max(str(l.get('close_time', '')) for l in legs),
+            })
+        return out
+
     def _build_result(self, strategy, coins, index) -> Dict:
         closed = [t for t in self.trades if t['reason'] in ('TP', 'SL', 'EOD')]
         equity_arr = np.array([e['equity'] for e in self.equity_curve]) if self.equity_curve else np.array([self.initial_capital])
@@ -1609,6 +1675,7 @@ class BacktestEngineV2:
             'final_equity': round(self.equity, 2),
             'trades': self.trades,
             'closed_trades': closed,
+            'position_trades': self._aggregate_positions(self.trades),
             'equity_curve': self.equity_curve,
             'equity_array': equity_arr,
             'portfolio_curve': self._portfolio_curve,

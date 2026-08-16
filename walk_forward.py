@@ -88,6 +88,8 @@ class WalkForwardAnalyzer:
         # 1) 加载数据
         de = DataEngine()
         all_tf = de.get_multi_timeframe(coin)
+        if timeframe == '5m' and '5m' not in all_tf:
+            return {"error": _t('err_5m_missing', coin=coin), "windows": [], "score": {}}
         df = all_tf.get(timeframe, all_tf['4h'])
         if df is None or len(df) < 500:
             return {"error": _t('wf_err_insufficient'), "windows": [], "score": {}}

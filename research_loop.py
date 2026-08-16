@@ -14,7 +14,7 @@ from indicator_schema import INDICATOR_REGISTRY, INDICATOR_SCHEMA
 from research_storage import db
 from research_phase1 import (
     make_engine_kwargs, run_single, simple_walk_forward,
-    wf_summary, _monte_carlo, RISK_CONFIG,
+    wf_summary, _monte_carlo, RISK_CONFIG, POSITION_PARAM_KEYS, _infer_timeframe,
 )
 
 # 默认实验设计（AI 未指定时兜底）
@@ -228,11 +228,13 @@ def fingerprint(indicator_names):
     return "_".join(indicator_keys(indicator_names)).upper()
 
 
-def full_fingerprint(indicator_names, param_overrides=None, leverage=None, tp_pct=None, sl_pct=None):
-    """完整实验指纹 = 指标组合 + 指标参数 + 杠杆 + TP/SL。
+def full_fingerprint(indicator_names, param_overrides=None, leverage=None, tp_pct=None,
+                     sl_pct=None, position_params=None):
+    """完整实验指纹 = 指标组合 + 指标参数 + 杠杆 + TP/SL + 仓位/加仓/牛熊系数。
 
     与 fingerprint 的区别：把参数/风控也纳入，用于「完全重复实验」去重。
     同一指标组合但参数不同 → 不同指纹（这正是参数搜索要测试的变体，不能误跳过）。
+    P0: 仓位/加仓/牛熊系数纳入指纹，两个仅仓位不同的实验不再被判为重复。
     """
     base = fingerprint(indicator_names)
     seg = []
@@ -245,6 +247,10 @@ def full_fingerprint(indicator_names, param_overrides=None, leverage=None, tp_pc
         seg.append(f"tp={tp_pct}")
     if sl_pct is not None:
         seg.append(f"sl={sl_pct}")
+    if position_params:
+        for k in POSITION_PARAM_KEYS:
+            if k in position_params:
+                seg.append(f"{k}={position_params[k]}")
     return (base + "#" + "&".join(seg)).upper() if seg else base
 
 
@@ -317,15 +323,35 @@ def _make_strategy(selected, strategy_factory):
     return (strategy_factory or _default_strategy_factory)(selected)
 
 
+def _position_params_from(spec):
+    """从 LLM 策略 spec (hyp/direction dict) 提取仓位/加仓/牛熊系数覆盖 (P0)。
+
+    返回 None (未指定任何仓位参数) 或 dict (仅含 spec 中出现的 POSITION_PARAM_KEYS)。
+    支持顶层键, 也支持嵌套 "position" 子对象 (更清晰的 LLM schema)。
+    """
+    if not spec:
+        return None
+    out = {k: spec[k] for k in POSITION_PARAM_KEYS if k in spec and spec[k] is not None}
+    nested = spec.get("position")
+    if isinstance(nested, dict):
+        for k in POSITION_PARAM_KEYS:
+            if k in nested and nested[k] is not None:
+                out[k] = nested[k]
+    return out or None
+
+
 # ============================================================
 # 二、回测执行（复用 research_phase1 已验证接口）
 # ============================================================
 def run_hypothesis_backtest(df, coin, indicator_names, param_overrides=None,
                             leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL,
-                            strategy_factory=None):
-    """全周期 + IS/OOS + Walk-Forward + Monte Carlo。返回扁平指标 dict。"""
+                            strategy_factory=None, position_params=None):
+    """全周期 + IS/OOS + Walk-Forward + Monte Carlo。返回扁平指标 dict。
+
+    position_params (P0): 仓位/加仓/牛熊系数覆盖 dict, 键见 POSITION_PARAM_KEYS。
+    """
     base_selected = build_selected(indicator_names, param_overrides)
-    kw = make_engine_kwargs(leverage, tp_pct, sl_pct)
+    kw = make_engine_kwargs(leverage, tp_pct, sl_pct, **(position_params or {}))
 
     def _fresh():
         return _make_strategy(dict(base_selected), strategy_factory)
@@ -357,8 +383,8 @@ def run_hypothesis_backtest(df, coin, indicator_names, param_overrides=None,
     else:
         out["oos_return"] = out["oos_sharpe"] = out["oos_mdd"] = out["oos_trades"] = None
 
-    # Monte Carlo 5% 分位
-    out["mc_p5"] = _monte_carlo(res.get("equity_array"))
+    # Monte Carlo 5% 分位 (P2: 按周期年度化)
+    out["mc_p5"] = _monte_carlo(res.get("equity_array"), timeframe=_infer_timeframe(df))
 
     # Walk-Forward 滚动（固定参数，无参数偷窥）
     try:
@@ -525,6 +551,7 @@ JSON 结构（字段名固定）：
   "leverage": 2,
   "tp_pct": 8.0,
   "sl_pct": 4.0,
+  "position": {{"_init_alloc_pct": 30, "_enable_pyramiding": false, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_bull_alloc": 100, "_range_alloc": 50, "_bear_alloc": 30}},
   "strategy_style": "趋势跟踪",
   "entry_rules": ["开仓条件1", "开仓条件2"],
   "exit_rules": ["平仓条件1", "平仓条件2"],
@@ -538,6 +565,7 @@ JSON 结构（字段名固定）：
 - 可用资产: {assets}；可用周期: {timeframes}。
 - indicators 必须从下方「平台能力」的指标清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
 - params 的 key 必须用清单中给出的参数 key；值必须是数字。
+- position 为仓位/加仓/牛熊系数（可选，缺省=引擎默认），key 与取值范围以「平台能力」风控参数清单为准；若研究目标涉及仓位或加仓，必须显式给出。
 - entry_rules / exit_rules 各 1~3 条，描述具体开仓 / 平仓条件（不能为空）。
 - strategy_style 取：趋势跟踪 / 动量 / 均值回归 / 量价配合 / 高频 / 日内 之一。
 - 最多 3 个核心指标，避免堆叠冗余因子。
@@ -614,7 +642,11 @@ def build_report(hyp, indicators, params, m, verdict, sensitivity=None):
         L.append(f"- {name}: {row}")
     L.append(f"- 杠杆 {verdict.get('leverage', hyp.get('leverage'))}x · "
              f"TP {verdict.get('tp_pct', hyp.get('tp_pct'))}% · SL {verdict.get('sl_pct', hyp.get('sl_pct'))}%")
-    L.append("- 仓位/加仓：固定单仓（引擎默认，本轮参数搜索不覆盖仓位与加仓逻辑）")
+    pos = _position_params_from(hyp)
+    if pos:
+        L.append("- 仓位/加仓：" + "、".join(f"{k}={v}" for k, v in pos.items()))
+    else:
+        L.append("- 仓位/加仓：引擎默认（初始30%·不加仓·牛100/震50/熊30）")
     L.append("")
     L.append("## 历史表现（样本内）")
     L.append(f"- 总收益 {_f(m.get('total_return'))}% · 年化 {_f(m.get('annual_return'))}%")
@@ -714,7 +746,9 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
     tp = hyp.get("tp_pct") if hyp.get("tp_pct") is not None else DEFAULT_TP
     sl = hyp.get("sl_pct") if hyp.get("sl_pct") is not None else DEFAULT_SL
 
-    m = run_hypothesis_backtest(df, coin, indicators, params, lev, tp, sl, strategy_factory)
+    pos_params = _position_params_from(hyp)
+    m = run_hypothesis_backtest(df, coin, indicators, params, lev, tp, sl, strategy_factory,
+                                position_params=pos_params)
     passed, failures = judge_pass(m)
     score = research_score(m)  # 参数稳定性先用 WF 代理，敏感性分析后再修正
     fp = fingerprint(indicators)
@@ -784,6 +818,7 @@ JSON 结构（数组，每个元素字段名固定）：
     "leverage": 2,
     "tp_pct": 8.0,
     "sl_pct": 4.0,
+    "position": {{"_init_alloc_pct": 30, "_enable_pyramiding": false, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_bull_alloc": 100, "_range_alloc": 50, "_bear_alloc": 30}},
     "strategy_style": "趋势跟踪",
     "entry_rules": ["开仓条件1"],
     "exit_rules": ["平仓条件1"],
@@ -800,6 +835,7 @@ JSON 结构（数组，每个元素字段名固定）：
 - 5~8 个方向的指标组合必须互不相同（覆盖不同类别，避免全部同类堆叠）。
 - 每个方向的 indicators 必须从下方「平台能力」的指标清单精确选择 1~4 个（用完整中文名，禁止自创指标）。
 - params 的 key 必须用清单中给出的参数 key；值必须是数字，且落在清单给出的 min~max 范围内。
+- position 为仓位/加仓/牛熊系数（可选，缺省=引擎默认），key 与取值范围以「平台能力」风控参数清单为准；不同方向可给出不同仓位模型以纳入搜索。
 - entry_rules / exit_rules 各 1~3 条，描述具体开仓 / 平仓条件（不能为空）。
 - strategy_style 取：趋势跟踪 / 动量 / 均值回归 / 量价配合 / 高频 / 日内 之一。
 - 每个方向独立完整，字段不能为空。
@@ -1085,12 +1121,14 @@ def expand_parameter_grid(direction, max_combos=20, n_risk=5, rng=None):
     lev0 = direction.get("leverage") or DEFAULT_LEVERAGE
     tp0 = direction.get("tp_pct") if direction.get("tp_pct") is not None else DEFAULT_TP
     sl0 = direction.get("sl_pct") if direction.get("sl_pct") is not None else DEFAULT_SL
+    pos_params = _position_params_from(direction)
 
     combos = []
 
     def _add(label, params, lev, tp, sl):
         combos.append({"label": label, "param_overrides": params,
-                       "leverage": lev, "tp_pct": tp, "sl_pct": sl})
+                       "leverage": lev, "tp_pct": tp, "sl_pct": sl,
+                       "position_params": pos_params})
 
     # 1. 基准
     _add("基准参数", base_params, lev0, tp0, sl0)
@@ -1114,10 +1152,11 @@ def expand_parameter_grid(direction, max_combos=20, n_risk=5, rng=None):
                 po.setdefault(name, {})[pk] = v
                 _add(f"{name} {pk}={v}", po, lev0, tp0, sl0)
 
-    # 完全重复（指标+参数+杠杆+TP/SL 相同）去重
+    # 完全重复（指标+参数+杠杆+TP/SL+仓位 相同）去重
     seen, out = set(), []
     for c in combos:
-        fp = full_fingerprint(indicators, c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"])
+        fp = full_fingerprint(indicators, c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"],
+                              position_params=c.get("position_params"))
         if fp in seen:
             continue
         seen.add(fp)
@@ -1136,11 +1175,13 @@ def expand_refinement_grid(direction, combo, step_ratio=0.06):
     lev0 = combo["leverage"]
     tp0 = combo["tp_pct"]
     sl0 = combo["sl_pct"]
+    pos_params = combo.get("position_params")
     out = []
 
     def _add(label, params, lev, tp, sl):
         out.append({"label": label, "param_overrides": params,
-                    "leverage": lev, "tp_pct": tp, "sl_pct": sl})
+                    "leverage": lev, "tp_pct": tp, "sl_pct": sl,
+                    "position_params": pos_params})
 
     # 主参数精调：每个指标首参数在当前值附近 ±1/±2 步长
     for name in indicators:
@@ -1176,7 +1217,8 @@ def expand_refinement_grid(direction, combo, step_ratio=0.06):
     # 去重
     seen, out2 = set(), []
     for c in out:
-        fp = full_fingerprint(indicators, c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"])
+        fp = full_fingerprint(indicators, c["param_overrides"], c["leverage"], c["tp_pct"], c["sl_pct"],
+                              position_params=c.get("position_params"))
         if fp in seen:
             continue
         seen.add(fp)
@@ -1186,14 +1228,17 @@ def expand_refinement_grid(direction, combo, step_ratio=0.06):
 
 def _run_experiment(spec, indicators, combo, coin, df):
     """跑单个实验（回测→判定→评分→落库→报告→失败记忆），返回结果 dict。"""
+    pos_params = combo.get("position_params") or _position_params_from(spec)
     fp = full_fingerprint(indicators, combo["param_overrides"],
-                          combo["leverage"], combo["tp_pct"], combo["sl_pct"])
+                          combo["leverage"], combo["tp_pct"], combo["sl_pct"],
+                          position_params=pos_params)
     if _previously_failed(fp):
         return {"spec": spec, "indicators": indicators, "combo": combo,
                 "skipped": True, "reason": "历史失败（相同参数组合）"}
     try:
         m = run_hypothesis_backtest(df, coin, indicators, combo["param_overrides"],
-                                    combo["leverage"], combo["tp_pct"], combo["sl_pct"])
+                                    combo["leverage"], combo["tp_pct"], combo["sl_pct"],
+                                    position_params=pos_params)
         passed, failures = judge_pass(m)
         score = research_score(m)
         name = " + ".join(indicators[:3]) if indicators else "未命名策略"
@@ -1271,6 +1316,9 @@ def run_parameter_search(directions, df, coin, progress=None, max_combos_per_dir
         direction = {"indicators": indicators, "params": spec.get("params") or {},
                      "leverage": spec.get("leverage"), "tp_pct": spec.get("tp_pct"),
                      "sl_pct": spec.get("sl_pct")}
+        pos = _position_params_from(spec)
+        if pos:
+            direction.update(pos)
         for combo in expand_parameter_grid(direction, max_combos_per_direction):
             coarse_tasks.append((spec, indicators, combo))
 
@@ -1285,6 +1333,9 @@ def run_parameter_search(directions, df, coin, progress=None, max_combos_per_dir
         direction = {"indicators": indicators, "params": spec.get("params") or {},
                      "leverage": spec.get("leverage"), "tp_pct": spec.get("tp_pct"),
                      "sl_pct": spec.get("sl_pct")}
+        pos = _position_params_from(spec)
+        if pos:
+            direction.update(pos)
         for c in expand_refinement_grid(direction, combo):
             fine_tasks.append((spec, indicators, c))
 

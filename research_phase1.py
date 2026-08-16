@@ -87,6 +87,11 @@ RISK_CONFIG = {
     "_pos_mode": "fixed_risk",
     "_risk_per_trade": 1.0,   # 单笔风险 1% 权益
     "_use_atr_sl": False,      # Phase 1 用固定 SL (ATR 留 Phase 2)
+    # P0: 仓位/加仓默认值 (与引擎默认一致, 供 AI 搜索覆盖)
+    "_init_alloc_pct": 30.0,   # 初始建仓比例% (fixed_capital 模式生效)
+    "_enable_pyramiding": False,  # 加仓开关
+    "_pyr_add_pct": 0.5,       # 加仓比例 (初始保证金的比例, 引擎语义为小数)
+    "_pyr_max": 3,             # 最大加仓次数
     "_bull_alloc": 100.0,      # 百分比, 引擎 ÷100
     "_range_alloc": 50.0,
     "_bear_alloc": 30.0,
@@ -96,20 +101,39 @@ RISK_CONFIG = {
     "_sl_mode": "price_pct",
 }
 
+# P0: AI 可搜索的仓位/加仓/市场状态参数 (引擎在 run() 时从 strategy.selected 读取)
+POSITION_PARAM_KEYS = (
+    '_init_alloc_pct', '_enable_pyramiding', '_pyr_add_pct', '_pyr_max',
+    '_bull_alloc', '_range_alloc', '_bear_alloc',
+)
 
-def make_engine_kwargs(leverage, tp_pct, sl_pct):
-    return dict(
+
+def make_engine_kwargs(leverage, tp_pct, sl_pct, **position_overrides):
+    """构造引擎参数。仓位/加仓/牛熊系数为 AI 可搜索维度 (P0)。
+
+    position_overrides 可覆盖 POSITION_PARAM_KEYS 中任意项 (键名与 strategy.selected 一致)。
+    返回 dict 含 '_position_params' 子键, 由 run_single 剥离并注入 strategy.selected;
+    引擎在 run() 时从 selected 读取同一通道, 不改变已验证的开仓/加仓/收益/手续费公式。
+    """
+    pos = {k: RISK_CONFIG.get(k) for k in POSITION_PARAM_KEYS}
+    pos.update({k: v for k, v in position_overrides.items() if k in POSITION_PARAM_KEYS})
+    kw = dict(
         initial_capital=10000.0,
         leverage=leverage,
         max_positions=1,
         tp_pct=tp_pct, sl_pct=sl_pct,
         tp_mode='price_pct', sl_mode='price_pct',
-        bull_alloc=1.0, range_alloc=0.5, bear_alloc=0.3,
+        # 牛熊系数与 selected 注入值保持一致 (引擎 run() 会以 selected 覆盖)
+        bull_alloc=pos['_bull_alloc'] / 100.0,
+        range_alloc=pos['_range_alloc'] / 100.0,
+        bear_alloc=pos['_bear_alloc'] / 100.0,
         bear_ratio_limit=0.5,
         max_notional_pct=3.0,
         lock_streak=3, lock_bars=12, cooldown_bars=2,
         verbose=False,
     )
+    kw['_position_params'] = pos
+    return kw
 
 
 def _regime_br(df, es, lookback=20):
@@ -240,6 +264,14 @@ class S5_RegimeAdaptive(StrategyBase):
 # 运行辅助
 # ============================================================
 def run_single(df, coin, strategy, kwargs):
+    """跑单次回测。kwargs 可含 '_position_params' (仓位/加仓/牛熊系数, P0),
+    从构造参数中剥离并注入 strategy.selected; 引擎 run() 从 selected 读取 (与 UI 主路径同通道)。"""
+    kwargs = dict(kwargs)
+    pos_params = kwargs.pop('_position_params', None)
+    if pos_params:
+        sel = getattr(strategy, 'selected', None)
+        if isinstance(sel, dict):
+            sel.update(pos_params)  # 覆盖 RISK_CONFIG 默认值
     engine = BacktestEngineV2(**kwargs)
     result = engine.run({coin: df}, strategy)
     metrics = PerformanceAnalyzer.analyze(result)
@@ -282,7 +314,37 @@ def return_source(trades):
     return {k: {'pnl': round(v['pnl'], 2), 'n': v['n']} for k, v in by.items()}
 
 
-def _monte_carlo(equity_arr, n_boot=200):
+# P2: 周期 → 每年bar数 (Monte Carlo 年度化不再硬编码 4h)
+_TIMEFRAME_BARS_PER_YEAR = {
+    '5m': 365 * 24 * 12,   # 5分钟
+    '15m': 365 * 24 * 4,   # 15分钟
+    '1h': 365 * 24,        # 1小时
+    '4h': 365 * 6,         # 4小时
+    '1d': 365,             # 日线
+}
+
+
+def _infer_timeframe(df):
+    """从 K 线索引中位数间隔推断周期标签 (5m/15m/1h/4h/1d)。失败返回 None。"""
+    try:
+        d = df.index.to_series().diff().dropna().median()
+        if pd.isna(d) or d <= pd.Timedelta(0):
+            return None
+        mins = d.total_seconds() / 60.0
+        if mins <= 7:
+            return '5m'
+        if mins <= 20:
+            return '15m'
+        if mins <= 90:
+            return '1h'
+        if mins <= 300:
+            return '4h'
+        return '1d'
+    except Exception:
+        return None
+
+
+def _monte_carlo(equity_arr, n_boot=200, timeframe=None):
     if equity_arr is None or len(equity_arr) < 3:
         return None
     arr = np.asarray(equity_arr, dtype=float)
@@ -290,7 +352,8 @@ def _monte_carlo(equity_arr, n_boot=200):
     rets = rets[np.isfinite(rets)]
     if len(rets) < 3:
         return None
-    bars_per_year = 365 * 6  # 4H
+    # P2: 按周期自动换算 (未指定/未知周期回退 4h 旧默认)
+    bars_per_year = _TIMEFRAME_BARS_PER_YEAR.get(timeframe) or _TIMEFRAME_BARS_PER_YEAR['4h']
     rng = np.random.default_rng(42)
     anns = []
     for _ in range(n_boot):
@@ -399,7 +462,7 @@ def main():
                     _, is_m = run_single(is_df, coin, scls(), kwargs)
                     _, oos_m = run_single(oos_df, coin, scls(), kwargs)
                     # Monte Carlo (复用全周期权益)
-                    mc_p5 = _monte_carlo(res.get('equity_array'))
+                    mc_p5 = _monte_carlo(res.get('equity_array'), timeframe=_infer_timeframe(data[coin]))
                     # Walk Forward (仅 2x 跑, 省算力)
                     wf = {}
                     if lev == 2:

@@ -52,8 +52,11 @@ def build_platform_context() -> dict:
                 "leverage 杠杆", "tp_pct 止盈", "sl_pct 止损", "trailing_pct 移动止盈",
                 "ATR 止损 (use_atr_sl / atr_period / atr_mult)",
                 "max_notional_pct 最大名义敞口", "lock_streak/lock_bars 连亏锁仓",
-                "cooldown_bars 冷却", "max_pyramid/pyramid_step 金字塔加仓",
-                "regime 牛/震荡/熊 仓位分配 (bull/range/bear_alloc)",
+                "cooldown_bars 冷却",
+                "初始建仓比例 _init_alloc_pct (0~100%)",
+                "加仓开关 _enable_pyramiding (true/false)",
+                "加仓比例 _pyr_add_pct (0.1~1.0)", "最大加仓次数 _pyr_max (1~5)",
+                "牛/震/熊仓位系数 _bull_alloc/_range_alloc/_bear_alloc (0~100%)",
             ],
         },
         "backtest_capabilities": {

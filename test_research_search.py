@@ -125,7 +125,8 @@ def main():
     _orig_bt = rl.run_hypothesis_backtest
 
     def _fake_backtest(df, coin, indicator_names, param_overrides=None,
-                       leverage=2, tp_pct=8.0, sl_pct=4.0, strategy_factory=None):
+                       leverage=2, tp_pct=8.0, sl_pct=4.0, strategy_factory=None,
+                       position_params=None):
         # 用参数产生可区分的 sharpe，验证排序
         s = 0.5 + (param_overrides or {}).get(indicator_names[0], {}).get("EMA_short", 7) / 100.0
         return {"total_return": 10.0, "annual_return": 15.0, "sharpe": s, "max_drawdown": 12.0,

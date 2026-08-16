@@ -32,3 +32,44 @@ server.py
 
 # 研究数据持久化（用户数据，禁止提交）
 research.db
+*.db
+
+# 发布排除: 密钥 / 备份 / 本地生成产物
+*.key
+*.bak*
+.streamlit/
+*.bat
+*.html
+*.parquet
+*_result.json
+integrity_validation_report.json
+baseline_*.json
+backup_*/
+legacy/
+quant-console/
+
+# 本地/调试/一次性脚本（非正式模块）
+debug_*.py
+verify_*.py
+backtest_*.py
+compare_*.py
+simulate_*.py
+test_combo_optimize.py
+test_date_fix.py
+test_indicator_extension.py
+test_output.txt
+quant_research_agent.py
+research_phase2_sensitivity.py
+research_phase2_sensitivity.json
+convert_to_docx.py
+export_docx.py
+serve.py
+rotation_app.py
+streamlit_app.py
+run_backtest_p0.py
+守护进程.py
+
+# 根目录一次性报告（正式报告在 docs/）
+research_report.md
+research_phase1_report.md
+ARCHITECTURE_AUDIT.md

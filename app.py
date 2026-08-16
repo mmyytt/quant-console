@@ -310,9 +310,6 @@ with st.sidebar.form(key="config_form", clear_on_submit=False):
 
     if strat_mode_key == "classic":
         st.caption(t("classic_mode_caption"))
-        # 通用仓位控制 (不受加仓开关影响)
-        pyr_init_pct = st.slider(t("single_pos_pct"), 10, 100, 30, 5,
-            help=t("single_pos_help"))
         # 加仓子面板
         with st.expander(t("pyramiding_title"), expanded=False):
             enable_pyramiding = st.checkbox(t("enable_pyramiding"), False)
@@ -800,9 +797,14 @@ if "AI" in st.session_state.active_tab:
     def _load_research_df(asset, timeframe):
         de = DataEngine()
         all_tf = de.get_multi_timeframe(asset)
-        # 引擎最小粒度键为 "15m"（内部优先加载 5m 数据）；"5m" 复用该基座
-        base_tf = "15m" if timeframe == "5m" else timeframe
-        df = all_tf.get(base_tf, all_tf["4h"])
+        # 5m 需真实 5 分钟数据; 无则报错, 不静默降级到 15m/4h
+        if timeframe == "5m":
+            df = all_tf.get("5m")
+            if df is None or len(df) == 0:
+                st.error(t("err_5m_missing", coin=asset))
+                st.stop()
+        else:
+            df = all_tf.get(timeframe, all_tf["4h"])
         if not isinstance(df.index, pd.DatetimeIndex):
             df.index = pd.to_datetime(df.index)
         if hasattr(df.index, "tz") and df.index.tz is not None:
@@ -1643,6 +1645,9 @@ if submitted:
     with st.spinner(t("spinner_load_data")):
         de = DataEngine()
         all_tf = de.get_multi_timeframe(coin)
+        if timeframe == "5m" and "5m" not in all_tf:
+            st.error(t("err_5m_missing", coin=coin))
+            st.stop()
         df = all_tf.get(timeframe, all_tf['4h'])
         # ── 日期索引标准化 (防御代码) ──
         if not isinstance(df.index, pd.DatetimeIndex):
@@ -1688,12 +1693,8 @@ if submitted:
         # 策略模式参数注入
         st.session_state.selected_indicators["_strategy_mode"] = strat_mode_key
         st.session_state.selected_indicators["_hedge_ratio"] = hedge_ratio
-        st.session_state.selected_indicators["_max_pyramid"] = max_pyramid
-        st.session_state.selected_indicators["_pyramid_first"] = pyramid_first
-        st.session_state.selected_indicators["_pyramid_step"] = pyramid_step_pct
         st.session_state.selected_indicators["_enable_pyramiding"] = enable_pyramiding if 'enable_pyramiding' in dir() else False
-        st.session_state.selected_indicators["_pyr_init_pct"] = pyr_init_pct if 'pyr_init_pct' in dir() else 30
-        # 闭环重构: 单笔建仓比例% 参与仓位公式
+        # 闭环重构: 初始建仓比例% 参与仓位公式 (唯一生效的建仓比例参数)
         st.session_state.selected_indicators["_init_alloc_pct"] = pyr_init_pct if 'pyr_init_pct' in dir() else 30
         st.session_state.selected_indicators["_pyr_trigger_pct"] = pyr_trigger_pct if 'pyr_trigger_pct' in dir() else 2.0
         st.session_state.selected_indicators["_pyr_add_pct"] = pyr_add_pct if 'pyr_add_pct' in dir() else 0.5
@@ -2435,6 +2436,9 @@ if submitted:
             try:
                 de_wf = DataEngine()
                 all_tf_wf = de_wf.get_multi_timeframe(coin)
+                if timeframe == "5m" and "5m" not in all_tf_wf:
+                    st.error(t("err_5m_missing", coin=coin))
+                    st.stop()
                 df_wf = all_tf_wf.get(timeframe, all_tf_wf['4h'])
                 if not isinstance(df_wf.index, pd.DatetimeIndex):
                     df_wf.index = pd.to_datetime(df_wf.index)
@@ -2484,6 +2488,7 @@ if submitted:
                 use_and=use_and,
                 strategy_class=DynamicStrategy,
                 train_years=3, test_years=1,
+                param_grid={"leverage": [1, 2, 3]},  # P1-3: 训练窗IS-only杠杆优化, 测试窗只验证
             )
 
             if wf_result.get("error"):

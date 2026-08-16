@@ -27,8 +27,8 @@ def _read_existing(pq_path: str):
     return df, df.index.max()
 
 
-def _download_zip(symbol: str, sy: int, ey: int, em: int) -> pd.DataFrame:
-    base = f"{BINANCE_BASE}/{symbol}/15m/{symbol}-15m-"; all_dfs = []
+def _download_zip(symbol: str, sy: int, ey: int, em: int, interval: str = "15m") -> pd.DataFrame:
+    base = f"{BINANCE_BASE}/{symbol}/{interval}/{symbol}-{interval}-"; all_dfs = []
     for y in range(sy, ey+1):
         for m in range(1, 13):
             if y == ey and m > em: break
@@ -52,7 +52,7 @@ def _download_zip(symbol: str, sy: int, ey: int, em: int) -> pd.DataFrame:
 # ============================================================
 # 三重数据源轮询
 # ============================================================
-def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
+def fetch_latest_klines_with_fallback(coin: str, limit: int = 300, interval: str = "15m") -> dict:
     """
     三重轮询抓取最新K线。
 
@@ -72,7 +72,7 @@ def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
     ]
     for okx_base in okx_endpoints:
         try:
-            url = f"{okx_base}/api/v5/market/candles?instId={okx_inst}&bar=15m&limit={min(limit, 300)}"
+            url = f"{okx_base}/api/v5/market/candles?instId={okx_inst}&bar={interval}&limit={min(limit, 300)}"
             print(f"[OKX] Trying {okx_base}...")
             r = requests.get(url, timeout=15, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -104,7 +104,7 @@ def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
         start_ms = int((datetime.now() - timedelta(days=60)).timestamp() * 1000)
         for bnb_url in ["https://api.binance.com", "https://api1.binance.com", "https://api3.binance.com"]:
             try:
-                url = f"{bnb_url}/api/v3/klines?symbol={bnb_symbol}&interval=15m&startTime={start_ms}&endTime={now_ms}&limit=1000"
+                url = f"{bnb_url}/api/v3/klines?symbol={bnb_symbol}&interval={interval}&startTime={start_ms}&endTime={now_ms}&limit=1000"
                 print(f"[Binance] Trying {bnb_url}...")
                 r = requests.get(url, timeout=15, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -125,24 +125,28 @@ def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
         import traceback; traceback.print_exc()
 
     # === Source 2: CoinGecko ===
-    try:
-        cg_id = info["cg"]
-        url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc?vs_currency=usd&days=60"
-        print(f"[CoinGecko] Trying {url[:80]}...")
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200:
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close"])
-                # CoinGecko uses precise timestamps; approximate vol as 0
-                df["vol"] = 0.0  # CoinGecko doesn't provide volume in OHLC
-                df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
-                df = df.set_index("ts").sort_index()
-                print(f"[CoinGecko] SUCCESS: {len(df)} bars, last={df.index[-1]}")
-                return {"source": "coingecko", "df": df, "last_ts": str(df.index[-1])}
-        print(f"[CoinGecko] FAILED: HTTP {r.status_code}")
-    except Exception as e:
-        print(f"[CoinGecko] EXCEPTION: {e}")
+    # CoinGecko OHLC 仅提供 4h/日粒度, 无 5m; 5m 请求跳过避免返回错误粒度
+    if interval != "5m":
+        try:
+            cg_id = info["cg"]
+            url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc?vs_currency=usd&days=60"
+            print(f"[CoinGecko] Trying {url[:80]}...")
+            r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+            if r.status_code == 200:
+                data = r.json()
+                if isinstance(data, list) and len(data) > 0:
+                    df = pd.DataFrame(data, columns=["ts", "open", "high", "low", "close"])
+                    # CoinGecko uses precise timestamps; approximate vol as 0
+                    df["vol"] = 0.0  # CoinGecko doesn't provide volume in OHLC
+                    df["ts"] = pd.to_datetime(pd.to_numeric(df["ts"]), unit="ms")
+                    df = df.set_index("ts").sort_index()
+                    print(f"[CoinGecko] SUCCESS: {len(df)} bars, last={df.index[-1]}")
+                    return {"source": "coingecko", "df": df, "last_ts": str(df.index[-1])}
+            print(f"[CoinGecko] FAILED: HTTP {r.status_code}")
+        except Exception as e:
+            print(f"[CoinGecko] EXCEPTION: {e}")
+    else:
+        print("[CoinGecko] skipped (no 5m OHLC)")
 
     # === Source 3: yfinance ===
     try:
@@ -150,7 +154,7 @@ def fetch_latest_klines_with_fallback(coin: str, limit: int = 300) -> dict:
         print(f"[yfinance] Trying {yf_symbol}...")
         import yfinance as yf
         ticker = yf.Ticker(yf_symbol)
-        df = ticker.history(period="60d", interval="15m")
+        df = ticker.history(period="60d", interval=interval)
         if df is not None and len(df) > 0:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
@@ -248,9 +252,9 @@ def fetch_funding_history(coin: str, use_cache: bool = True) -> pd.Series:
     return s
 
 
-def ensure_data(coin: str) -> str:
+def ensure_data(coin: str, interval: str = "15m") -> str:
     """
-    确保数据存在且更新。
+    确保数据存在且更新。interval: '15m' | '5m' (P1-1 真实5m加载)。
 
     流程:
       1. 读本地parquet缓存 → 历史数据
@@ -259,7 +263,7 @@ def ensure_data(coin: str) -> str:
       4. 保存并返回路径
     """
     os.makedirs(DATA_DIR, exist_ok=True)
-    pq_path = os.path.join(DATA_DIR, f"{coin}_15m.parquet")
+    pq_path = os.path.join(DATA_DIR, f"{coin}_{interval}.parquet")
     info = COINS.get(coin)
     if not info: raise ValueError(f"Unknown coin: {coin}")
 
@@ -268,15 +272,18 @@ def ensure_data(coin: str) -> str:
     if existing is not None:
         print(f"[DataLoader] {coin}: cache {len(existing):,} bars, last={last_ts}")
 
-    # 2. 无历史 → 下载zip
+    # 2. 无历史 → 下载zip (5m 只回补近2年, 避免全历史5m下载过大)
     if existing is None or len(existing) < 1000:
-        print(f"[DataLoader] {coin}: downloading history zip...")
+        print(f"[DataLoader] {coin}: downloading history zip ({interval})...")
         now = datetime.now()
-        dz = _download_zip(info["symbol"], info["start"], now.year, now.month)
+        start_y = info["start"]
+        if interval == "5m":
+            start_y = max(start_y, now.year - 2)
+        dz = _download_zip(info["symbol"], start_y, now.year, now.month, interval)
         if len(dz) > 0: existing = dz; last_ts = existing.index.max()
 
     # 3. 三重轮询增量
-    result = fetch_latest_klines_with_fallback(coin, limit=300)
+    result = fetch_latest_klines_with_fallback(coin, limit=300, interval=interval)
     df_new = result["df"]
 
     if df_new is not None and len(df_new) > 0:
@@ -303,7 +310,7 @@ def ensure_data(coin: str) -> str:
     print(f"[DataLoader] {coin}: {status} last={last_date} gap={gap_h:.1f}h total={len(df_all):,}")
 
     # 5. 断层检测+修复
-    df_all = repair_gaps(coin, df_all, "15m")
+    df_all = repair_gaps(coin, df_all, interval)
 
     # 6. 保存
     df_all.reset_index().to_parquet(pq_path, index=False)
@@ -348,7 +355,7 @@ def repair_gaps(coin: str, df: pd.DataFrame, expected_interval: str = "15m") -> 
     Returns:
         修复后的DataFrame
     """
-    interval_map = {"15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+    interval_map = {"5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
     gap_min = interval_map.get(expected_interval, 15)
     gaps = find_gaps(df, gap_min)
 

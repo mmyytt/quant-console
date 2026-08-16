@@ -1347,6 +1347,7 @@ _TRANSLATIONS = {
         "wf_err_insufficient": "数据不足",
         "wf_err_no_window": "无法生成窗口: 日期范围不足",
         "wf_err_all_failed": "所有窗口回测失败",
+        "err_5m_missing": "当前品种 {coin} 无5分钟数据，无法执行5m回测",
 
         # ── AI 报告生成 (audit_engine.AIReportGenerator) ──
         "ai_report_no_key": "未配置API Key",
@@ -2709,6 +2710,7 @@ _TRANSLATIONS = {
         "wf_err_insufficient": "Insufficient data",
         "wf_err_no_window": "Cannot generate windows: date range too short",
         "wf_err_all_failed": "All windows failed",
+        "err_5m_missing": "No 5-minute data for {coin}; cannot run 5m backtest",
 
         # ── AI report generation (audit_engine.AIReportGenerator) ──
         "ai_report_no_key": "API key not configured",
