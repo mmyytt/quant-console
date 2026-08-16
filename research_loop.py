@@ -202,7 +202,12 @@ def _coerce(v, default):
         return default
     if isinstance(default, bool):
         return bool(v)
-    if isinstance(default, (int, float)):
+    if isinstance(default, int):
+        try:
+            return int(round(float(v)))
+        except (TypeError, ValueError):
+            return default
+    if isinstance(default, float):
         try:
             return float(v)
         except (TypeError, ValueError):
@@ -1076,10 +1081,13 @@ SL_RANGE = (1.0, 50.0)     # 止损 1%-50%（始终 < TP）
 
 
 def _param_type_int(pv):
-    """整型参数：min/max/default 均为整数且无小数 step（如周期）；否则视为连续浮点。"""
+    """整型参数：min/max/default 均为整数（如周期）；否则视为连续浮点。
+
+    注意：step 只影响取值粒度，不改变类型。FIB_lookback 的 step=50 仍是整型周期，
+    若按旧逻辑 (step None/1) 会把 50~500 误采为浮点，导致 rolling(window) 出错。
+    """
     return (isinstance(pv.get("min"), int) and isinstance(pv.get("max"), int)
-            and isinstance(pv.get("default"), int)
-            and (pv.get("step") is None or pv.get("step") == 1))
+            and isinstance(pv.get("default"), int))
 
 
 def _param_sample_values(schema_key, n=5, rng=None):

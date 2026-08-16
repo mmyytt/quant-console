@@ -50,7 +50,7 @@ SWEEP_DIMENSIONS = {
     },
     'fibonacci': {
         'label': 'Fibonacci 回看',
-        'values': [100, 150, 200, 300],
+        'values': [50, 100, 150, 200, 250, 300, 350, 400, 450, 500],
         'format': lambda v: t('bars_unit', n=v),
         'category': 'indicator',
         'indicator_name': '斐波那契回调',
@@ -59,6 +59,13 @@ SWEEP_DIMENSIONS = {
         'label': '成交量倍数',
         'values': [1.5, 2.0, 2.5, 3.0],
         'format': lambda v: f'{v}x',
+        'category': 'indicator',
+        'indicator_name': '成交量突破',
+    },
+    'volume_ma': {
+        'label': '成交量均量周期',
+        'values': [10, 20, 30, 50, 70, 100],
+        'format': lambda v: t('bars_unit', n=v),
         'category': 'indicator',
         'indicator_name': '成交量突破',
     },
@@ -72,6 +79,7 @@ _DIM_I18N_KEY = {
     'atr_stop': 'dim_atr_stop',
     'fibonacci': 'dim_fibonacci',
     'volume': 'dim_volume',
+    'volume_ma': 'dim_volume_ma',
 }
 
 
@@ -98,7 +106,7 @@ PARAM_COMBO_GRID = {
     },
     'fibonacci': {
         'label': 'Fibonacci',
-        'values': [50, 150, 300],
+        'values': [50, 200, 300, 500],
         'format': lambda v: t('bars_unit', n=v),
         'indicator_name': '斐波那契回调',
     },
@@ -106,6 +114,12 @@ PARAM_COMBO_GRID = {
         'label': '成交量倍数',
         'values': [1.5, 2.0, 3.0],
         'format': lambda v: f'{v}x',
+        'indicator_name': '成交量突破',
+    },
+    'volume_ma': {
+        'label': '成交量均量周期',
+        'values': [20, 50, 100],
+        'format': lambda v: t('bars_unit', n=v),
         'indicator_name': '成交量突破',
     },
 }
@@ -218,6 +232,13 @@ class RobustnessLab:
             sel[name]['enabled'] = True
             sel[name]['params']['VOL_mult'] = value
 
+        elif dimension == 'volume_ma':
+            name = dim_def['indicator_name']
+            if name not in sel or not isinstance(sel.get(name), dict):
+                sel[name] = {'enabled': True, 'params': {}}
+            sel[name]['enabled'] = True
+            sel[name]['params']['VOL_ma'] = value
+
         return cfg
 
     @staticmethod
@@ -256,6 +277,8 @@ class RobustnessLab:
         for name, icfg in sel.items():
             if isinstance(icfg, dict) and icfg.get('enabled') and 'params' in icfg:
                 indicator_summary[name] = icfg['params']
+        # 运行日志: 显示本次实际使用的指标参数（如 Fibonacci FIB_lookback / 成交量 VOL_ma）
+        print(f"[RobustnessLab] 实际指标参数: {indicator_summary}", flush=True)
 
         # ── 创建引擎和策略 ──
         engine = BacktestEngineV2(**ek)
@@ -612,6 +635,12 @@ class RobustnessLab:
                             sel[name] = {'enabled': True, 'params': {}}
                         sel[name]['enabled'] = True
                         sel[name]['params']['VOL_mult'] = val
+                    elif dim == 'volume_ma':
+                        name = param_grid[dim]['indicator_name']
+                        if name not in sel or not isinstance(sel.get(name), dict):
+                            sel[name] = {'enabled': True, 'params': {}}
+                        sel[name]['enabled'] = True
+                        sel[name]['params']['VOL_ma'] = val
 
                 # IS 回测
                 is_result = RobustnessLab._run_single(cfg, strategy_class=strategy_class)

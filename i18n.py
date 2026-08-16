@@ -319,6 +319,7 @@ _TRANSLATIONS = {
         "dim_atr_stop": "ATR 止损",
         "dim_fibonacci": "Fibonacci 回看",
         "dim_volume": "成交量倍数",
+        "dim_volume_ma": "成交量均量周期",
 
         # 维度参数格式
         "dim_format_leverage": "{v}x",
@@ -1682,6 +1683,7 @@ _TRANSLATIONS = {
         "dim_atr_stop": "ATR Stop",
         "dim_fibonacci": "Fibonacci Lookback",
         "dim_volume": "Volume Multiplier",
+        "dim_volume_ma": "Volume MA Period",
 
         # Dimension format
         "dim_format_leverage": "{v}x",

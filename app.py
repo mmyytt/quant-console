@@ -1188,6 +1188,8 @@ if "鲁棒性" in st.session_state.active_tab:
         if st.checkbox(dim_labels_with_count['fibonacci'], True, key="dim_fib"): selected_dims.append('fibonacci')
     with dc5:
         if st.checkbox(dim_labels_with_count['volume'], True, key="dim_vol"): selected_dims.append('volume')
+    # 成交量均量周期（VOL_ma）独立维度
+    if st.checkbox(dim_labels_with_count['volume_ma'], True, key="dim_volma"): selected_dims.append('volume_ma')
 
     total_runs = sum(len(SWEEP_DIMENSIONS[d]['values']) for d in selected_dims)
     st.caption(t("robustness_est_time", count=total_runs, min=total_runs * 3, max=total_runs * 5))

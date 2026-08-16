@@ -422,7 +422,7 @@ INDICATOR_SCHEMA = {
         "name": "斐波那契回调", "category": "通道/支撑",
         "desc": "回调到0.382/0.618=做多, 跌破0.618=做空",
         "params": {
-            "FIB_lookback": {"label": "回看K线数", "default": 50, "min": 20, "max": 200, "help": "计算高低点的回看周期"},
+            "FIB_lookback": {"label": "回看K线数", "default": 50, "min": 50, "max": 500, "step": 50, "help": "计算高低点的回看周期（50~500）"},
         },
         "compute": lambda df, p: _fibonacci(df, p["FIB_lookback"]),
     },
@@ -464,7 +464,7 @@ INDICATOR_SCHEMA = {
         "name": "成交量突破", "category": "成交量",
         "desc": "量>均量*倍数 + 收阳=做多",
         "params": {
-            "VOL_ma": {"label": "均量周期", "default": 20, "min": 5, "max": 50, "help": "成交量均线周期"},
+            "VOL_ma": {"label": "均量周期", "default": 20, "min": 10, "max": 100, "help": "成交量均线周期"},
             "VOL_mult": {"label": "放大倍数", "default": 1.5, "min": 1.0, "max": 5.0, "step": 0.1, "help": "量>均量*倍数视为放量"},
         },
         "compute": lambda df, p: _vol_breakout(df, p["VOL_ma"], p["VOL_mult"]),
