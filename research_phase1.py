@@ -92,6 +92,7 @@ RISK_CONFIG = {
     "_enable_pyramiding": False,  # 加仓开关
     "_pyr_add_pct": 0.5,       # 加仓比例 (初始保证金的比例, 引擎语义为小数)
     "_pyr_max": 3,             # 最大加仓次数
+    "_pyr_trail": False,       # 移动止损开关 (加仓后移动止损至均价)
     "_bull_alloc": 100.0,      # 百分比, 引擎 ÷100
     "_range_alloc": 50.0,
     "_bear_alloc": 30.0,
@@ -104,7 +105,7 @@ RISK_CONFIG = {
 # P0: AI 可搜索的仓位/加仓/市场状态参数 (引擎在 run() 时从 strategy.selected 读取)
 POSITION_PARAM_KEYS = (
     '_init_alloc_pct', '_enable_pyramiding', '_pyr_add_pct', '_pyr_max',
-    '_bull_alloc', '_range_alloc', '_bear_alloc',
+    '_pyr_trail', '_bull_alloc', '_range_alloc', '_bear_alloc',
 )
 
 

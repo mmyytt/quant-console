@@ -215,6 +215,15 @@ def _coerce(v, default):
     return v
 
 
+def _to_bool(v):
+    """宽松布尔转换 (兼容 LLM 输出 true/false/1/0/是/否/开/关)。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes", "on", "是", "开")
+    return bool(v)
+
+
 # ============================================================
 # 〇、假设指纹 + 策略相似度（同一思想不能换名字重复测试）
 # ============================================================
@@ -322,32 +331,108 @@ def _default_strategy_factory(selected):
 
 
 def _make_strategy(selected, strategy_factory):
-    selected.update(dict(RISK_CONFIG))   # fixed_risk + price_pct（漏掉则默认 margin_pct 会扭曲止损）
+    selected.update(dict(RISK_CONFIG))   # price_pct（漏掉则默认 margin_pct 会扭曲止损）
+    # 仓位管理联合研究需 fixed_capital：使 _init_alloc_pct/_enable_pyramiding/_pyr_add_pct/
+    # _pyr_max/_pyr_trail 真正参与开仓/加仓。fixed_risk 下 _init_alloc_pct 是死参数
+    # (仓位由风险预算倒推), 无法研究「初始仓位比例」这一仓位管理维度。
+    selected["_pos_mode"] = "fixed_capital"
     selected["_regime_filter"] = False   # 纯因子组合，隔离因子自身 alpha
     selected["_trade_mode"] = "双向"
     return (strategy_factory or _default_strategy_factory)(selected)
 
 
 def _position_params_from(spec):
-    """从 LLM 策略 spec (hyp/direction dict) 提取仓位/加仓/牛熊系数覆盖 (P0)。
+    """从 LLM 策略 spec (hyp/direction dict) 提取仓位/加仓/牛熊系数/移动止损覆盖 (P0/P2)。
 
     返回 None (未指定任何仓位参数) 或 dict (仅含 spec 中出现的 POSITION_PARAM_KEYS)。
     支持顶层键, 也支持嵌套 "position" 子对象 (更清晰的 LLM schema)。
+    兼容语义别名 move_stop → _pyr_trail (引擎真实 key)。
     """
     if not spec:
         return None
     out = {k: spec[k] for k in POSITION_PARAM_KEYS if k in spec and spec[k] is not None}
+    # 别名: move_stop (语义名) → _pyr_trail (引擎 key, 移动止损开关)
+    if "_pyr_trail" not in out and spec.get("move_stop") is not None:
+        out["_pyr_trail"] = _to_bool(spec["move_stop"])
     nested = spec.get("position")
     if isinstance(nested, dict):
         for k in POSITION_PARAM_KEYS:
             if k in nested and nested[k] is not None:
                 out[k] = nested[k]
+        if "_pyr_trail" not in out and nested.get("move_stop") is not None:
+            out["_pyr_trail"] = _to_bool(nested["move_stop"])
     return out or None
 
 
 # ============================================================
 # 二、回测执行（复用 research_phase1 已验证接口）
 # ============================================================
+def _position_metrics(result, leverage):
+    """从回测结果重建仓位管理指标 (纯函数, 不改引擎, 基于 trades + equity_curve 事件回放)。
+
+    返回: max_margin_usage(%), avg_margin_usage(%), max_effective_leverage(×),
+          avg_position_ratio(×), add_count, positions_with_add, total_trades。
+    口径: 保证金占用率 = 并发持仓保证金 / 权益; 有效杠杆 = 并发名义(保证金×杠杆) / 权益。
+    采样于每根权益曲线 bar (仅在持仓时), 得到时间加权 max/avg。
+    """
+    out = {"max_margin_usage": 0.0, "avg_margin_usage": 0.0,
+           "max_effective_leverage": 0.0, "avg_position_ratio": 0.0,
+           "add_count": 0, "positions_with_add": 0, "total_trades": 0}
+    trades = result.get("trades") or []
+    eq_curve = result.get("equity_curve") or []
+    if not trades:
+        return out
+    lev = float(leverage or 1.0)
+    initial = float(result.get("initial_capital") or 0.0)
+    adds = [int(t.get("pyramid_count") or 0) for t in trades]
+    out["add_count"] = sum(adds)
+    out["positions_with_add"] = sum(1 for a in adds if a > 0)
+    out["total_trades"] = len(trades)
+    try:
+        import pandas as pd
+        events = {}
+        for t in trades:
+            try:
+                m = float(t.get("margin") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            for ts, dm in ((t.get("open_time"), m), (t.get("close_time"), -m)):
+                try:
+                    k = pd.to_datetime(ts)
+                except Exception:
+                    continue
+                events.setdefault(k, 0.0)
+                events[k] += dm
+        eq = []
+        for e in eq_curve:
+            try:
+                eq.append((pd.to_datetime(e.get("timestamp")), float(e.get("equity") or initial)))
+            except Exception:
+                continue
+        eq.sort(key=lambda x: x[0])
+    except Exception:
+        return out
+    if not eq:
+        return out
+    sorted_ts = sorted(events)
+    ev_ptr, open_margin = 0, 0.0
+    mu_samples, el_samples = [], []
+    for eq_ts, equity in eq:
+        while ev_ptr < len(sorted_ts) and sorted_ts[ev_ptr] <= eq_ts:
+            open_margin += events[sorted_ts[ev_ptr]]
+            ev_ptr += 1
+        if open_margin > 1e-9 and equity > 0:
+            mu = open_margin / equity
+            mu_samples.append(mu)
+            el_samples.append(mu * lev)
+    if mu_samples:
+        out["max_margin_usage"] = round(max(mu_samples) * 100, 2)
+        out["avg_margin_usage"] = round(sum(mu_samples) / len(mu_samples) * 100, 2)
+        out["max_effective_leverage"] = round(max(el_samples), 2)
+        out["avg_position_ratio"] = round(sum(el_samples) / len(el_samples), 2)
+    return out
+
+
 def run_hypothesis_backtest(df, coin, indicator_names, param_overrides=None,
                             leverage=DEFAULT_LEVERAGE, tp_pct=DEFAULT_TP, sl_pct=DEFAULT_SL,
                             strategy_factory=None, position_params=None):
@@ -372,6 +457,7 @@ def run_hypothesis_backtest(df, coin, indicator_names, param_overrides=None,
         "trade_count": m.get("total_trades"),
         "max_consecutive_losses": m.get("max_consecutive_losses"),
         "leak_count": len(res.get("leak_warnings", [])),
+        "position_metrics": _position_metrics(res, leverage),
     }
 
     # OOS（样本外单次切分）
@@ -402,6 +488,81 @@ def run_hypothesis_backtest(df, coin, indicator_names, param_overrides=None,
     out["wf_windows"] = wf.get("total_windows", 0)
     out["wf_profitable"] = wf.get("profitable_windows", 0)
     return out
+
+
+def _quick_total_return(df, coin, indicator_names, param_overrides, leverage,
+                        tp_pct, sl_pct, position_params, strategy_factory=None):
+    """单次快速回测, 只取样本内 total_return (用于收益贡献分解, 跳过 OOS/WF/MC)。"""
+    base_selected = build_selected(indicator_names, param_overrides)
+    kw = make_engine_kwargs(leverage, tp_pct, sl_pct, **(position_params or {}))
+
+    def _fresh():
+        return _make_strategy(dict(base_selected), strategy_factory)
+
+    _, m = run_single(df, coin, _fresh(), kw)
+    return m.get("total_return")
+
+
+def contribution_analysis(df, coin, indicator_names, param_overrides, leverage,
+                          tp_pct, sl_pct, position_params, strategy_factory=None):
+    """收益贡献分解: 指标 / 仓位 / 杠杆 / 风险 四因子归因 (消融法)。
+
+    基准 R0 = 1x杠杆 + 中性仓位(30%不加仓) + 默认TP/SL → 纯指标 alpha。
+    R1 = 满杠杆(中性仓位) ; R2 = 满仓位(1x杠杆) ; R3 = 满杠杆满仓位满风险(实际策略)。
+    归因: 指标=R0, 杠杆=R1-R0, 仓位=R2-R0, 风险=R3-R1-R2+R0 (TP/SL + 交互残差)。
+    恒等式: R3 = 指标 + 杠杆 + 仓位 + 风险。
+    """
+    neutral_pos = {"_init_alloc_pct": 30.0, "_enable_pyramiding": False}
+    full_pos = position_params or {}
+    r0 = _quick_total_return(df, coin, indicator_names, param_overrides,
+                             1, DEFAULT_TP, DEFAULT_SL, neutral_pos, strategy_factory)
+    r1 = _quick_total_return(df, coin, indicator_names, param_overrides,
+                             leverage, DEFAULT_TP, DEFAULT_SL, neutral_pos, strategy_factory)
+    r2 = _quick_total_return(df, coin, indicator_names, param_overrides,
+                             1, DEFAULT_TP, DEFAULT_SL, full_pos, strategy_factory)
+    r3 = _quick_total_return(df, coin, indicator_names, param_overrides,
+                             leverage, tp_pct, sl_pct, full_pos, strategy_factory)
+    return {
+        "indicator": r0,
+        "leverage": (r1 - r0) if r1 is not None and r0 is not None else None,
+        "position": (r2 - r0) if r2 is not None and r0 is not None else None,
+        "risk": (r3 - r1 - r2 + r0)
+                if all(x is not None for x in (r3, r1, r2, r0)) else None,
+    }
+
+
+# 引擎从 strategy.selected 真实读取的仓位参数 key (POSITION_PARAM_KEYS 即引擎接线全集)
+_LIVE_POSITION_KEYS = set(POSITION_PARAM_KEYS)
+
+
+def validate_research_strategy(spec, indicators, position_params):
+    """Phase 5: 校验 AI 策略仓位参数完整性与真实性。返回 (ok, violations)。
+
+    (1) 仓位参数存在 (禁止只优化指标不优化仓位);
+    (4) 仓位参数 key 均进入引擎 (无未接线 key);
+    (5) 指标参数 key 均存在于 schema (无死参数, 否则被 build_selected 静默丢弃)。
+    保证金占用率 ≤ 权益 / 有效杠杆 由引擎护栏保证, 在回测后经 _position_metrics 复验。
+    """
+    violations = []
+    # (1) 仓位参数必须存在
+    if not position_params:
+        violations.append("未提供仓位参数（禁止只优化指标不优化仓位）")
+    else:
+        # (4) 无未接线 key: 所有仓位 key 必须 ∈ POSITION_PARAM_KEYS (引擎真实读取集)
+        unknown = [k for k in position_params if k not in _LIVE_POSITION_KEYS]
+        if unknown:
+            violations.append(f"仓位参数未进入引擎(死参数): {unknown}")
+    # (5) 指标参数无死参数
+    params = spec.get("params") or {}
+    for name, pv in params.items():
+        info = INDICATOR_REGISTRY.get(name)
+        if not info:
+            continue
+        schema_keys = set(info.get("params", {}))
+        dead = [pk for pk in (pv or {}) if pk not in schema_keys]
+        if dead:
+            violations.append(f"指标 {name} 死参数(不在 schema): {dead}")
+    return (len(violations) == 0, violations)
 
 
 # ============================================================
@@ -556,7 +717,7 @@ JSON 结构（字段名固定）：
   "leverage": 2,
   "tp_pct": 8.0,
   "sl_pct": 4.0,
-  "position": {{"_init_alloc_pct": 30, "_enable_pyramiding": false, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_bull_alloc": 100, "_range_alloc": 50, "_bear_alloc": 30}},
+  "position": {{"_init_alloc_pct": 30, "_enable_pyramiding": false, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_pyr_trail": false, "_bull_alloc": 100, "_range_alloc": 50, "_bear_alloc": 30}},
   "strategy_style": "趋势跟踪",
   "entry_rules": ["开仓条件1", "开仓条件2"],
   "exit_rules": ["平仓条件1", "平仓条件2"],
@@ -658,6 +819,28 @@ def build_report(hyp, indicators, params, m, verdict, sensitivity=None):
     L.append(f"- Sharpe {_f(m.get('sharpe'))} · 最大回撤 {_f(m.get('max_drawdown'))}% · 胜率 {_f(m.get('win_rate'))}%")
     L.append(f"- 交易次数 {m.get('trade_count') or 0} · 盈亏比 {_f(m.get('profit_factor'))}")
     L.append("")
+    L.append("## 仓位与杠杆真实性")
+    pm = m.get("position_metrics") or {}
+    if pm:
+        L.append(f"- 最大保证金占用率 {_f(pm.get('max_margin_usage'), 2, '%')} · 平均 {_f(pm.get('avg_margin_usage'), 2, '%')}")
+        L.append(f"- 最大有效杠杆 {_f(pm.get('max_effective_leverage'))}x · 平均持仓比例 {_f(pm.get('avg_position_ratio'))}x")
+        L.append(f"- 加仓 {pm.get('add_count') or 0} 次（{pm.get('positions_with_add') or 0} 笔触发）· 总交易 {pm.get('total_trades') or 0} 笔")
+        if (pm.get('max_margin_usage') or 0) > 100.0 + 1e-6:
+            L.append(f"- ⚠️ 最大保证金占用率超权益（{pm.get('max_margin_usage')}%）——收益可能来自超杠杆敞口")
+    else:
+        L.append("- 无仓位数据")
+    L.append("")
+    L.append("## 收益归因（指标/仓位/杠杆/风险）")
+    c = verdict.get("contribution")
+    if c:
+        L.append(f"- 指标贡献 {_f(c.get('indicator'), 1, '%')} · 仓位贡献 {_f(c.get('position'), 1, '%')} · "
+                 f"杠杆贡献 {_f(c.get('leverage'), 1, '%')} · 风险贡献 {_f(c.get('risk'), 1, '%')}")
+        ind = c.get('indicator'); tot = m.get('total_return')
+        if tot is not None and ind is not None and abs(tot) > 0.01 and ind < tot * 0.5:
+            L.append(f"- ⚠️ 指标贡献仅 {_f(ind, 1, '%')}，总收益 {_f(tot, 1, '%')} 主要来自杠杆/仓位放大——不可归功于指标")
+    else:
+        L.append("- 未评估（仅单假设流计算归因）")
+    L.append("")
     L.append("## 样本外表现（OOS）")
     L.append(f"- OOS 收益 {_f(m.get('oos_return'))}% · OOS Sharpe {_f(m.get('oos_sharpe'))} · OOS 回撤 {_f(m.get('oos_mdd'))}%")
     L.append("")
@@ -752,6 +935,17 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
     sl = hyp.get("sl_pct") if hyp.get("sl_pct") is not None else DEFAULT_SL
 
     pos_params = _position_params_from(hyp)
+    # Phase 5: 仓位参数完整性校验, 不满足则拒绝进入回测 (禁止只优化指标不优化仓位)
+    ok, violations = validate_research_strategy(hyp, indicators, pos_params)
+    if not ok:
+        return {
+            "passed": False, "failures": violations, "score": research_score({}),
+            "metrics": {}, "indicators": indicators, "params": params,
+            "coin": coin, "leverage": lev, "tp_pct": tp, "sl_pct": sl,
+            "fingerprint": fingerprint(indicators), "position_params": pos_params,
+            "rejected": True,
+            "report": "# 策略被拒（仓位参数不完整）\n\n" + "\n".join(f"- {v}" for v in violations),
+        }
     m = run_hypothesis_backtest(df, coin, indicators, params, lev, tp, sl, strategy_factory,
                                 position_params=pos_params)
     passed, failures = judge_pass(m)
@@ -761,8 +955,15 @@ def verify_hypothesis(hyp, df, coin, strategy_factory=None):
         "passed": passed, "failures": failures, "score": score,
         "metrics": m, "indicators": indicators, "params": params,
         "coin": coin, "leverage": lev, "tp_pct": tp, "sl_pct": sl,
-        "fingerprint": fp,
+        "fingerprint": fp, "position_params": pos_params,
     }
+
+    # Phase 4: 收益贡献分解 (指标/仓位/杠杆/风险) — 消融法, 仅单假设流计算
+    try:
+        verdict["contribution"] = contribution_analysis(
+            df, coin, indicators, params, lev, tp, sl, pos_params, strategy_factory)
+    except Exception:
+        verdict["contribution"] = None
 
     name = " + ".join(indicators[:3]) if indicators else "未命名策略"
     exp_id = db.add_experiment(
@@ -823,7 +1024,7 @@ JSON 结构（数组，每个元素字段名固定）：
     "leverage": 2,
     "tp_pct": 8.0,
     "sl_pct": 4.0,
-    "position": {{"_init_alloc_pct": 30, "_enable_pyramiding": false, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_bull_alloc": 100, "_range_alloc": 50, "_bear_alloc": 30}},
+    "position": {{"_init_alloc_pct": 30, "_enable_pyramiding": false, "_pyr_add_pct": 0.5, "_pyr_max": 2, "_pyr_trail": false, "_bull_alloc": 100, "_range_alloc": 50, "_bear_alloc": 30}},
     "strategy_style": "趋势跟踪",
     "entry_rules": ["开仓条件1"],
     "exit_rules": ["平仓条件1"],
@@ -1013,13 +1214,20 @@ def _previously_failed(fp):
 
 
 def _spec_to_hyp(spec, indicators, coin):
-    """把候选 spec 映射为 verify_hypothesis 需要的 hyp dict。"""
+    """把候选 spec 映射为 verify_hypothesis 需要的 hyp dict。
+
+    P2: 完整携带 position/risk 字段 (仓位/风控联合研究), 并从嵌套 risk 对象兜底读取 leverage/tp/sl。
+    """
+    risk = spec.get("risk") if isinstance(spec.get("risk"), dict) else {}
     return {
         "related_indicators": indicators,
         "parameters": spec.get("params") or {},
-        "leverage": spec.get("leverage"),
-        "tp_pct": spec.get("tp_pct"),
-        "sl_pct": spec.get("sl_pct"),
+        "leverage": spec.get("leverage") if spec.get("leverage") is not None else risk.get("leverage"),
+        "tp_pct": spec.get("tp_pct") if spec.get("tp_pct") is not None else risk.get("tp_pct"),
+        "sl_pct": spec.get("sl_pct") if spec.get("sl_pct") is not None else risk.get("sl_pct"),
+        "position": spec.get("position"),
+        "risk": risk,
+        "move_stop": spec.get("move_stop"),
         "timeframe": spec.get("timeframe"),
         "asset": spec.get("asset") or coin,
         "failure_environment": spec.get("failure_environment"),
@@ -1055,6 +1263,13 @@ def run_strategy_search(candidates, df, coin, progress=None):
         if _previously_failed(fp):
             results.append({"spec": spec, "indicators": indicators, "skipped": True,
                             "reason": "历史失败（相同指标组合）"})
+            continue
+        # Phase 5: 仓位参数校验 (禁止只优化指标不优化仓位; 无死参数)
+        pos_params = _position_params_from(spec)
+        ok, violations = validate_research_strategy(spec, indicators, pos_params)
+        if not ok:
+            results.append({"spec": spec, "indicators": indicators, "skipped": True,
+                            "reason": "仓位参数校验失败：" + "；".join(violations)})
             continue
         hyp = _spec_to_hyp(spec, indicators, coin)
         try:
@@ -1237,6 +1452,11 @@ def expand_refinement_grid(direction, combo, step_ratio=0.06):
 def _run_experiment(spec, indicators, combo, coin, df):
     """跑单个实验（回测→判定→评分→落库→报告→失败记忆），返回结果 dict。"""
     pos_params = combo.get("position_params") or _position_params_from(spec)
+    # Phase 5: 仓位参数校验 (禁止只优化指标不优化仓位; 无死参数)
+    ok, violations = validate_research_strategy(spec, indicators, pos_params)
+    if not ok:
+        return {"spec": spec, "indicators": indicators, "combo": combo,
+                "skipped": True, "reason": "仓位参数校验失败：" + "；".join(violations)}
     fp = full_fingerprint(indicators, combo["param_overrides"],
                           combo["leverage"], combo["tp_pct"], combo["sl_pct"],
                           position_params=pos_params)

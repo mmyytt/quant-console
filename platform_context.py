@@ -56,6 +56,7 @@ def build_platform_context() -> dict:
                 "初始建仓比例 _init_alloc_pct (0~100%)",
                 "加仓开关 _enable_pyramiding (true/false)",
                 "加仓比例 _pyr_add_pct (0.1~1.0)", "最大加仓次数 _pyr_max (1~5)",
+                "移动止损 _pyr_trail (true/false, 加仓后移动止损至均价)",
                 "牛/震/熊仓位系数 _bull_alloc/_range_alloc/_bear_alloc (0~100%)",
             ],
         },

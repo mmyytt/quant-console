@@ -75,6 +75,39 @@ SWEEP_DIMENSIONS = {
         'category': 'indicator',
         'indicator_name': '成交量突破',
     },
+    # ── 仓位管理维度 (Position) ──
+    # 引擎从 strategy.selected 读取同一批 key (_init_alloc_pct/_enable_pyramiding/
+    # _pyr_add_pct/_pyr_max/_pyr_trail), 与 AI 研究仓位参数共用同一条接线, 无引擎改动。
+    'init_alloc': {
+        'label': '初始仓位比例',
+        'values': [30, 50, 70, 100],
+        'format': lambda v: f'{v}%',
+        'category': 'position',
+    },
+    'pyramiding': {
+        'label': '金字塔加仓',
+        'values': [False, True],
+        'format': lambda v: ('开' if v else '关'),
+        'category': 'position',
+    },
+    'pyr_add_pct': {
+        'label': '加仓比例',
+        'values': [0.25, 0.5, 0.75],
+        'format': lambda v: f'{int(v * 100)}%',
+        'category': 'position',
+    },
+    'pyr_max': {
+        'label': '最大加仓次数',
+        'values': [1, 2, 3],
+        'format': lambda v: f'{v}次',
+        'category': 'position',
+    },
+    'move_stop': {
+        'label': '移动止损',
+        'values': [False, True],
+        'format': lambda v: ('开' if v else '关'),
+        'category': 'position',
+    },
 }
 
 
@@ -90,8 +123,13 @@ _DIM_I18N_KEY = {
 
 
 def _dim_label(dim: str) -> str:
-    """获取维度的翻译后标签"""
-    return t(_DIM_I18N_KEY.get(dim, dim))
+    """获取维度的翻译后标签 (i18n 优先, 回退维度 label 字段)。"""
+    if dim in _DIM_I18N_KEY:
+        return t(_DIM_I18N_KEY[dim])
+    defn = SWEEP_DIMENSIONS.get(dim)
+    if defn and defn.get('label'):
+        return defn['label']
+    return dim
 
 
 # ================================================================
@@ -244,6 +282,30 @@ class RobustnessLab:
                 sel[name] = {'enabled': True, 'params': {}}
             sel[name]['enabled'] = True
             sel[name]['params']['VOL_ma'] = value
+
+        elif dimension == 'init_alloc':
+            # fixed_capital 使 _init_alloc_pct 直接决定保证金 (fixed_risk 下为死参数)
+            sel['_pos_mode'] = 'fixed_capital'
+            sel['_init_alloc_pct'] = value
+
+        elif dimension == 'pyramiding':
+            sel['_pos_mode'] = 'fixed_capital'
+            sel['_enable_pyramiding'] = value
+
+        elif dimension == 'pyr_add_pct':
+            sel['_pos_mode'] = 'fixed_capital'
+            sel['_enable_pyramiding'] = True
+            sel['_pyr_add_pct'] = value
+
+        elif dimension == 'pyr_max':
+            sel['_pos_mode'] = 'fixed_capital'
+            sel['_enable_pyramiding'] = True
+            sel['_pyr_max'] = value
+
+        elif dimension == 'move_stop':
+            sel['_pos_mode'] = 'fixed_capital'
+            sel['_enable_pyramiding'] = True
+            sel['_pyr_trail'] = value
 
         return cfg
 

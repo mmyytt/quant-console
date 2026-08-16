@@ -65,7 +65,8 @@ def main():
                 "asset": "ETH", "timeframe": "1h", "leverage": 2,
                 "tp_pct": 8.0, "sl_pct": 4.0, "expected_logic": "测试",
                 "expected_market_condition": "趋势", "failure_environment": "震荡",
-                "risk_assumption": "回撤<20%"}
+                "risk_assumption": "回撤<20%",
+                "position": {"_init_alloc_pct": 30, "_enable_pyramiding": False}}
 
     candidates = [_cand("A", [n1]), _cand("B", [n2]), _cand("C", ["不存在的指标XYZ"])]
 
@@ -140,7 +141,8 @@ def main():
             {"hypothesis": "方向A", "indicators": ["EMA 双均线"], "params": {},
              "asset": "ETH", "timeframe": "1h", "leverage": 2, "tp_pct": 8.0, "sl_pct": 4.0,
              "expected_logic": "趋势", "expected_market_condition": "趋势",
-             "failure_environment": "震荡", "risk_assumption": "回撤<20%"},
+             "failure_environment": "震荡", "risk_assumption": "回撤<20%",
+             "position": {"_init_alloc_pct": 30, "_enable_pyramiding": False}},
             {"hypothesis": "坏方向", "indicators": ["不存在的指标XYZ"], "params": {}},
         ]
         results = rl.run_parameter_search(directions, df, "ETH")
