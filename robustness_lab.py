@@ -18,10 +18,16 @@ from engine_core import (
     MultiFactorRegime, StrategyBase,
 )
 
+from indicator_schema import INDICATOR_SCHEMA
+
 
 # ================================================================
 # 参数维度定义
 # ================================================================
+
+# Fibonacci 扫描值从 Schema 派生 (统一数据源, 消除硬编码上限)
+_FIB_PV = INDICATOR_SCHEMA['fibonacci']['params']['FIB_lookback']
+_FIB_SWEEP = list(range(_FIB_PV['min'], _FIB_PV['max'] + 1, _FIB_PV['step']))
 
 SWEEP_DIMENSIONS = {
     'leverage': {
@@ -50,7 +56,7 @@ SWEEP_DIMENSIONS = {
     },
     'fibonacci': {
         'label': 'Fibonacci 回看',
-        'values': [50, 100, 150, 200, 250, 300, 350, 400, 450, 500],
+        'values': _FIB_SWEEP,
         'format': lambda v: t('bars_unit', n=v),
         'category': 'indicator',
         'indicator_name': '斐波那契回调',
