@@ -1784,6 +1784,68 @@ def _grid_values(schema_key, n=5):
     return out
 
 
+def schema_search_directions(ctx, mode="standard"):
+    """从 INDICATOR_SCHEMA 生成策略方向池（Python 确定性生成，不依赖 LLM 输出复杂 JSON）。
+
+    ctx: parse_research_context 的结果（symbol/timeframe/strategy_style/...）。
+    按 strategy_style 优先排列相关类别，每个主类取前 2 个代表性指标（K线形态信号过稀、
+    单独成方向交易次数不足，不纳入），保证方向覆盖不同类别。
+    返回 direction 列表（hypothesis/indicators/params/risk/position），可直接喂 build_search_space。
+    """
+    style = (ctx or {}).get("strategy_style") or "综合"
+    _STYLE_CATEGORY = {
+        "趋势跟踪": ["趋势类", "通道/支撑"],
+        "均值回归": ["摆动类", "通道/支撑"],
+        "动量": ["摆动类", "成交量"],
+        "突破": ["通道/支撑", "成交量", "趋势类"],
+        "日内": ["摆动类", "成交量"],
+        "高频": ["摆动类", "成交量"],
+        "综合": ["趋势类", "摆动类", "通道/支撑", "成交量"],
+    }
+    _MAIN = ["趋势类", "摆动类", "通道/支撑", "成交量"]
+    prefer = _STYLE_CATEGORY.get(style, _STYLE_CATEGORY["综合"])
+    by_cat = {}
+    for name, info in INDICATOR_REGISTRY.items():
+        if info.get("category") in _MAIN:
+            by_cat.setdefault(info["category"], []).append(name)
+    order = [c for c in prefer if c in by_cat] + [c for c in _MAIN if c not in prefer]
+    directions = []
+    for cat in order:
+        for name in by_cat[cat][:2]:
+            directions.append({
+                "hypothesis": f"{cat}·{name} 策略方向",
+                "indicators": [name],
+                "params": {},
+                "risk": {"leverage": DEFAULT_LEVERAGE, "tp_pct": DEFAULT_TP, "sl_pct": DEFAULT_SL},
+                "position": {"_init_alloc_pct": 50.0, "_enable_pyramiding": True,
+                             "_pyr_add_pct": 0.5, "_pyr_max": 2, "_pyr_trail": False},
+                "strategy_style": style,
+                "asset": (ctx or {}).get("symbol", "ETH"),
+                "timeframe": (ctx or {}).get("timeframe", "4h"),
+            })
+    return directions
+
+
+def _is_extreme_params(param_overrides):
+    """参数极端检测：任一被覆盖指标参数落在 schema min/max 边界上（疑似边界单调过拟合）。"""
+    for name, kv in (param_overrides or {}).items():
+        key = _NAME_TO_KEY.get(name)
+        s = INDICATOR_SCHEMA.get(key) if key else None
+        if not s:
+            continue
+        for pk, v in kv.items():
+            pv = s["params"].get(pk)
+            if not pv or "min" not in pv or "max" not in pv:
+                continue
+            try:
+                val = float(v)
+            except (TypeError, ValueError):
+                continue
+            if abs(val - pv["min"]) < 1e-9 or abs(val - pv["max"]) < 1e-9:
+                return True
+    return False
+
+
 # 风险/仓位搜索网格（值均在引擎允许范围，禁止硬编码超范围/不存在参数）
 _LEVERAGE_GRID = [1, 2, 3, 5]
 _TP_SL_GRID = [(8.0, 3.0), (12.0, 5.0), (16.0, 5.0), (20.0, 8.0), (12.0, 8.0)]
@@ -1893,18 +1955,24 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     """
     pool = build_search_space(directions, mode)
     total = len(pool)
-    elim = {"收益不足": 0, "交易次数过少": 0, "回撤过大": 0, "样本外失败": 0,
-            "过拟合": 0, "风险过高": 0, "回测异常": 0}
+    elim = {"收益不足": 0, "交易次数过少": 0, "回撤过大": 0, "Sharpe不足": 0, "参数极端": 0,
+            "样本外失败": 0, "过拟合": 0, "风险过高": 0, "回测异常": 0}
     stage_counts = {"pool": total}
 
     def _notify(i, n, label):
         if progress:
             progress(i, n, label)
 
-    # --- 阶段1: 快速筛选 ---
+    # 阶段0：候选生成（由 Python schema 确定性展开，非 LLM JSON）
+    _notify(0, max(total, 1), f"候选生成完成（{total} 个候选）")
+
+    # --- 阶段1: 快速回测（收益/Sharpe/回撤/交易次数/参数极端 硬过滤） ---
     s1 = []
     for i, c in enumerate(pool):
-        _notify(i, total, f"阶段1 快速回测 {c['label']}")
+        _notify(i, total, f"快速回测 {c['label']}（通过{len(s1)} 淘汰{sum(elim.values())}）")
+        if _is_extreme_params(c["param_overrides"]):
+            elim["参数极端"] += 1
+            continue
         try:
             m = _quick_backtest(df, coin, c["indicators"], c["param_overrides"],
                                 c["leverage"], c["tp_pct"], c["sl_pct"], c["position_params"])
@@ -1916,6 +1984,9 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
         mdd = m.get("max_drawdown") if m.get("max_drawdown") is not None else 100.0
         if tr <= 0:
             elim["收益不足"] += 1
+            continue
+        if (m.get("sharpe") or 0.0) <= CRITERIA["sharpe_min"]:
+            elim["Sharpe不足"] += 1
             continue
         if trades < CRITERIA["trades_min"]:
             elim["交易次数过少"] += 1
@@ -1930,7 +2001,7 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
     s2 = []
     for i, item in enumerate(s1):
         c = item["combo"]
-        _notify(i, len(s1), f"阶段2 样本外验证 {c['label']}")
+        _notify(i, len(s1), f"样本外验证 {c['label']}（通过{len(s2)}）")
         try:
             m = run_hypothesis_backtest(df, coin, c["indicators"], c["param_overrides"],
                                         c["leverage"], c["tp_pct"], c["sl_pct"],
@@ -1960,11 +2031,12 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
         item["score"] = research_score(item["full"])
     s2.sort(key=lambda x: x["score"]["total"], reverse=True)
 
-    # --- 阶段3: 鲁棒性（邻域精搜索，仅对 top 方向） ---
+    # --- 阶段3: 风险过滤·鲁棒性（邻域精搜索，仅对 top 方向） ---
     refine_top = min(5, len(s2))
     s3 = []
-    for item in s2[:refine_top]:
+    for i, item in enumerate(s2[:refine_top]):
         c = item["combo"]
+        _notify(i, refine_top, f"风险过滤·鲁棒性 {c['label']}")
         neighbors = expand_refinement_grid({"indicators": c["indicators"]}, {
             "param_overrides": c["param_overrides"], "leverage": c["leverage"],
             "tp_pct": c["tp_pct"], "sl_pct": c["sl_pct"],
@@ -1988,10 +2060,11 @@ def run_research_pipeline(directions, df, coin, mode="standard", plan=None, prog
         s3.append(item)
     stage_counts["stage3_pass"] = len(s3)
 
-    # --- 阶段4: 风险审查 ---
+    # --- 阶段4: 风险过滤·风险审查 ---
     top = []
-    for item in s3:
+    for i, item in enumerate(s3):
         full = item["full"]
+        _notify(i, len(s3), f"风险过滤·风险审查（通过{len(top)}）")
         pm = full.get("position_metrics") or {}
         risky = False
         if (pm.get("max_margin_usage") or 0) > 100.0 + 1e-6:
@@ -2068,11 +2141,11 @@ def build_research_report(result, coin):
         L.append(f"- 参数：{_params_text(t['param_overrides'])}")
         L.append(f"- 仓位：{_pos_label(t['position_params'])}")
         L.append(f"- 杠杆 {t['leverage']}x · TP {t['tp_pct']}% · SL {t['sl_pct']}%")
-        L.append(f"- 样本内年化 {_f(m.get('annual_return'))}% · 样本外 {_f(m.get('oos_return'))}%")
+        L.append(f"- 收益：总收益 {_f(m.get('total_return'))}% · 年化 {_f(m.get('annual_return'))}% · 样本外 {_f(m.get('oos_return'))}%")
         L.append(f"- 最大回撤 {_f(m.get('max_drawdown'))}% · Sharpe {_f(m.get('sharpe'))} · 评级 {s['grade']}")
         pm = m.get("position_metrics") or {}
         if pm:
-            L.append(f"- 最大保证金占用率 {_f(pm.get('max_margin_usage'), 2, '%')} · 加仓 {pm.get('add_count') or 0} 次")
+            L.append(f"- 风险评价：最大保证金占用 {_f(pm.get('max_margin_usage'), 2, '%')} · 最大有效杠杆 {_f(pm.get('max_effective_leverage'), 2, 'x')} · 加仓 {pm.get('add_count') or 0} 次")
         if t["robustness"].get("neighbors_tested"):
             L.append(f"- 鲁棒性：{t['robustness']['profitable_neighbors']}/{t['robustness']['neighbors_tested']} 邻域盈利"
                      + ("（⚠️ 单点有效，疑似过拟合）" if t["robustness"]["overfit"] else ""))

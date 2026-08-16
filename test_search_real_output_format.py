@@ -94,14 +94,18 @@ def main():
     finally:
         rl.run_hypothesis_backtest = _orig_bt
 
-    # 4) app.py 统一入口调用链：rl_run → intent_prompt/parse_intent → 探索(参数搜索) / 验证(单次验证)
+    # 4) app.py 统一入口调用链：rl_run → intent_prompt/parse_intent → 探索(Python schema 方向→四阶段漏斗) / 验证(单次验证)
     src = open("app.py", encoding="utf-8").read()
-    block = src[src.index('key="rl_run"'):src.index('rl_search_results')]
+    block = src[src.index('key="rl_run"'):src.index('rl_lab_result')]
     assert "rl.intent_prompt" in block, "统一入口应先调用 intent_prompt 判断意图"
     assert "rl.parse_intent" in block, "统一入口应调用 parse_intent 路由"
-    assert "rl.search_prompt" in block and "rl.run_parameter_search" in block, "探索分支应走参数空间搜索"
+    # 探索分支：LLM 只解析研究意图，候选方向由 Python schema 生成，四阶段漏斗执行（不依赖 LLM 输出复杂 JSON）
+    assert "rl.schema_search_directions" in block and "rl.run_research_pipeline" in block, \
+        "探索分支应走 schema_search_directions→run_research_pipeline"
+    assert "rl.search_prompt" not in block and "rl.run_parameter_search" not in block, \
+        "探索分支不应再依赖 LLM 复杂 JSON 搜索（search_prompt/run_parameter_search）"
     assert "rl.hypothesis_prompt" in block and "rl.verify_hypothesis" in block, "验证分支应走单次验证"
-    print("[OK] 4. app.py 统一入口：rl_run → intent_prompt/parse_intent → 探索(search_prompt→run_parameter_search) / 验证(hypothesis_prompt→verify_hypothesis)")
+    print("[OK] 4. app.py 统一入口：rl_run → intent_prompt/parse_intent → 探索(schema_search_directions→run_research_pipeline) / 验证(hypothesis_prompt→verify_hypothesis)")
 
     print("\nALL SEARCH REAL-OUTPUT-FORMAT TESTS PASSED")
 

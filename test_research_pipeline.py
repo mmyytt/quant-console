@@ -125,7 +125,8 @@ def main():
                                       progress=lambda i, n, label: progress_log.append((i, n, label)))
     assert "report" in result and result["report"], "应产出研究报告"
     assert result["stage_counts"]["pool"] >= 20, f"候选池大小异常: {result['stage_counts']}"
-    for k in ("收益不足", "交易次数过少", "回撤过大", "样本外失败", "过拟合", "风险过高", "回测异常"):
+    for k in ("收益不足", "交易次数过少", "回撤过大", "Sharpe不足", "参数极端",
+              "样本外失败", "过拟合", "风险过高", "回测异常"):
         assert k in result["elimination"], f"淘汰统计缺少 {k}"
     assert isinstance(result["top"], list), "top 应为列表"
     assert len(progress_log) >= result["stage_counts"]["pool"], "progress 回调应覆盖阶段1所有候选"

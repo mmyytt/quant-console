@@ -157,26 +157,24 @@ def main():
         db.DB_PATH = os.path.join(tmp3, "smoke3.db")
         db.init_db()
 
-        _mock_verdict = {
-            "passed": True, "failures": [],
-            "score": {"total": 82, "grade": "B", "return": 12.0, "sharpe": 1.5, "mdd": 9.0,
-                      "oos": 6.0, "param_stability": 60, "monte_carlo": 70},
-            "metrics": {"sharpe": 1.5, "total_return": 12.0, "max_drawdown": 9.0,
-                        "win_rate": 0.52, "trade_count": 35, "oos_return": 6.0,
-                        "wf_profit_ratio": 55.0, "mc_p5": 1.0},
-            "indicators": ["EMA 双均线"], "params": {}, "coin": "ETH",
-            "leverage": 3, "tp_pct": 5.0, "sl_pct": 2.0,
-            "fingerprint": "", "experiment_id": 1, "failure_level": None, "report": "smoke stub",
-        }
-        _mock_result = {"spec": {"hypothesis": "EMA 趋势"}, "indicators": ["EMA 双均线"],
-                        "combo": {"label": "基准参数", "param_overrides": {}, "leverage": 3,
-                                  "tp_pct": 5.0, "sl_pct": 2.0},
-                        "verdict": _mock_verdict, "skipped": False}
+        _mock_top = {"hypothesis": "趋势·EMA 策略方向", "indicators": ["EMA 双均线"],
+                     "param_overrides": {}, "leverage": 3, "tp_pct": 5.0, "sl_pct": 2.0,
+                     "position_params": {"_init_alloc_pct": 50.0, "_enable_pyramiding": True},
+                     "metrics": {"sharpe": 1.5, "total_return": 12.0, "annual_return": 8.0,
+                                 "max_drawdown": 9.0, "win_rate": 0.52, "trade_count": 35,
+                                 "oos_return": 6.0, "wf_profit_ratio": 55.0, "mc_p5": 1.0,
+                                 "position_metrics": {"max_margin_usage": 60.0, "add_count": 1}},
+                     "score": {"total": 82, "grade": "B"},
+                     "robustness": {"neighbors_tested": 0, "profitable_neighbors": 0, "overfit": False},
+                     "label": "基准", "spec": {"hypothesis": "趋势·EMA 策略方向"}}
+        _mock_result = {"report": "# 量化研究实验报告\n\n- 最终候选 TOP", "top": [_mock_top],
+                        "stage_counts": {"pool": 38, "final": 1},
+                        "elimination": {"收益不足": 0, "Sharpe不足": 0, "参数极端": 0}}
 
         at.session_state["logged_in"] = True
         at.session_state["active_tab"] = "AI 对话舱"
-        at.session_state["rl_search_results"] = [_mock_result]
-        at.session_state["rl_search_meta"] = {"goal": "测试", "asset": "ETH", "tf": "4h"}
+        at.session_state["rl_lab_result"] = _mock_result
+        at.session_state["rl_lab_meta"] = {"goal": "测试", "asset": "ETH", "tf": "4h"}
         at.run()
         assert not list(getattr(at, "exception", []) or []), "AI 研究中心渲染异常"
 

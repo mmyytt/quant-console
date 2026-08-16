@@ -824,12 +824,15 @@ if "AI" in st.session_state.active_tab:
             df.index = df.index.tz_localize(None)
         return df.sort_index()
 
-    # ========== 统一入口：研究目标（AI 自动判断 探索 / 验证，用户无需理解内部流程） ==========
+    # ========== 唯一入口：研究目标 + 搜索规模 + 启动研究（AI 自动判断 探索 / 验证） ==========
     st.divider()
-    gcol, rbtn = st.columns([4, 1])
+    gcol, mcol, rbtn = st.columns([3, 1, 1])
     with gcol:
         research_goal = st.text_input(t("research_goal_label"), key="rl_goal",
                                       placeholder=t("research_goal_placeholder"))
+    with mcol:
+        research_scale = st.selectbox(t("rl_lab_mode_label"), ["standard", "deep"], key="rl_scale",
+            format_func=lambda x: t("rl_lab_mode_standard") if x == "standard" else t("rl_lab_mode_deep"))
     with rbtn:
         run_clicked = st.button(t("rl_run_btn"), key="rl_run", disabled=not ai_key)
 
@@ -911,180 +914,18 @@ if "AI" in st.session_state.active_tab:
                                 st.error(f"{t('rl_verify_error')}: {e}")
         elif intent == "explore":
             st.caption(t("rl_intent_explore"))
-            # 探索新策略：生成候选方向 → 连续参数空间搜索 → 回测 → 排名
-            with st.spinner(t("rl_search_generating")):
-                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
-                        {"role": "user", "content": rl.search_prompt(_goal)}]
-                res = call_unified_api(msgs, ai_key, ai_model_name, "")
-            if not res.get("success"):
-                st.error(t("rl_search_no_candidates"))
-                st.caption(t("rl_search_diag"))
-                st.code((res.get("content") or "")[:500] or "（LLM 调用失败，无返回内容）", language=None)
-            else:
-                candidates, diag = rl.parse_hypothesis_array_diag(res.get("content", ""))
-                if not candidates:
-                    # 解析失败：给出完整诊断（数组扫描 + 选择原因），而非只显示「无有效候选」
-                    st.error(t("rl_search_no_candidates"))
-                    with st.expander(t("rl_search_diag"), expanded=True):
-                        st.caption(f"LLM 原始返回长度：{diag['raw_len']} 字符")
-                        st.caption(f"发现数组：{len(diag.get('arrays') or [])} 个")
-                        for a in (diag.get("arrays") or []):
-                            mark = " ← 已选择" if a["index"] == diag.get("selected") else ""
-                            perr = f"（{a['error']}）" if a.get("error") else ""
-                            st.caption(f"  index{a['index']}: {a['type']} length={a['length']}{mark}{perr}")
-                        if diag.get("selected_reason"):
-                            st.caption(f"选择原因：{diag['selected_reason']}")
-                        st.caption(f"JSON 提取结果：{diag['extracted'] or '（未提取到）'}")
-                        st.caption(f"解析失败原因：{diag['error']}")
-                        st.code(diag["preview"] or "（空）", language=None)
-                else:
-                    st.success(t("rl_search_found", n=len(candidates)))
-                    ctx = rl.parse_research_context(_goal)
-                    asset = _norm_asset(ctx.get("symbol"))
-                    tf = _norm_tf(ctx.get("timeframe"))
-                    df = _load_research_df(asset, tf)
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-
-                    def _progress(i, n, label):
-                        progress_bar.progress((i + 1) / n)
-                        status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
-
-                    results = rl.run_parameter_search(candidates, df, asset, progress=_progress)
-                    progress_bar.progress(1.0)
-                    status_text.caption(t("rl_search_done"))
-                    st.session_state.rl_search_results = results
-                    st.session_state.rl_search_meta = {"goal": _goal,
-                                                       "asset": asset, "tf": tf,
-                                                       "max_drawdown": ctx.get("max_drawdown"),
-                                                       "target_return": ctx.get("target_return")}
-                    st.rerun()
-
-    if "rl_search_results" in st.session_state:
-        results = st.session_state.rl_search_results
-        meta = st.session_state.rl_search_meta
-        st.divider()
-        st.subheader(t("rl_search_rank"))
-        st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
-        if st.session_state.pop("rl_copy_note", None):
-            st.success(t("rl_copy_ok"))
-        directions = rl.summarize_directions(results)
-        tested = [r for r in results if not r.get("skipped")]
-        skipped = [r for r in results if r.get("skipped")]
-        st.caption(t("rl_search_meta", n=len(tested), d=len(directions)))
-        st.caption(t("rl_search_hint_rank"))
-        if directions:
-            rows = []
-            for idx, d in enumerate(directions, 1):
-                v = d["best"]["verdict"]
-                m = v["metrics"]
-                sc = v["score"]
-                combo = d["best"].get("combo") or {}
-                rows.append({
-                    "排名": idx,
-                    "研究方向": d["hypothesis"] or "-",
-                    "指标组合": " + ".join(v["indicators"][:3]) or "-",
-                    "最佳参数": combo.get("label") or "基准",
-                    "测试参数数": d["test_count"],
-                    "杠杆": v.get("leverage"),
-                    "TP%": v.get("tp_pct"),
-                    "SL%": v.get("sl_pct"),
-                    "收益%": round(m.get("total_return") or 0, 1),
-                    "Sharpe": round(m.get("sharpe") or 0, 2),
-                    "回撤%": round(m.get("max_drawdown") or 0, 1),
-                    "OOS%": round(m.get("oos_return") or 0, 1),
-                    "WF%": round(m.get("wf_profit_ratio") or 0, 1),
-                    "MC5%": round(m.get("mc_p5") or 0, 1),
-                    "评分": sc["total"],
-                    "等级": sc["grade"],
-                    "判定": "✅" if v["passed"] else "❌",
-                    "失败分类": v.get("failure_level") or "-",
-                })
-            st.dataframe(pd.DataFrame(rows))
-            for idx, d in enumerate(directions, 1):
-                v = d["best"]["verdict"]
-                combo = d["best"].get("combo") or {}
-                spec = d["best"].get("spec") or {}
-                inds = " + ".join(v["indicators"]) or "-"
-                title = f"#{idx} {v['score']['grade']} · {d['hypothesis'] or inds} · 评分 {v['score']['total']}"
-                with st.expander(title):
-                    # 排名理由 + 待人工复核状态（AI 发现策略不直接入生产库）
-                    st.info(f"**{t('rl_why_top')}**：{d['rationale']}")
-                    st.caption(f"🟡 {t('rl_status_pending_review')}")
-                    st.markdown(
-                        f"**{t('rl_direction')}**：{d['hypothesis'] or '-'}  \n"
-                        f"**{t('rl_indicators')}**：{inds}  \n"
-                        f"**{t('rl_params')}**：{_params_text(v.get('params'))}  \n"
-                        f"**{t('rl_risk')}**：杠杆 {v.get('leverage')}x · TP {v.get('tp_pct')}% · SL {v.get('sl_pct')}%  \n"
-                        f"**{t('rl_entry')}**：{'、'.join(spec.get('entry_rules') or []) or '固定单仓（引擎默认）'}  \n"
-                        f"**{t('rl_exit')}**：{'、'.join(spec.get('exit_rules') or []) or '固定单仓（引擎默认）'}  \n"
-                        f"**{t('rl_test_count')}**：{d['test_count']}"
-                    )
-                    if st.button(t("rl_copy_backtest"), key=f"rl_copy_{idx}"):
-                        # 复制完整参数到主回测页：指标立即写入，coin/杠杆/TP/SL 走 pending 预填（下次渲染前消费）
-                        if v.get("indicators"):
-                            st.session_state.selected_indicators = rl.build_selected(v["indicators"])
-                        st.session_state["rl_pending_backtest"] = {
-                            "coin": meta["asset"], "timeframe": meta["tf"],
-                            "leverage": v.get("leverage"), "tp_pct": v.get("tp_pct"), "sl_pct": v.get("sl_pct"),
-                        }
-                        st.session_state.rl_copy_note = True
-                        st.rerun()
-                    st.markdown(v["report"])
-        if skipped:
-            st.markdown(f"**{t('rl_search_skipped')}**")
-            for r in skipped:
-                inds = "、".join(r.get("indicators") or []) or "-"
-                combo = (r.get("combo") or {}).get("label")
-                tail = f"（{combo}）" if combo else ""
-                st.caption(f"- {r['spec'].get('hypothesis') or '候选'}（指标: {inds}）{tail}：{r.get('reason')}")
-
-    # ============================================================
-    # Phase 6: 自动量化研究实验室（研究计划 → 候选池 → 四阶段漏斗 → 报告）
-    # ============================================================
-    st.divider()
-    st.subheader(t("rl_lab_title"))
-    st.caption(t("rl_lab_hint"))
-    _lc1, _lc2 = st.columns([3, 1])
-    _lab_goal = _lc1.text_input(t("research_goal_label"), key="rl_lab_goal",
-                                placeholder=t("rl_task_placeholder"))
-    _lab_mode = _lc2.selectbox(t("rl_lab_mode_label"), ["standard", "deep"], key="rl_lab_mode",
-        format_func=lambda x: t("rl_lab_mode_standard") if x == "standard" else t("rl_lab_mode_deep"))
-    _lab_clicked = st.button(t("rl_lab_btn"), key="rl_lab_btn", disabled=not ai_key)
-
-    if _lab_clicked and _lab_goal.strip():
-        _goal = _lab_goal.strip()
-        plan, directions, diag = {}, [], None
-        last_content = ""
-        # 严格 schema + 解析失败自动修正重试一次（不再把内部解析乱码抛给用户）
-        for attempt in (1, 2):
-            if attempt > 1:
-                st.caption(t("rl_lab_retry_note", n=attempt))
-            with st.spinner(t("rl_lab_running")):
-                prompt = rl.strict_search_prompt(_goal, mode=_lab_mode)
-                if attempt > 1:
-                    prompt += ("\n\n【修正要求】你上一条输出无法被解析为 JSON。请严格只输出一个 JSON 对象，"
-                               "字段名与结构完全照抄示例，不要输出 JSON 以外的任何文字或代码围栏。")
-                msgs = [{"role": "system", "content": t("rl_sys_prompt")},
-                        {"role": "user", "content": prompt}]
-                res = call_unified_api(msgs, ai_key, ai_model_name, "")
-            if not res.get("success"):
-                last_content = ""
-                break
-            last_content = res.get("content", "")
-            plan, directions, diag = rl.parse_research_plan(last_content)
-            if directions:
-                break
-        if not directions:
-            st.error(t("rl_lab_parse_fail") if last_content else t("rl_lab_no_direction"))
-            with st.expander(t("rl_lab_diag"), expanded=False):
-                st.caption(f"解析错误：{diag.get('error') if diag else '-'}")
-                st.code(last_content[:800] or "（LLM 无返回）", language=None)
-        else:
+            # 探索新策略：LLM 只解析研究意图 → Python schema 生成候选方向 → 四阶段漏斗
             ctx = rl.parse_research_context(_goal)
             asset = _norm_asset(ctx.get("symbol"))
             tf = _norm_tf(ctx.get("timeframe"))
             df = _load_research_df(asset, tf)
+            directions = rl.schema_search_directions(ctx, mode=research_scale)
+            plan = {
+                "goal": _goal,
+                "universe": f"{asset}·{tf}",
+                "strategy_classes": [ctx.get("strategy_style") or "综合"],
+                "search_scale": t("rl_lab_mode_standard") if research_scale != "deep" else t("rl_lab_mode_deep"),
+            }
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -1092,7 +933,7 @@ if "AI" in st.session_state.active_tab:
                 progress_bar.progress((i + 1) / n)
                 status_text.caption(f"🔬 {t('rl_search_running')} {i + 1}/{n}：{label}")
 
-            result = rl.run_research_pipeline(directions, df, asset, mode=_lab_mode,
+            result = rl.run_research_pipeline(directions, df, asset, mode=research_scale,
                                               plan=plan, progress=_progress)
             progress_bar.progress(1.0)
             status_text.caption(t("rl_lab_report_title"))
@@ -1106,10 +947,10 @@ if "AI" in st.session_state.active_tab:
         st.divider()
         st.subheader(t("rl_lab_report_title"))
         st.caption(f"{meta['goal']} · {meta['asset']} · {meta['tf']}")
-        if st.session_state.pop("rl_lab_copy_note", None):
+        if st.session_state.pop("rl_copy_note", None):
             st.success(t("rl_copy_ok"))
         st.markdown(result["report"])
-        # 人工验证入口：逐条载入 指标参数/仓位参数/杠杆/TP-SL 到主回测页
+        # 人工确认入口：逐条载入 指标参数/仓位参数/杠杆/TP-SL 到主回测页
         for idx, tp in enumerate(result["top"], 1):
             m = tp["metrics"]
             sc = tp["score"]
@@ -1121,7 +962,7 @@ if "AI" in st.session_state.active_tab:
                     f"**仓位**：{rl._pos_label(tp['position_params'])}  \n"
                     f"**杠杆** {tp['leverage']}x · TP {tp['tp_pct']}% · SL {tp['sl_pct']}%"
                 )
-                if st.button(t("rl_copy_backtest"), key=f"rl_lab_copy_{idx}"):
+                if st.button(t("rl_copy_backtest"), key=f"rl_copy_{idx}"):
                     st.session_state.selected_indicators = rl.build_selected(
                         tp["indicators"], tp["param_overrides"])
                     st.session_state["rl_pending_backtest"] = {
@@ -1129,7 +970,7 @@ if "AI" in st.session_state.active_tab:
                         "leverage": tp["leverage"], "tp_pct": tp["tp_pct"], "sl_pct": tp["sl_pct"],
                         "position": tp["position_params"],
                     }
-                    st.session_state.rl_lab_copy_note = True
+                    st.session_state.rl_copy_note = True
                     st.rerun()
 
     # --- 验证结果 + 加入策略库 ---
